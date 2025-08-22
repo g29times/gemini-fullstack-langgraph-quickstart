@@ -39,6 +39,32 @@ class Configuration(BaseModel):
         metadata={"description": "The maximum number of research loops to perform."},
     )
 
+    # Intent router & direct lookup settings
+    enable_intent_router: bool = Field(
+        default=True,
+        metadata={
+            "description": "Enable the intent classification router that can short-circuit to direct lookup."
+        },
+    )
+    intent_confidence_threshold: float = Field(
+        default=0.7,
+        metadata={
+            "description": "Minimum confidence required to take the direct lookup path (0-1)."
+        },
+    )
+    direct_lookup_temperature: float = Field(
+        default=0.2,
+        metadata={
+            "description": "Temperature used for direct lookup synthesis with the search tool."
+        },
+    )
+    direct_lookup_top_k: int = Field(
+        default=1,
+        metadata={
+            "description": "Number of top results to consider in direct lookup (if tool supports)."
+        },
+    )
+
     @classmethod
     def from_runnable_config(
         cls, config: Optional[RunnableConfig] = None

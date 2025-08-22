@@ -19,6 +19,10 @@ class OverallState(TypedDict):
     max_research_loops: int
     research_loop_count: int
     reasoning_model: str
+    # Fields for intent routing (optional and set early in the flow)
+    intent: dict | None
+    official_site_candidates: list[str]
+    official_domain: str | None
 
 
 class ReflectionState(TypedDict):

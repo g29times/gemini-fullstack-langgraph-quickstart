@@ -1,6 +1,13 @@
+# print("[agent.graph] module loaded")
 import os
+import logging
 
-from agent.tools_and_schemas import SearchQueryList, Reflection
+from agent.tools_and_schemas import (
+    SearchQueryList,
+    Reflection,
+    Intent,
+    OfficialSiteCandidates,
+)
 from dotenv import load_dotenv
 from langchain_core.messages import AIMessage
 from langgraph.types import Send
@@ -8,6 +15,7 @@ from langgraph.graph import StateGraph
 from langgraph.graph import START, END
 from langchain_core.runnables import RunnableConfig
 from google.genai import Client
+from urllib.parse import urlparse
 
 from agent.state import (
     OverallState,
@@ -22,6 +30,9 @@ from agent.prompts import (
     web_searcher_instructions,
     reflection_instructions,
     answer_instructions,
+    intent_classifier_instructions,
+    official_site_finder_instructions,
+    direct_lookup_instructions,
 )
 from langchain_google_genai import ChatGoogleGenerativeAI
 from agent.utils import (
@@ -32,6 +43,14 @@ from agent.utils import (
 )
 
 load_dotenv()
+
+# Debug logger for intent router; enable with env DEBUG_INTENT_ROUTER=1
+logger = logging.getLogger(__name__)
+if not logger.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s"))
+    logger.addHandler(_handler)
+logger.setLevel(logging.DEBUG if os.getenv("DEBUG_INTENT_ROUTER") else logging.INFO)
 
 if os.getenv("GEMINI_API_KEY") is None:
     raise ValueError("GEMINI_API_KEY is not set")
@@ -116,22 +135,297 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
         model=configurable.query_generator_model,
         contents=formatted_prompt,
         config={
-            "tools": [{"google_search": {}}],
+            # Enable both URL context and Google Search so the model can search then open URLs directly
+            "tools": [{"url_context": {}}, {"google_search": {}}],
             "temperature": 0,
         },
     )
-    # resolve the urls to short urls for saving tokens and time
-    resolved_urls = resolve_urls(
-        response.candidates[0].grounding_metadata.grounding_chunks, state["id"]
-    )
-    # Gets the citations and adds them to the generated text
-    citations = get_citations(response, resolved_urls)
-    modified_text = insert_citation_markers(response.text, citations)
-    sources_gathered = [item for citation in citations for item in citation["segments"]]
+    # Prefer Google Search grounding when available; otherwise fallback to URL context metadata
+    try:
+        chunks = response.candidates[0].grounding_metadata.grounding_chunks
+    except Exception:
+        chunks = []
+
+    if chunks:
+        # resolve the urls to short urls for saving tokens and time
+        resolved_urls = resolve_urls(chunks, state["id"])
+        # Gets the citations and adds them to the generated text
+        citations = get_citations(response, resolved_urls)
+        modified_text = insert_citation_markers(response.text, citations)
+        sources_gathered = [item for citation in citations for item in citation["segments"]]
+        try:
+            grounded_list = [seg.get("value") for citation in citations for seg in citation["segments"]]
+            logger.info("[grounding] urls => %s", grounded_list)
+        except Exception:
+            pass
+    else:
+        # URL context fallback: gather retrieved URLs and append citations at the end of text
+        urls = []
+        try:
+            url_meta = response.candidates[0].url_context_metadata.url_metadata
+            for m in url_meta:
+                status = getattr(m, "url_retrieval_status", None)
+                if not status or "SUCCESS" in status:
+                    urls.append(getattr(m, "retrieved_url", None))
+            urls = [u for u in urls if u]
+        except Exception:
+            urls = []
+        logger.info("[url_context] retrieved URLs => %s", urls)
+
+        # Build short-url map
+        prefix = "https://vertexaisearch.cloud.google.com/id/"
+        resolved_urls = {u: f"{prefix}{state['id']}-{i}" for i, u in enumerate(urls)}
+
+        # Build one citation that appends markers at the end
+        text_len = len(response.text or "")
+        segments = []
+        for u in urls:
+            try:
+                netloc = urlparse(u).netloc or u
+                label = netloc.split(":")[0]
+            except Exception:
+                label = u
+            segments.append({"label": label, "short_url": resolved_urls[u], "value": u})
+        citations = []
+        if segments:
+            citations.append({"start_index": text_len, "end_index": text_len, "segments": segments})
+        modified_text = insert_citation_markers(response.text, citations)
+        sources_gathered = segments
 
     return {
         "sources_gathered": sources_gathered,
         "search_query": [state["search_query"]],
+        "web_research_result": [modified_text],
+    }
+
+
+def classify_intent(state: OverallState, config: RunnableConfig) -> OverallState:
+    """Classify whether the user's request is a simple direct lookup or requires research.
+
+    Stores structured intent info into state["intent"]. If router disabled, set a RESEARCH intent.
+    """
+    # print("[method] classify_intent")
+    configurable = Configuration.from_runnable_config(config)
+    if not configurable.enable_intent_router:
+        return {
+            "intent": {
+                "is_simple_lookup": False,
+                "intent_label": "RESEARCH",
+                "confidence": 0.0,
+                "entity": None,
+                "attribute": None,
+            }
+        }
+    # print("[router] enable_intent_router")
+    llm = ChatGoogleGenerativeAI(
+        model=configurable.query_generator_model,
+        temperature=0.2,
+        max_retries=2,
+        api_key=os.getenv("GEMINI_API_KEY"),
+    )
+    print("[param] llm => %s", llm)
+
+    structured_llm = llm.with_structured_output(Intent)
+
+    topic = get_research_topic(state["messages"])
+    print("[param] topic => %s", topic)
+
+    prompt = intent_classifier_instructions.format(research_topic=topic)
+    print("[intent] prompt => %s", prompt)
+
+    try:
+        result = structured_llm.invoke(prompt)
+        # Persist plain dict
+        try:
+            payload = result.model_dump()
+        except Exception:
+            # Fallback in case provider returns a dict-like
+            payload = dict(result)
+        # Normalize fields if missing
+        payload.setdefault("intent_label", "DIRECT_LOOKUP" if payload.get("is_simple_lookup") else "RESEARCH")
+        payload.setdefault("confidence", 0.0)
+        payload.setdefault("entity", None)
+        payload.setdefault("attribute", None)
+        # logger.debug("[intent] structured payload => %s", payload)
+        return {"intent": payload}
+    except Exception:
+        # Log the exception and attempt to fetch raw text for debugging
+        logger.exception("[intent] structured parsing failed; falling back to RESEARCH")
+        try:
+            raw_msg = llm.invoke(prompt)
+            raw_text = getattr(raw_msg, "content", str(raw_msg))
+            logger.debug("[intent] raw LLM text => %s", raw_text)
+        except Exception:
+            logger.exception("[intent] fetching raw LLM text also failed")
+        # Robust fallback: default to research path on any parsing/validation error
+        return {
+            "intent": {
+                "is_simple_lookup": False,
+                "intent_label": "RESEARCH",
+                "confidence": 0.0,
+                "entity": None,
+                "attribute": None,
+            }
+        }
+
+
+def _extract_domains_from_chunks(chunks) -> list[str]:
+    domains = []
+    seen = set()
+    for ch in chunks or []:
+        try:
+            uri = ch.web.uri
+            netloc = urlparse(uri).netloc.lower()
+            if netloc.startswith("www."):
+                netloc = netloc[4:]
+            if netloc and netloc not in seen:
+                seen.add(netloc)
+                domains.append(netloc)
+        except Exception:
+            continue
+    return domains
+
+
+def _pick_official_domain(entity: str | None, domains: list[str]) -> tuple[str | None, float]:
+    if not domains:
+        return None, 0.0
+    if not entity:
+        return domains[0], 0.4
+    norm_entity = "".join([c.lower() for c in entity if c.isalnum()])
+    best = None
+    for d in domains:
+        d_wo_tld = d.split(":")[0]
+        d_main = d_wo_tld.split(".")[-2] if "." in d_wo_tld else d_wo_tld
+        if norm_entity and norm_entity in d_main.replace("-", "").lower():
+            best = d
+            break
+    if best:
+        return best, 0.9
+    return domains[0], 0.6
+
+
+def find_official_site(state: OverallState, config: RunnableConfig) -> OverallState:
+    """Use Google Search tool to discover official domain candidates for the entity."""
+    configurable = Configuration.from_runnable_config(config)
+    if not configurable.enable_intent_router:
+        return {"official_site_candidates": [], "official_domain": None}
+
+    entity = None
+    if state.get("intent"):
+        entity = state["intent"].get("entity")
+    if not entity:
+        return {"official_site_candidates": [], "official_domain": None}
+
+    prompt = official_site_finder_instructions.format(entity=entity)
+    response = genai_client.models.generate_content(
+        model=configurable.query_generator_model,
+        contents=prompt,
+        config={"tools": [{"google_search": {}}], "temperature": 0},
+    )
+    chunks = response.candidates[0].grounding_metadata.grounding_chunks
+    domains = _extract_domains_from_chunks(chunks)
+    chosen, conf = _pick_official_domain(entity, domains)
+    logger.info("[official_site] entity=%s candidates=%s chosen=%s conf=%.2f", entity, domains, chosen, conf)
+    return {
+        "official_site_candidates": domains,
+        "official_domain": chosen,
+    }
+
+
+def route_after_classify(state: OverallState, config: RunnableConfig):
+    """Route to direct lookup if high-confidence and official domain is found; else generate_query."""
+    configurable = Configuration.from_runnable_config(config)
+    if not configurable.enable_intent_router:
+        return "generate_query"
+
+    intent = state.get("intent") or {}
+    label = intent.get("intent_label")
+    conf = float(intent.get("confidence") or 0.0)
+    domain = state.get("official_domain")
+    logger.info("[router] label=%s conf=%.2f threshold=%.2f official_domain=%s", label, conf, configurable.intent_confidence_threshold, domain)
+
+    if (
+        label == "DIRECT_LOOKUP"
+        and conf >= configurable.intent_confidence_threshold
+        and domain
+    ):
+        return "direct_lookup"
+    return "generate_query"
+
+
+def direct_lookup(state: OverallState, config: RunnableConfig) -> OverallState:
+    """Perform site-restricted lookup on the discovered official domain and synthesize an answer snippet.
+
+    Returns fields compatible with downstream finalize_answer: web_research_result, sources_gathered.
+    """
+    configurable = Configuration.from_runnable_config(config)
+    domain = state.get("official_domain")
+    topic = get_research_topic(state["messages"])
+    entity = (state.get("intent") or {}).get("entity")
+    attribute = (state.get("intent") or {}).get("attribute")
+    formatted_prompt = direct_lookup_instructions.format(
+        official_domain=domain,
+        current_date=get_current_date(),
+        research_topic=topic,
+        entity=entity,
+        attribute=attribute,
+    )
+    response = genai_client.models.generate_content(
+        model=configurable.query_generator_model,
+        contents=formatted_prompt,
+        config={
+            # Allow direct page retrieval under the official domain
+            "tools": [{"url_context": {}}, {"google_search": {}}],
+            "temperature": configurable.direct_lookup_temperature,
+        },
+    )
+    try:
+        chunks = response.candidates[0].grounding_metadata.grounding_chunks
+    except Exception:
+        chunks = []
+
+    if chunks:
+        resolved_urls = resolve_urls(chunks, 0)
+        citations = get_citations(response, resolved_urls)
+        modified_text = insert_citation_markers(response.text, citations)
+        sources_gathered = [item for citation in citations for item in citation["segments"]]
+        try:
+            grounded_list = [seg.get("value") for citation in citations for seg in citation["segments"]]
+            logger.info("[direct_lookup][grounding] urls => %s", grounded_list)
+        except Exception:
+            pass
+    else:
+        urls = []
+        try:
+            url_meta = response.candidates[0].url_context_metadata.url_metadata
+            for m in url_meta:
+                status = getattr(m, "url_retrieval_status", None)
+                if not status or "SUCCESS" in status:
+                    urls.append(getattr(m, "retrieved_url", None))
+            urls = [u for u in urls if u]
+        except Exception:
+            urls = []
+        logger.info("[direct_lookup][url_context] retrieved URLs => %s", urls)
+
+        prefix = "https://vertexaisearch.cloud.google.com/id/"
+        resolved_urls = {u: f"{prefix}0-{i}" for i, u in enumerate(urls)}
+
+        text_len = len(response.text or "")
+        segments = []
+        for u in urls:
+            try:
+                netloc = urlparse(u).netloc or u
+                label = netloc.split(":")[0]
+            except Exception:
+                label = u
+            segments.append({"label": label, "short_url": resolved_urls[u], "value": u})
+        citations = []
+        if segments:
+            citations.append({"start_index": text_len, "end_index": text_len, "segments": segments})
+        modified_text = insert_citation_markers(response.text, citations)
+        sources_gathered = segments
+    return {
+        "sources_gathered": sources_gathered,
         "web_research_result": [modified_text],
     }
 
@@ -268,26 +562,33 @@ def finalize_answer(state: OverallState, config: RunnableConfig):
 # Create our Agent Graph
 builder = StateGraph(OverallState, config_schema=Configuration)
 
-# Define the nodes we will cycle between
+# Define the nodes
+builder.add_node("classify_intent", classify_intent)
+builder.add_node("find_official_site", find_official_site)
+builder.add_node("direct_lookup", direct_lookup)
 builder.add_node("generate_query", generate_query)
 builder.add_node("web_research", web_research)
 builder.add_node("reflection", reflection)
 builder.add_node("finalize_answer", finalize_answer)
 
-# Set the entrypoint as `generate_query`
-# This means that this node is the first one called
-builder.add_edge(START, "generate_query")
-# Add conditional edge to continue with search queries in a parallel branch
+# Entry and routing
+builder.add_edge(START, "classify_intent")
+builder.add_edge("classify_intent", "find_official_site")
+builder.add_conditional_edges(
+    "find_official_site", route_after_classify, ["direct_lookup", "generate_query"]
+)
+
+# If not routed to direct lookup, continue with standard flow
 builder.add_conditional_edges(
     "generate_query", continue_to_web_research, ["web_research"]
 )
-# Reflect on the web research
 builder.add_edge("web_research", "reflection")
-# Evaluate the research
 builder.add_conditional_edges(
     "reflection", evaluate_research, ["web_research", "finalize_answer"]
 )
-# Finalize the answer
+
+# Direct lookup goes straight to finalize
+builder.add_edge("direct_lookup", "finalize_answer")
 builder.add_edge("finalize_answer", END)
 
 graph = builder.compile(name="pro-search-agent")
