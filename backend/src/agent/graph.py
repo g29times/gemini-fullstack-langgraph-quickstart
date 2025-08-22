@@ -89,6 +89,7 @@ def generate_query(state: OverallState, config: RunnableConfig) -> QueryGenerati
     # 若反射阶段已产出跟进查询，则优先使用这些查询，保证顺序循环闭环
     follow_ups = state.get("follow_up_queries") or []
     if isinstance(follow_ups, list) and len(follow_ups) > 0:
+        logger.info("[routing] using %d follow-up queries from reflection", len(follow_ups))
         return {"search_query": follow_ups}
 
     # check for custom initial search query count
@@ -123,6 +124,10 @@ def generate_query(state: OverallState, config: RunnableConfig) -> QueryGenerati
     )
     # Generate the search queries
     result = structured_llm.invoke(formatted_prompt)
+    try:
+        logger.info("[query] generated %d initial queries", len(getattr(result, "query", []) or []))
+    except Exception:
+        pass
     return {"search_query": result.query}
 
 
@@ -611,6 +616,18 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
         api_key=os.getenv("GEMINI_API_KEY"),
     )
     result = llm.with_structured_output(Reflection).invoke(formatted_prompt)
+
+    # logging for tuning
+    try:
+        logger.info(
+            "[reflection] loop=%d is_sufficient=%s followups=%d gap='%.80s'",
+            state["research_loop_count"],
+            bool(getattr(result, "is_sufficient", False)),
+            len(getattr(result, "follow_up_queries", []) or []),
+            (getattr(result, "knowledge_gap", "") or "")
+        )
+    except Exception:
+        pass
 
     return {
         "is_sufficient": result.is_sufficient,
@@ -1134,9 +1151,17 @@ def route_after_plan_approval(state: OverallState):
     
     # Check if we need to regenerate the plan (modification requested)
     if state.get("human_modifications") and not state.get("plan_approved", False):
+        try:
+            logger.info("[router][plan_approval] human_modifications present -> regenerate plan")
+        except Exception:
+            pass
         return "generate_research_plan"
     
     # Default: stay in approval waiting state (this should trigger interrupt again)
+    try:
+        logger.info("[router][plan_approval] waiting for human approval -> stay")
+    except Exception:
+        pass
     return "wait_for_human_approval"
 
 
@@ -1163,11 +1188,27 @@ def route_after_reflection(state: OverallState, config: RunnableConfig):
         else configurable.max_research_loops
     )
     
-    # Check if reflection data exists
+    # Check reflection outcome
     is_sufficient = state.get("is_sufficient", False)
     research_loop_count = state.get("research_loop_count", 0)
-    
-    if is_sufficient or research_loop_count >= max_research_loops:
+    followups = state.get("follow_up_queries") or []
+
+    # Early stop if no actionable follow-ups
+    should_finalize = bool(is_sufficient or research_loop_count >= max_research_loops or len(followups) == 0)
+
+    try:
+        logger.info(
+            "[router][after_reflection] loop=%d/%d sufficient=%s followups=%d => %s",
+            research_loop_count,
+            max_research_loops,
+            bool(is_sufficient),
+            len(followups),
+            "finalize" if should_finalize else "continue"
+        )
+    except Exception:
+        pass
+
+    if should_finalize:
         # Move to finalization thinking stage before generating final report
         return "thinking_finalization_stage"
     else:

@@ -64,19 +64,20 @@ simple_fact_answer_instructions = """你将直接回答一个无需联网检索�
 reflection_instructions = """You are an expert research assistant analyzing summaries about "{research_topic}".
 
 Instructions:
-- Identify knowledge gaps or areas that need deeper exploration and generate a follow-up query. (1 or multiple).
-- If provided summaries are sufficient to answer the user's question, don't generate a follow-up query.
-- If there is a knowledge gap, generate a follow-up query that would help expand your understanding.
+- Identify knowledge gaps or areas that need deeper exploration and propose follow-up query only when it adds clear incremental value.
+- Be conservative: if the provided summaries are already sufficient OR any plausible follow-up would likely be redundant/low-signal, set is_sufficient to true and return no follow-up queries.
+- If there is a real knowledge gap, generate at most 1 follow-up query that would most improve the answer.
 - Focus on technical details, implementation specifics, or emerging trends that weren't fully covered.
 
 Requirements:
 - Ensure the follow-up query is self-contained and includes necessary context for web search.
+- Do not rephrase the original question; make the query precise, unique, and directly actionable.
 
 Output Format:
 - Format your response as a JSON object with these exact keys:
    - "is_sufficient": true or false
    - "knowledge_gap": Describe what information is missing or needs clarification
-   - "follow_up_queries": Write a specific question to address this gap
+   - "follow_up_queries": A list with 0 or 1 highly specific question(s) to address this gap
 
 Example:
 ```json
@@ -87,7 +88,7 @@ Example:
 }}
 ```
 
-Reflect carefully on the Summaries to identify knowledge gaps and produce a follow-up query. Then, produce your output following this JSON format:
+Reflect carefully on the Summaries to identify knowledge gaps and produce a follow-up query only if it provides high marginal value. Then, produce your output following this JSON format:
 
 Summaries:
 {summaries}
