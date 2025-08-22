@@ -21,7 +21,7 @@ FE->>BE: submit({messages, initial_search_query_count, max_research_loops, reaso
 note over BE,FE: LangGraph 启动流式运行，前端通过 useStream 订阅事件
 
 BE->>GEN: 触发查询生成节点
-GEN->>GEM: prompt(query_writer_instructions, model=gemini-2.0-flash)
+GEN->>GEM: prompt(query_writer_instructions, model=gemini-2.5-flash-lite)
 GEM-->>GEN: SearchQueryList（多条初始查询）
 GEN-->>BE: 返回 search_query[n]
 

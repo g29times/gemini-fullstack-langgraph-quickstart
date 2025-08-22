@@ -127,7 +127,7 @@ def web_research(state: WebSearchState, config: RunnableConfig):
 
 ```python
 class Configuration(BaseModel):
-    query_generator_model: str = "gemini-2.0-flash"    # 快速查询生成
+    query_generator_model: str = "gemini-2.5-flash-lite"    # 快速查询生成
     reflection_model: str = "gemini-2.5-flash"         # 中等推理能力
     answer_model: str = "gemini-2.5-pro"               # 深度答案合成
 ```
@@ -208,7 +208,7 @@ class AdaptiveConfiguration(Configuration):
         if query_complexity > 0.8:
             return "gemini-2.5-pro"
         else:
-            return "gemini-2.0-flash"
+            return "gemini-2.5-flash-lite"
 ```
 
 ### **3. 增加评估和监控**

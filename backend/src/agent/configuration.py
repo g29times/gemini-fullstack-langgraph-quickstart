@@ -9,7 +9,7 @@ class Configuration(BaseModel):
     """The configuration for the agent."""
 
     query_generator_model: str = Field(
-        default="gemini-2.0-flash",
+        default="gemini-2.5-flash-lite",
         metadata={
             "description": "The name of the language model to use for the agent's query generation."
         },
@@ -32,6 +32,20 @@ class Configuration(BaseModel):
     number_of_initial_queries: int = Field(
         default=3,
         metadata={"description": "The number of initial search queries to generate."},
+    )
+
+    # Parallel research controls
+    enable_parallel_research: bool = Field(
+        default=True,
+        metadata={
+            "description": "Whether to dispatch multiple web_research tasks in parallel per loop."
+        },
+    )
+    max_parallel_queries: int = Field(
+        default=3,
+        metadata={
+            "description": "Maximum number of queries to dispatch in parallel when enabled."
+        },
     )
 
     max_research_loops: int = Field(

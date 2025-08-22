@@ -26,7 +26,7 @@ export const InputForm: React.FC<InputFormProps> = ({
   hasHistory,
 }) => {
   const [internalInputValue, setInternalInputValue] = useState("");
-  const [effort, setEffort] = useState("medium");
+  const [effort, setEffort] = useState("low");
   const [model, setModel] = useState(DEFAULT_REASONING_MODEL);
 
   const handleInternalSubmit = (e?: React.FormEvent) => {

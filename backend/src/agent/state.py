@@ -23,6 +23,20 @@ class OverallState(TypedDict):
     intent: dict | None
     official_site_candidates: list[str]
     official_domain: str | None
+    # HITL (Human-in-the-Loop) fields
+    research_plan: dict | None  # Generated research plan for human review
+    plan_approved: bool  # Whether human approved the plan
+    human_modifications: str | None  # Human modifications to the plan
+    # Structured thinking process fields
+    thinking_stage: str  # "startup", "middle", "finalization"
+    insights_gathered: Annotated[list, operator.add]  # Insights from each stage
+    # Enhanced report structure
+    report_sections: dict | None  # Structured report with chapters and sections
+    thinking_process: Annotated[list, operator.add]  # Detailed thinking steps
+    # Follow-up conversation support
+    is_follow_up: bool  # Whether this is a follow-up question
+    previous_report: str | None  # Previous research report for context
+    conversation_history: Annotated[list, operator.add]  # Full conversation context
 
 
 class ReflectionState(TypedDict):
@@ -31,6 +45,13 @@ class ReflectionState(TypedDict):
     follow_up_queries: Annotated[list, operator.add]
     research_loop_count: int
     number_of_ran_queries: int
+
+
+class FollowUpDetection(TypedDict):
+    is_follow_up: bool
+    confidence: float
+    reasoning: str
+    previous_context_relevant: bool
 
 
 class Query(TypedDict):
@@ -47,6 +68,24 @@ class WebSearchState(TypedDict):
     id: str
 
 
+class ResearchPlanState(TypedDict):
+    """State for research plan generation and HITL approval"""
+    research_objectives: list[str]
+    planned_queries: list[str]
+    research_methodology: str
+    expected_outcomes: str
+    estimated_time: str
+
+
+class ThinkingStageState(TypedDict):
+    """State for structured thinking process"""
+    stage_name: str  # "概述分解规划", "洞察梳理深化", "洞察梳理总结"
+    stage_objectives: list[str]
+    stage_insights: list[str]
+    next_actions: list[str]
+
+
 @dataclass(kw_only=True)
 class SearchStateOutput:
     running_summary: str = field(default=None)  # Final report
+    structured_report: dict = field(default=None)  # Enhanced report structure

@@ -4,6 +4,9 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { ProcessedEvent } from "@/components/ActivityTimeline";
 import { WelcomeScreen } from "@/components/WelcomeScreen";
 import { ChatMessagesView } from "@/components/ChatMessagesView";
+import { ResearchPlanApproval } from "@/components/ResearchPlanApproval";
+import { CollapsedResearchPlan } from "@/components/CollapsedResearchPlan";
+import { EnhancedReport } from "@/components/EnhancedReport";
 import { Button } from "@/components/ui/button";
 
 export default function App() {
@@ -16,6 +19,13 @@ export default function App() {
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const hasFinalizeEventOccurredRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
+  const [researchPlan, setResearchPlan] = useState<any>(null);
+  const [showHitlApproval, setShowHitlApproval] = useState(false);
+  const [approvedPlan, setApprovedPlan] = useState<any>(null);
+  const [showPlanCollapsed, setShowPlanCollapsed] = useState(false);
+  const [finalReport, setFinalReport] = useState<any>(null);
+  const [thinkingProcess, setThinkingProcess] = useState<any[]>([]);
+  const [sourcesGathered, setSourcesGathered] = useState<any[]>([]);
   const thread = useStream<{
     messages: Message[];
     initial_search_query_count: number;
@@ -29,9 +39,94 @@ export default function App() {
     messagesKey: "messages",
     onUpdateEvent: (event: any) => {
       let processedEvent: ProcessedEvent | null = null;
-      if (event.generate_query) {
+      
+      // Debug: log all events to understand the structure
+      console.log("Event received:", event);
+      
+      // Handle interrupt events (HITL) - check for __interrupt__ property
+      // Only show HITL if we haven't already approved a plan and don't have a final report
+      if ((event.__interrupt__ || event.hasOwnProperty('__interrupt__')) && 
+          !finalReport && !showPlanCollapsed) {
+        setShowHitlApproval(true);
         processedEvent = {
-          title: "Generating Search Queries",
+          title: "等待人工确认",
+          data: "研究计划已生成，等待您的确认...",
+        };
+      }
+      // Enhanced DeepResearch flow events
+      else if (event.detect_follow_up) {
+        processedEvent = {
+          title: "检测追问",
+          data: "分析是否为追问对话",
+        };
+      } else if (event.classify_intent) {
+        const intent = event.classify_intent?.intent;
+        processedEvent = {
+          title: "意图分类",
+          data: `分类结果: ${intent?.intent_label || "未知"} (置信度: ${intent?.confidence || 0})`,
+        };
+      } else if (event.generate_research_plan) {
+        const plan = event.generate_research_plan?.research_plan;
+        setResearchPlan(plan);
+        processedEvent = {
+          title: "生成研究计划",
+          data: `研究目标: ${plan?.research_objectives?.length || 0}个，计划查询: ${plan?.planned_queries?.length || 0}个`,
+        };
+      } else if (event.wait_for_human_approval && !finalReport && !showPlanCollapsed) {
+        setShowHitlApproval(true);
+        processedEvent = {
+          title: "等待人工确认",
+          data: "研究计划已生成，等待您的确认...",
+        };
+      } else if (event.thinking_startup_stage) {
+        processedEvent = {
+          title: "起步思考阶段",
+          data: "概述分解规划中...",
+        };
+      } else if (event.thinking_middle_stage) {
+        processedEvent = {
+          title: "中间思考阶段", 
+          data: "洞察梳理深化中...",
+        };
+      } else if (event.thinking_finalization_stage) {
+        processedEvent = {
+          title: "收尾思考阶段",
+          data: "洞察梳理总结中...",
+        };
+      } else if (event.generate_enhanced_report) {
+        const report = event.generate_enhanced_report;
+        setFinalReport(report);
+        if (report.thinking_process) {
+          setThinkingProcess(report.thinking_process);
+        }
+        if (report.sources_gathered) {
+          setSourcesGathered(report.sources_gathered);
+        }
+        processedEvent = {
+          title: "生成增强报告",
+          data: "生成结构化研究报告...",
+        };
+        hasFinalizeEventOccurredRef.current = true;
+      } else if (event.find_official_site) {
+        processedEvent = {
+          title: "查找官方站点",
+          data: "搜索官方域名中...",
+        };
+      } else if (event.direct_lookup) {
+        processedEvent = {
+          title: "直接查询",
+          data: "在官方站点执行查询...",
+        };
+      } else if (event.handle_follow_up) {
+        processedEvent = {
+          title: "处理追问",
+          data: "基于之前报告回答追问...",
+        };
+      }
+      // Original flow events (fallback)
+      else if (event.generate_query) {
+        processedEvent = {
+          title: "生成搜索查询",
           data: event.generate_query?.search_query?.join(", ") || "",
         };
       } else if (event.web_research) {
@@ -42,23 +137,24 @@ export default function App() {
         ];
         const exampleLabels = uniqueLabels.slice(0, 3).join(", ");
         processedEvent = {
-          title: "Web Research",
-          data: `Gathered ${numSources} sources. Related to: ${
+          title: "网络研究",
+          data: `收集了 ${numSources} 个来源。相关: ${
             exampleLabels || "N/A"
-          }.`,
+          }`,
         };
       } else if (event.reflection) {
         processedEvent = {
-          title: "Reflection",
-          data: "Analysing Web Research Results",
+          title: "反思分析",
+          data: "分析网络研究结果",
         };
       } else if (event.finalize_answer) {
         processedEvent = {
-          title: "Finalizing Answer",
-          data: "Composing and presenting the final answer.",
+          title: "最终答案",
+          data: "组织并呈现最终答案",
         };
         hasFinalizeEventOccurredRef.current = true;
       }
+      
       if (processedEvent) {
         setProcessedEventsTimeline((prevEvents) => [
           ...prevEvents,
@@ -149,6 +245,61 @@ export default function App() {
     window.location.reload();
   }, [thread]);
 
+  const handleApproveResearchPlan = useCallback((modifications?: string) => {
+    // 保存已批准的计划用于折叠显示
+    setApprovedPlan(researchPlan);
+    setShowPlanCollapsed(true);
+    setShowHitlApproval(false);
+    setResearchPlan(null);
+    
+    // 创建批准消息
+    const approvalMessage: Message = {
+      type: "human",
+      content: JSON.stringify({
+        action: "approve_plan",
+        plan_approved: true,
+        human_modifications: modifications || ""
+      }),
+      id: Date.now().toString(),
+    };
+    
+    // 关键修复：不重新提交整个对话，而是继续当前流程
+    // 通过添加批准消息到现有消息中，但保持当前的配置参数
+    const currentConfig = {
+      initial_search_query_count: 3,
+      max_research_loops: 3,
+      reasoning_model: "gemini-1.5-pro",
+    };
+    
+    thread.submit({
+      messages: [...thread.messages, approvalMessage],
+      ...currentConfig
+    });
+  }, [thread, researchPlan]);
+
+  const handleModifyResearchPlan = useCallback((modifications: string) => {
+    setShowHitlApproval(false);
+    setResearchPlan(null); // 清除研究计划状态，回到对话界面
+    
+    // 重新提交带有修改要求的消息
+    const modificationMessage: Message = {
+      type: "human", 
+      content: JSON.stringify({
+        action: "modify_plan",
+        plan_approved: false,
+        human_modifications: modifications
+      }),
+      id: Date.now().toString(),
+    };
+    
+    thread.submit({
+      messages: [...thread.messages, modificationMessage],
+      initial_search_query_count: 3,
+      max_research_loops: 3,
+      reasoning_model: "gemini-1.5-pro",
+    });
+  }, [thread]);
+
   return (
     <div className="flex h-screen bg-neutral-800 text-neutral-100 font-sans antialiased">
       <main className="h-full w-full max-w-4xl mx-auto">
@@ -157,6 +308,13 @@ export default function App() {
               handleSubmit={handleSubmit}
               isLoading={thread.isLoading}
               onCancel={handleCancel}
+            />
+          ) : showHitlApproval && researchPlan ? (
+            <ResearchPlanApproval
+              researchPlan={researchPlan}
+              onApprove={handleApproveResearchPlan}
+              onModify={handleModifyResearchPlan}
+              isLoading={thread.isLoading}
             />
           ) : error ? (
             <div className="flex flex-col items-center justify-center h-full">
@@ -173,15 +331,31 @@ export default function App() {
               </div>
             </div>
           ) : (
-            <ChatMessagesView
-              messages={thread.messages}
-              isLoading={thread.isLoading}
-              scrollAreaRef={scrollAreaRef}
-              onSubmit={handleSubmit}
-              onCancel={handleCancel}
-              liveActivityEvents={processedEventsTimeline}
-              historicalActivities={historicalActivities}
-            />
+            <div>
+              {showPlanCollapsed && approvedPlan && (
+                <div className="px-4 pt-4">
+                  <CollapsedResearchPlan researchPlan={approvedPlan} />
+                </div>
+              )}
+              <ChatMessagesView
+                messages={thread.messages}
+                isLoading={thread.isLoading}
+                scrollAreaRef={scrollAreaRef}
+                onSubmit={handleSubmit}
+                onCancel={handleCancel}
+                liveActivityEvents={processedEventsTimeline}
+                historicalActivities={historicalActivities}
+              />
+              {finalReport && (
+                <div className="px-4 pb-4">
+                  <EnhancedReport 
+                    report={finalReport}
+                    thinkingProcess={thinkingProcess}
+                    sourcesGathered={sourcesGathered}
+                  />
+                </div>
+              )}
+            </div>
           )}
       </main>
     </div>

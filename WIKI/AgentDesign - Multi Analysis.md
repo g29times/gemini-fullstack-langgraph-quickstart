@@ -218,7 +218,7 @@ multiple web_research nodes running in parallel
 **理论应用**：
 ```python
 class Configuration(BaseModel):
-    query_generator_model: str = "gemini-2.0-flash"    # 速度优先
+    query_generator_model: str = "gemini-2.5-flash-lite"    # 速度优先
     reflection_model: str = "gemini-2.5-flash"         # 平衡能力
     answer_model: str = "gemini-2.5-pro"               # 质量保证
 ```
