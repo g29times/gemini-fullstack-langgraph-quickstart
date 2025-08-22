@@ -1,0 +1,14 @@
+# requirements.txt
+# 用途：一次性安装本项目（可编辑）及其在 pyproject.toml 中声明的运行时依赖。
+# 使用：在 backend/ 目录执行
+#   pip install -r requirements.txt
+# 说明：
+# - 依赖声明以 pyproject.toml 为准；此文件作为安装入口，保持简单。
+# - 如需开发依赖，可改为安装 "-e .[dev]"（见下方注释）。
+# - 如需“锁定”具体版本，建议使用 pip-tools 或 uv 从 pyproject.toml 生成锁定清单。
+
+-e .
+
+# 开发依赖（可选）：
+# 将上一行替换为下面这一行，以包含 [project.optional-dependencies].dev
+# -e .[dev]
