@@ -5,7 +5,7 @@ from datetime import datetime
 def get_current_date():
     return datetime.now().strftime("%B %d, %Y")
 
-# generate_query
+# generate_query | Gemini 2.5 Flash-Lite (快速查询生成)
 query_writer_instructions = """Your goal is to generate sophisticated and diverse web search queries. These queries are intended for an advanced automated web research tool capable of analyzing complex results, following links, and synthesizing information.
 
 Instructions:
@@ -33,7 +33,7 @@ Topic: What revenue grew more last year apple stock or the number of people buyi
 
 Context: {research_topic}"""
 
-# web_research
+# web_research | Gemini 2.5 Flash-Lite (快速信息收集)
 web_searcher_instructions = """Conduct targeted Google Searches to gather the most recent, credible information on "{research_topic}" and synthesize it into a verifiable text artifact.
 
 Instructions:
@@ -49,7 +49,7 @@ Research Topic:
 {research_topic}
 """
 
-# 简单事实类问题的直接回答（无需检索）
+# answer_simple_fact | Gemini 2.5 Flash-Lite (快速事实应答)
 simple_fact_answer_instructions = """你将直接回答一个无需联网检索的简单事实问题。
 
 规则：
@@ -61,39 +61,54 @@ simple_fact_answer_instructions = """你将直接回答一个无需联网检索�
 请给出直接答案，不要添加无关说明或引用。
 """
 
+# reflection | Gemini 2.5 Flash (流程驱动分析)
 reflection_instructions = """You are an expert research assistant analyzing summaries about "{research_topic}".
 
+Research Objectives (if available):
+{research_objectives}
+
 Instructions:
-- Identify knowledge gaps or areas that need deeper exploration and propose follow-up query only when it adds clear incremental value.
-- Be conservative: if the provided summaries are already sufficient OR any plausible follow-up would likely be redundant/low-signal, set is_sufficient to true and return no follow-up queries.
-- If there is a real knowledge gap, generate at most 1 follow-up query that would most improve the answer.
-- Focus on technical details, implementation specifics, or emerging trends that weren't fully covered.
+- Evaluate progress toward each research objective based on the provided summaries.
+- Unless the research is truly comprehensive and complete, you should generate follow-up queries to deepen understanding.
+- Generate 1-2 specific follow-up queries that would add valuable information to the research.
+- Focus on technical details, implementation specifics, recent developments, or areas not fully covered in the summaries.
 
 Requirements:
 - Ensure the follow-up query is self-contained and includes necessary context for web search.
 - Do not rephrase the original question; make the query precise, unique, and directly actionable.
+- Assess completion level for each research objective (0.0 = not started, 1.0 = fully completed).
 
 Output Format:
 - Format your response as a JSON object with these exact keys:
-   - "is_sufficient": true or false
+   - "is_sufficient": true or false, true if overall_completion >= 0.8
    - "knowledge_gap": Describe what information is missing or needs clarification
-   - "follow_up_queries": A list with 0 or 1 highly specific question(s) to address this gap
+   - "follow_up_queries": A list with 1-2 highly specific question(s) to address this gap
+   - "objectives_progress": Object mapping each objective to completion score (0.0-1.0).
+   - "overall_completion": Overall research completion percentage (0.0-1.0, Average of objectives_progress)
+
+CRITICAL: For objectives_progress, use the EXACT objective text as keys, not bullet points or modified text.
 
 Example:
 ```json
 {{
-    "is_sufficient": true, // or false
-    "knowledge_gap": "The summary lacks information about performance metrics and benchmarks", // "" if is_sufficient is true
-    "follow_up_queries": ["What are typical performance benchmarks and metrics used to evaluate [specific technology]?"] // [] if is_sufficient is true
+    "is_sufficient": false,
+    "knowledge_gap": "The summary lacks information about performance metrics and benchmarks",
+    "follow_up_queries": ["What are typical performance benchmarks and metrics used to evaluate [specific technology]?"],
+    "objectives_progress": {{
+        "Analyze the milestones of visual language models": 0.8,
+        "Identify and analyze representative VLM model architectures, training methods and core technical innovations": 0.6
+    }},
+    "overall_completion": 0.7
 }}
 ```
 
-Reflect carefully on the Summaries to identify knowledge gaps and produce a follow-up query only if it provides high marginal value. Then, produce your output following this JSON format:
+Reflect carefully on the Summaries to identify knowledge gaps and assess objective completion. Then, produce your output following this JSON format:
 
 Summaries:
 {summaries}
 """
 
+# finalize_answer | Gemini 2.5 Pro (高质量最终答案)
 answer_instructions = """Generate a high-quality answer to the user's question based on the provided summaries.
 
 Instructions:
@@ -111,7 +126,7 @@ Summaries:
 {summaries}
 """
 
-# 意图识别
+# classify_intent | Gemini 2.5 Flash-Lite (快速意图识别)
 intent_classifier_instructions = """You are an intent classification expert. Determine if the user's request should:
 1) be answered directly without any web research (SIMPLE_FACT),
 2) be answered via a simple direct lookup from an official source (DIRECT_LOOKUP), or
@@ -137,6 +152,7 @@ Context:
 {research_topic}
 """
 
+# find_official_site | Gemini 2.5 Flash-Lite (快速站点发现)
 official_site_finder_instructions = """You are discovering the official website or primary authoritative domain for the given entity.
 
 Instructions:
@@ -149,6 +165,7 @@ Entity:
 {entity}
 """
 
+# direct_lookup | Gemini 2.5 Flash-Lite (快速直接查询)
 direct_lookup_instructions = """Perform a focused lookup only within the official domain to answer the user's request.
 
 Rules:
@@ -170,7 +187,7 @@ Entity (if any): {entity}
 Attribute (if any): {attribute}
 """
 
-# Fallback quick lookup when no official domain is available
+# Fallback quick lookup when no official domain is available | Gemini 2.5 Flash-Lite (快速回退查询)
 quick_lookup_fallback_instructions = """Perform a focused quick lookup across the web to answer the user's request when no official domain is available.
 
 Rules:
@@ -187,7 +204,7 @@ Entity (if any): {entity}
 Attribute (if any): {attribute}
 """
 
-# HITL Research Plan Generation
+# generate_research_plan | Gemini 2.5 Flash-Lite (快速研究规划)
 research_plan_instructions = """你是一位专业的研究规划专家。基于用户的研究主题，制定一个详细的研究计划供人类审核。
 
 指导原则：
@@ -212,7 +229,7 @@ research_plan_instructions = """你是一位专业的研究规划专家。基于
 当前日期：{current_date}
 """
 
-# Structured Thinking Process - Startup Stage
+# thinking_startup_stage | Gemini 2.5 Flash-Lite (快速起步思考)
 thinking_startup_instructions = """你正处于研究的起步阶段，需要进行"概述分解规划"。
 
 任务：
@@ -234,7 +251,7 @@ thinking_startup_instructions = """你正处于研究的起步阶段，需要进
 当前日期：{current_date}
 """
 
-# Structured Thinking Process - Middle Stage  
+# thinking_middle_stage | Gemini 2.5 Flash (流程驱动深化)
 thinking_middle_instructions = """你正处于研究的中间阶段，需要进行"洞察梳理深化"。
 
 任务：
@@ -259,7 +276,7 @@ thinking_middle_instructions = """你正处于研究的中间阶段，需要进�
 当前日期：{current_date}
 """
 
-# Structured Thinking Process - Finalization Stage
+# thinking_finalization_stage | Gemini 2.5 Flash (收尾思考)
 thinking_finalization_instructions = """你正处于研究的收尾阶段，需要进行"洞察梳理总结"。
 
 任务：
@@ -287,8 +304,8 @@ thinking_finalization_instructions = """你正处于研究的收尾阶段，需�
 当前日期：{current_date}
 """
 
-# Enhanced Report Generation
-enhanced_report_instructions = """生成一份高质量的结构化研究报告，参考Google DeepResearch的报告格式。
+# generate_enhanced_report | Gemini 2.5 Pro (高质量报告生成)
+enhanced_report_instructions = """生成一份高质量的结构化研究报告。
 
 报告结构要求：
 1. **摘要**：简洁的执行摘要
@@ -308,7 +325,7 @@ enhanced_report_instructions = """生成一份高质量的结构化研究报告�
 报告大纲：{report_outline}
 """
 
-# Follow-up Question Handler
+# detect_follow_up | Gemini 2.5 Flash-Lite (快速追问检测)
 follow_up_detection_instructions = """你是一个专业的对话分析助手，需要判断用户的当前消息是否为追问（follow-up question）。
 
 对话历史：
@@ -335,6 +352,7 @@ follow_up_detection_instructions = """你是一个专业的对话分析助手，
 - previous_context_relevant: 之前的内容是否与当前问题相关
 """
 
+# handle_follow_up | Gemini 2.5 Flash-Lite (快速追问处理)
 follow_up_instructions = """你是一个专业的研究助手，用户基于之前的研究报告提出了追问。请基于之前的报告内容和新的问题，提供精准的回答或进行补充研究。
 
 之前的研究报告：

@@ -22,6 +22,14 @@ class Reflection(BaseModel):
     follow_up_queries: List[str] = Field(
         description="A list of follow-up queries to address the knowledge gap."
     )
+    objectives_progress: Dict[str, float] = Field(
+        default_factory=dict,
+        description="Progress assessment for each research objective (0.0-1.0 scale). Use objective text as key, progress as float value."
+    )
+    overall_completion: float = Field(
+        default=0.0,
+        description="Overall research completion percentage (0.0-1.0)."
+    )
 
 
 class Intent(BaseModel):

@@ -29,7 +29,7 @@
 
 ### 1. **查询生成** ([generate_query](cci:1://file:///m:/WorkSpace/AI/Agents/gemini-fullstack-langgraph-quickstart/backend/src/agent/graph.py:43:0-80:41))
 - 基于用户问题生成多个优化的搜索查询
-- 使用Gemini 2.0 Flash进行结构化输出
+- 使用Gemini 2.5 Flash-Lite进行结构化输出
 
 ### 2. **并行网络研究** ([web_research](cci:1://file:///m:/WorkSpace/AI/Agents/gemini-fullstack-langgraph-quickstart/backend/src/agent/graph.py:94:0-135:5))
 - 使用Google Search API进行并行搜索
@@ -57,7 +57,7 @@
 - 状态持久化到PostgreSQL
 
 ### **多模型支持**
-- 查询生成: Gemini 2.0 Flash (高速)
+- 查询生成: Gemini 2.5 Flash-Lite (高速)
 - 反思推理: Gemini 2.5 Pro (深度思考)
 - 答案合成: 可配置模型选择
 

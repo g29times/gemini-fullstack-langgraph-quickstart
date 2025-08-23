@@ -37,12 +37,18 @@ class OverallState(TypedDict):
     is_follow_up: bool  # Whether this is a follow-up question
     previous_report: str | None  # Previous research report for context
     conversation_history: Annotated[list, operator.add]  # Full conversation context
+    # Reflection state fields
+    follow_up_queries: list  # Follow-up queries from reflection (replaced each time)
+    is_sufficient: bool  # Whether current research is sufficient
+    knowledge_gap: str | None  # Identified knowledge gaps
+    objectives_progress: dict | None  # Progress on research objectives
+    overall_completion: float  # Overall research completion percentage
 
 
 class ReflectionState(TypedDict):
     is_sufficient: bool
     knowledge_gap: str
-    follow_up_queries: Annotated[list, operator.add]
+    follow_up_queries: list
     research_loop_count: int
     number_of_ran_queries: int
 

@@ -119,7 +119,7 @@ def get_citations(response, resolved_urls_map):
     ):
         return citations
 
-    for support in candidate.grounding_metadata.grounding_supports:
+    for support in candidate.grounding_metadata.grounding_supports or []:
         citation = {}
 
         # Ensure segment information is present

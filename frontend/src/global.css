@@ -119,10 +119,14 @@
     /* Prevent scroll bounce/overscroll on mobile */
     overscroll-behavior: none;
     -webkit-overflow-scrolling: touch;
+    /* Ensure dark background for the entire page */
+    background-color: #262626; /* neutral-800 equivalent */
   }
   html {
     /* Prevent scroll bounce on the entire page */
     overscroll-behavior: none;
+    /* Ensure dark background for the entire document */
+    background-color: #262626; /* neutral-800 equivalent */
   }
 }
 

@@ -70,11 +70,59 @@ if os.getenv("GEMINI_API_KEY") is None:
 genai_client = Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 
+def _repair_json_format(raw_content: str) -> dict | None:
+    """Attempt to repair common JSON format issues in LLM output."""
+    import json
+    import re
+    
+    try:
+        # First, try direct JSON parsing
+        return json.loads(raw_content)
+    except json.JSONDecodeError:
+        pass
+    
+    # Try to extract JSON from markdown code blocks
+    json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', raw_content, re.DOTALL)
+    if json_match:
+        try:
+            return json.loads(json_match.group(1))
+        except json.JSONDecodeError:
+            pass
+    
+    # Try to find JSON-like content
+    json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', raw_content, re.DOTALL)
+    if json_match:
+        json_str = json_match.group(0)
+        try:
+            # Fix common issues
+            # Fix unescaped quotes in strings
+            json_str = re.sub(r'(?<!\\)"([^"]*)"([^"]*)"([^"]*)"(?=\s*[,}])', r'"\1\"\2\"\3"', json_str)
+            # Fix trailing commas
+            json_str = re.sub(r',(\s*[}\]])', r'\1', json_str)
+            # Fix single quotes
+            json_str = json_str.replace("'", '"')
+            
+            parsed = json.loads(json_str)
+            
+            # Validate required fields for Reflection
+            required_fields = ['is_sufficient', 'knowledge_gap', 'follow_up_queries']
+            if all(field in parsed for field in required_fields):
+                # Set defaults for missing optional fields
+                parsed.setdefault('objectives_progress', {})
+                parsed.setdefault('overall_completion', 0.0)
+                return parsed
+                
+        except json.JSONDecodeError:
+            pass
+    
+    return None
+
+
 # Nodes
 def generate_query(state: OverallState, config: RunnableConfig) -> QueryGenerationState:
     """LangGraph node that generates search queries based on the User's question.
 
-    Uses Gemini 2.0 Flash to create an optimized search queries for web research based on
+    Uses Gemini 2.5 Flash-Lite to create an optimized search queries for web research based on
     the User's question.
 
     Args:
@@ -91,12 +139,27 @@ def generate_query(state: OverallState, config: RunnableConfig) -> QueryGenerati
     if isinstance(follow_ups, list) and len(follow_ups) > 0:
         logger.info("[routing] using %d follow-up queries from reflection", len(follow_ups))
         return {"search_query": follow_ups}
+    
+    # 优先使用研究计划中的查询（如果存在且是首次执行）
+    research_plan = state.get("research_plan", {})
+    planned_queries = research_plan.get("planned_queries", [])
+    if planned_queries and not state.get("search_query"):  # 首次执行且有计划查询
+        logger.info("[routing] using %d planned queries from research plan", len(planned_queries))
+        return {"search_query": planned_queries}
 
     # check for custom initial search query count
     if state.get("initial_search_query_count") is None:
         state["initial_search_query_count"] = configurable.number_of_initial_queries
+    
+    # Debug: print runtime parameters
+    try:
+        logger.info("[generate_query] Runtime params: initial_search_query_count=%d, max_research_loops=%d", 
+                   state.get("initial_search_query_count", 0), 
+                   state.get("max_research_loops", configurable.max_research_loops))
+    except Exception:
+        pass
 
-    # init Gemini 2.0 Flash
+    # init Gemini 2.5 Flash-Lite
     llm = ChatGoogleGenerativeAI(
         model=configurable.query_generator_model,
         temperature=1.0,
@@ -213,7 +276,7 @@ def continue_to_web_research(state: QueryGenerationState, config: RunnableConfig
 def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
     """LangGraph node that performs web research using the native Google Search API tool.
 
-    Executes a web search using the native Google Search API tool in combination with Gemini 2.0 Flash.
+    Executes a web search using the native Google Search API tool in combination with Gemini 2.5 Flash-Lite.
 
     Args:
         state: Current graph state containing the search query and research loop count
@@ -560,7 +623,7 @@ def answer_simple_fact(state: OverallState, config: RunnableConfig) -> OverallSt
     to produce a concise answer.
     """
     configurable = Configuration.from_runnable_config(config)
-    reasoning_model = state.get("reasoning_model") or configurable.answer_model
+    reasoning_model = state.get("reasoning_model") or configurable.query_generator_model
 
     current_date = get_current_date()
     formatted_prompt = simple_fact_answer_instructions.format(
@@ -603,9 +666,15 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
     # Format the prompt
     current_date = get_current_date()
     safe_results = [s for s in state.get("web_research_result", []) if isinstance(s, str)]
+    # Get research objectives from research plan if available
+    research_plan = state.get("research_plan", {})
+    research_objectives = research_plan.get("research_objectives", [])
+    objectives_text = "\n".join(f"• {obj}" for obj in research_objectives) if research_objectives else "no objectives"
+    
     formatted_prompt = reflection_instructions.format(
         current_date=current_date,
         research_topic=get_research_topic(state["messages"]),
+        research_objectives=objectives_text,
         summaries="\n\n---\n\n".join(safe_results),
     )
     # init Reasoning Model
@@ -615,24 +684,108 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
         max_retries=2,
         api_key=os.getenv("GEMINI_API_KEY"),
     )
-    result = llm.with_structured_output(Reflection).invoke(formatted_prompt)
-
-    # logging for tuning
     try:
+        result = llm.with_structured_output(Reflection).invoke(formatted_prompt)
+    except Exception as e:
+        logger.error("[reflection] Structured output parsing failed: %s", str(e))
+        
+        # Try to get raw output for debugging
+        try:
+            raw_result = llm.invoke(formatted_prompt)
+            raw_content = raw_result.content if hasattr(raw_result, 'content') else str(raw_result)
+            logger.error("[reflection] Raw LLM output: %s", raw_content[:500] + "..." if len(raw_content) > 500 else raw_content)
+        except Exception:
+            logger.error("[reflection] Failed to get raw output for debugging")
+        
+        # Try to extract JSON from raw output and fix common format issues
+        topic = get_research_topic(state["messages"])
+        fallback_query = f"What are the latest developments and current state of {topic}?"
+        
+        # Attempt format repair
+        try:
+            raw_result = llm.invoke(formatted_prompt)
+            raw_content = raw_result.content if hasattr(raw_result, 'content') else str(raw_result)
+            logger.error("[reflection] Raw content for repair: %s", raw_content[:1000] + "..." if len(raw_content) > 1000 else raw_content)
+            
+            # Try to extract and repair JSON
+            repaired_result = _repair_json_format(raw_content)
+            if repaired_result:
+                result = Reflection(**repaired_result)
+                logger.info("[reflection] Successfully repaired JSON format: followups=%d", len(repaired_result.get('follow_up_queries', [])))
+            else:
+                raise ValueError("JSON repair failed")
+                
+        except Exception as repair_e:
+            logger.error("[reflection] Format repair also failed: %s", str(repair_e))
+            # Enhanced fallback with guaranteed follow-up
+            research_objectives = state.get("research_plan", {}).get("research_objectives", [])
+            if research_objectives:
+                # Generate objective-specific follow-up
+                first_objective = research_objectives[0]
+                fallback_query = f"What are the latest research findings and developments related to: {first_objective}?"
+            else:
+                fallback_query = f"What are the most recent developments and emerging trends in {topic}?"
+            
+            result = Reflection(
+                is_sufficient=False,
+                knowledge_gap="Structured output parsing and repair failed, using enhanced fallback analysis",
+                follow_up_queries=[fallback_query],
+                objectives_progress={},
+                overall_completion=0.2
+            )
+
+    # Enhanced logging for debugging
+    try:
+        followups = getattr(result, "follow_up_queries", []) or []
+        objectives_progress = getattr(result, "objectives_progress", {})
+        overall_completion = getattr(result, "overall_completion", 0.0)
+        
         logger.info(
-            "[reflection] loop=%d is_sufficient=%s followups=%d gap='%.80s'",
+            "[reflection] loop=%d is_sufficient=%s followups=%d gap='%.80s' completion=%.1f%%",
             state["research_loop_count"],
             bool(getattr(result, "is_sufficient", False)),
-            len(getattr(result, "follow_up_queries", []) or []),
-            (getattr(result, "knowledge_gap", "") or "")
+            len(followups),
+            (getattr(result, "knowledge_gap", "") or ""),
+            overall_completion * 100
         )
+        
+        # Log objectives progress
+        if objectives_progress:
+            logger.info("[reflection] Objectives progress:")
+            for obj, progress in objectives_progress.items():
+                # 目标进度
+                logger.info("[reflection]   • %s: %.1f%%", obj[:60] + "..." if len(obj) > 60 else obj, progress * 100)
+        
+        # Log the actual followup queries
+        for i, followup in enumerate(followups):
+            logger.info("[reflection] Generated followup %d: %s", i+1, followup[:150] + "..." if len(followup) > 150 else followup)
+        
+        # Log the summaries being analyzed
+        logger.info("[reflection] Analyzing %d summaries, total chars: %d", 
+                   len(safe_results), sum(len(s) for s in safe_results))
+        
+    except Exception as e:
+        logger.error("[reflection] Error in debug logging: %s", str(e))
+
+    # Ensure follow_up_queries is properly extracted
+    follow_up_queries = getattr(result, "follow_up_queries", []) or []
+    
+    # Debug: log the actual return values
+    try:
+        logger.info("[reflection] Return values: is_sufficient=%s, followups=%d, gap='%s'", 
+                   result.is_sufficient, len(follow_up_queries), 
+                   (result.knowledge_gap or "")[:50] + "..." if len(result.knowledge_gap or "") > 50 else (result.knowledge_gap or ""))
+        for i, fq in enumerate(follow_up_queries):
+            logger.info("[reflection] Returning followup %d: %s", i+1, fq[:100] + "..." if len(fq) > 100 else fq)
     except Exception:
         pass
 
     return {
         "is_sufficient": result.is_sufficient,
         "knowledge_gap": result.knowledge_gap,
-        "follow_up_queries": result.follow_up_queries,
+        "follow_up_queries": follow_up_queries,
+        "objectives_progress": getattr(result, "objectives_progress", {}),
+        "overall_completion": getattr(result, "overall_completion", 0.0),
         "research_loop_count": state["research_loop_count"],
         "number_of_ran_queries": len(state["search_query"]),
     }
@@ -689,7 +842,7 @@ def finalize_answer(state: OverallState, config: RunnableConfig):
         Dictionary with state update, including running_summary key containing the formatted final summary with sources
     """
     configurable = Configuration.from_runnable_config(config)
-    reasoning_model = state.get("reasoning_model") or configurable.answer_model
+    reasoning_model = state.get("reasoning_model") or configurable.reflection_model
 
     # Format the prompt
     current_date = get_current_date()
@@ -765,13 +918,32 @@ def wait_for_human_approval(state: OverallState, config: RunnableConfig) -> Over
                 if isinstance(content, str) and content.startswith("{") and content.endswith("}"):
                     import json
                     approval_data = json.loads(content)
-                    if approval_data.get("action") == "approve_plan" and approval_data.get("plan_approved", False):
+                    action = approval_data.get("action")
+                    # 批准研究计划
+                    if action == "approve_plan" and approval_data.get("plan_approved", False):
                         # 计划已批准，直接返回批准状态，让图继续到thinking_startup_stage
                         return {
                             "plan_approved": True,
                             "human_modifications": approval_data.get("human_modifications", ""),
                             "thinking_stage": "startup"
                         }
+                    # 要求修改研究计划
+                    if action == "modify_plan":
+                        try:
+                            logger.info("[hitl] human requested modifications to plan")
+                        except Exception:
+                            pass
+                        return {
+                            "plan_approved": False,
+                            "human_modifications": approval_data.get("human_modifications", ""),
+                        }
+                    # 直接查询（跳过深度研究）
+                    if action in ("quick_lookup", "direct_lookup"):
+                        try:
+                            logger.info("[hitl] human prefers direct lookup -> set prefer_direct_lookup=True")
+                        except Exception:
+                            pass
+                        return {"prefer_direct_lookup": True}
             except (json.JSONDecodeError, AttributeError):
                 pass
     
@@ -799,12 +971,11 @@ def wait_for_human_approval(state: OverallState, config: RunnableConfig) -> Over
 
 请通过前端界面确认此计划，或提供修改建议。
 """
-        # 标记已显示HITL，然后中断
-        state["hitl_shown"] = True
+        # 中断并返回标记状态
         raise NodeInterrupt(plan_summary)
     
-    # 如果已经显示过HITL但没有批准消息，返回等待状态
-    return {"waiting_for_approval": True}
+    # 如果已经显示过HITL但没有批准消息，返回等待状态并标记
+    return {"waiting_for_approval": True, "hitl_shown": True}
 
 
 def thinking_startup_stage(state: OverallState, config: RunnableConfig) -> OverallState:
@@ -843,6 +1014,16 @@ def thinking_middle_stage(state: OverallState, config: RunnableConfig) -> Overal
     """Execute the middle thinking stage: 洞察梳理深化."""
     configurable = Configuration.from_runnable_config(config)
     
+    # Debug: log entry into thinking_middle_stage
+    try:
+        research_loop_count = state.get("research_loop_count", 0)
+        max_research_loops = state.get("max_research_loops", configurable.max_research_loops)
+        followups = state.get("follow_up_queries") or []
+        logger.info("[thinking_middle_stage] Entry: research_loop_count=%d, max_research_loops=%d, followups_count=%d", 
+                   research_loop_count, max_research_loops, len(followups))
+    except Exception:
+        pass
+    
     llm = ChatGoogleGenerativeAI(
         model=configurable.reflection_model,
         temperature=0.8,
@@ -875,10 +1056,29 @@ def thinking_middle_stage(state: OverallState, config: RunnableConfig) -> Overal
         "content": result.model_dump(),
     }
     
-    return {
+    # Preserve follow_up_queries and other critical state
+    preserved_state = {
         "thinking_process": [thinking_record],
         "insights_gathered": result.key_insights + result.connections_found,
     }
+    
+    # Keep follow_up_queries if they exist (critical for research loop continuity)
+    if state.get("follow_up_queries"):
+        preserved_state["follow_up_queries"] = state["follow_up_queries"]
+    
+    # Keep other reflection state
+    if state.get("is_sufficient") is not None:
+        preserved_state["is_sufficient"] = state["is_sufficient"]
+    if state.get("knowledge_gap"):
+        preserved_state["knowledge_gap"] = state["knowledge_gap"]
+    if state.get("research_loop_count") is not None:
+        preserved_state["research_loop_count"] = state["research_loop_count"]
+    if state.get("objectives_progress"):
+        preserved_state["objectives_progress"] = state["objectives_progress"]
+    if state.get("overall_completion") is not None:
+        preserved_state["overall_completion"] = state["overall_completion"]
+    
+    return preserved_state
 
 
 def thinking_finalization_stage(state: OverallState, config: RunnableConfig) -> OverallState:
@@ -886,7 +1086,7 @@ def thinking_finalization_stage(state: OverallState, config: RunnableConfig) -> 
     configurable = Configuration.from_runnable_config(config)
     
     llm = ChatGoogleGenerativeAI(
-        model=configurable.answer_model,
+        model=configurable.reflection_model,
         temperature=0.6,
         max_retries=2,
         api_key=os.getenv("GEMINI_API_KEY"),
@@ -930,7 +1130,7 @@ def thinking_finalization_stage(state: OverallState, config: RunnableConfig) -> 
 def generate_enhanced_report(state: OverallState, config: RunnableConfig) -> OverallState:
     """Generate an enhanced structured report similar to Google DeepResearch."""
     configurable = Configuration.from_runnable_config(config)
-    reasoning_model = state.get("reasoning_model") or configurable.answer_model
+    reasoning_model = configurable.answer_model
     
     llm = ChatGoogleGenerativeAI(
         model=reasoning_model,
@@ -1132,6 +1332,21 @@ def detect_follow_up(state: OverallState, config: RunnableConfig) -> OverallStat
 
 def route_follow_up_detection(state: OverallState) -> str:
     """Route based on follow-up detection."""
+    # 检查最后一条消息是否为直接查询请求
+    messages = state.get("messages", [])
+    if messages:
+        last_message = messages[-1]
+        if hasattr(last_message, 'type') and last_message.type == "human":
+            try:
+                content = last_message.content if hasattr(last_message, 'content') else ""
+                if isinstance(content, str) and content.startswith("{") and content.endswith("}"):
+                    import json
+                    data = json.loads(content)
+                    if data.get("action") in ("quick_lookup", "direct_lookup"):
+                        return "find_official_site"
+            except (json.JSONDecodeError, AttributeError):
+                pass
+    
     # 如果检测到批准消息，直接跳转到思考阶段
     if state.get("plan_approved", False):
         return "thinking_startup_stage"
@@ -1145,6 +1360,9 @@ def route_follow_up_detection(state: OverallState) -> str:
 # Routing functions for new HITL flow
 def route_after_plan_approval(state: OverallState):
     """Route based on whether the research plan was approved."""
+    # Human selected direct lookup: override and jump to official site finder
+    if state.get("prefer_direct_lookup", False):
+        return "find_official_site"
     # Check if plan was approved
     if state.get("plan_approved", False):
         return "thinking_startup_stage"
@@ -1193,6 +1411,17 @@ def route_after_reflection(state: OverallState, config: RunnableConfig):
     research_loop_count = state.get("research_loop_count", 0)
     followups = state.get("follow_up_queries") or []
 
+    # Debug: detailed reflection analysis
+    try:
+        logger.info("[route_after_reflection] Detailed analysis: is_sufficient=%s, research_loop_count=%d, max_research_loops=%d, followups_count=%d", 
+                   is_sufficient, research_loop_count, max_research_loops, len(followups))
+        if len(followups) == 0:
+            logger.info("[route_after_reflection] No followups generated - checking reflection logic")
+        for i, followup in enumerate(followups):
+            logger.info("[route_after_reflection] Followup %d: %s", i+1, followup[:100] + "..." if len(followup) > 100 else followup)
+    except Exception:
+        pass
+
     # Early stop if no actionable follow-ups
     should_finalize = bool(is_sufficient or research_loop_count >= max_research_loops or len(followups) == 0)
 
@@ -1240,7 +1469,7 @@ builder.add_node("finalize_answer", finalize_answer)
 # Enhanced routing with HITL and structured thinking
 builder.add_edge(START, "detect_follow_up")
 builder.add_conditional_edges(
-    "detect_follow_up", route_follow_up_detection, ["handle_follow_up", "classify_intent", "thinking_startup_stage"]
+    "detect_follow_up", route_follow_up_detection, ["handle_follow_up", "classify_intent", "thinking_startup_stage", "find_official_site"]
 )
 builder.add_edge("handle_follow_up", END)
 builder.add_conditional_edges(
@@ -1253,7 +1482,7 @@ builder.add_edge("find_official_site", "direct_lookup")
 # HITL flow: generate plan -> wait for approval -> conditional routing
 builder.add_edge("generate_research_plan", "wait_for_human_approval")
 builder.add_conditional_edges(
-    "wait_for_human_approval", route_after_plan_approval, ["thinking_startup_stage", "generate_research_plan", "wait_for_human_approval"]
+    "wait_for_human_approval", route_after_plan_approval, ["thinking_startup_stage", "generate_research_plan", "wait_for_human_approval", "find_official_site"]
 )
 
 # Structured thinking flow

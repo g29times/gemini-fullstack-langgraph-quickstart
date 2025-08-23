@@ -3,7 +3,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Textarea } from '@/components/ui/textarea';
-import { CheckCircle, Clock, Edit, ArrowRight } from 'lucide-react';
+import { CheckCircle, Clock, Edit, ArrowRight, Search } from 'lucide-react';
 
 interface ResearchPlan {
   research_objectives: string[];
@@ -20,6 +20,7 @@ interface ResearchPlanApprovalProps {
   onApprove: (modifications?: string) => void;
   onModify: (modifications: string) => void;
   isLoading?: boolean;
+  onQuickLookup: () => void;
 }
 
 export const ResearchPlanApproval: React.FC<ResearchPlanApprovalProps> = ({
@@ -27,6 +28,7 @@ export const ResearchPlanApproval: React.FC<ResearchPlanApprovalProps> = ({
   onApprove,
   onModify,
   isLoading = false,
+  onQuickLookup,
 }) => {
   const [showModifications, setShowModifications] = useState(false);
   const [modifications, setModifications] = useState('');
@@ -172,6 +174,15 @@ export const ResearchPlanApproval: React.FC<ResearchPlanApprovalProps> = ({
 
         {/* Action Buttons */}
         <div className="flex flex-col sm:flex-row gap-4 justify-center">
+          <Button
+            onClick={onQuickLookup}
+            disabled={isLoading}
+            className="bg-blue-600 hover:bg-blue-700 text-white flex items-center gap-2"
+          >
+            <Search className="w-4 h-4" />
+            直接查询
+          </Button>
+
           <Button
             onClick={handleApprove}
             disabled={isLoading}

@@ -9,7 +9,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { MODEL_OPTIONS, DEFAULT_REASONING_MODEL } from "@/lib/modelConfig";
+import { MODEL_OPTIONS, DEFAULT_REASONING_MODEL, DEFAULT_EFFORT, DEFAULT_PLACEHOLDER } from "@/lib/modelConfig";
 
 // Updated InputFormProps
 interface InputFormProps {
@@ -26,7 +26,7 @@ export const InputForm: React.FC<InputFormProps> = ({
   hasHistory,
 }) => {
   const [internalInputValue, setInternalInputValue] = useState("");
-  const [effort, setEffort] = useState("low");
+  const [effort, setEffort] = useState(DEFAULT_EFFORT);
   const [model, setModel] = useState(DEFAULT_REASONING_MODEL);
 
   const handleInternalSubmit = (e?: React.FormEvent) => {
@@ -60,7 +60,7 @@ export const InputForm: React.FC<InputFormProps> = ({
           value={internalInputValue}
           onChange={(e) => setInternalInputValue(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="Who won the Euro 2024 and scored the most goals?"
+          placeholder={DEFAULT_PLACEHOLDER}
           className={`w-full text-neutral-100 placeholder-neutral-500 resize-none border-0 focus:outline-none focus:ring-0 outline-none focus-visible:ring-0 shadow-none
                         md:text-base  min-h-[56px] max-h-[200px]`}
           rows={1}

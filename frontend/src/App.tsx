@@ -300,8 +300,29 @@ export default function App() {
     });
   }, [thread]);
 
+  const handleQuickLookup = useCallback(() => {
+    // 隐藏 HITL，直接触发后端快速查询路由
+    setShowHitlApproval(false);
+    setResearchPlan(null);
+
+    const quickLookupMessage: Message = {
+      type: "human",
+      content: JSON.stringify({
+        action: "quick_lookup"
+      }),
+      id: Date.now().toString(),
+    };
+
+    thread.submit({
+      messages: [...thread.messages, quickLookupMessage],
+      initial_search_query_count: 3,
+      max_research_loops: 3,
+      reasoning_model: "gemini-1.5-pro",
+    });
+  }, [thread]);
+
   return (
-    <div className="flex h-screen bg-neutral-800 text-neutral-100 font-sans antialiased">
+    <div className="flex min-h-screen bg-neutral-800 text-neutral-100 font-sans antialiased">
       <main className="h-full w-full max-w-4xl mx-auto">
           {thread.messages.length === 0 ? (
             <WelcomeScreen
@@ -314,6 +335,7 @@ export default function App() {
               researchPlan={researchPlan}
               onApprove={handleApproveResearchPlan}
               onModify={handleModifyResearchPlan}
+              onQuickLookup={handleQuickLookup}
               isLoading={thread.isLoading}
             />
           ) : error ? (
