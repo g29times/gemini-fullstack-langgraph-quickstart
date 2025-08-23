@@ -14,7 +14,7 @@ Instructions:
 - Each query should focus on one specific aspect and avoid near-duplicates.
 - Include exactly one entity verification query only when the topic involves an entity and its identity remains unresolved; if the entity has already been confirmed (e.g., official site/registration identifier found), do not include verification queries.
 - Keep non-English proper nouns in their original script in quotes (e.g., "深圳犀照科技"); add transliterations/English aliases as OR variants, not replacements; add geographic qualifiers when helpful.
-- DO NOT combine multiple entities or alternatives in a single query using connectors like "vs/VS", "比较", or "对比". Produce separate atomic queries (one query per list item). If comparison is needed, emit per-entity queries and optionally a separate comparison-metric query.
+- DO NOT combine multiple entities or alternatives in a single query using connectors like "vs/VS". Produce separate atomic queries (one query per list item). If comparison is needed, emit per-entity queries and optionally a separate comparison-metric query.
 - For China-based entities, consider authority registries: site:天眼查 OR site:企查查 OR site:aiqicha.baidu.com.
 - Ensure recency. The current date is {current_date}.
 - Keep total distinct queries <= {number_queries} (hard cap 20). Remove near-duplicates.
@@ -55,7 +55,7 @@ Instructions:
 - Use MECE decomposition: start from core entity proof (Who/What/Where) then expand to minimal additional qualifiers (When/Why/How) only if required to resolve the gap.
 - Prefer concise keyword-style queries over long natural sentences.
 - Use cross-lingual variants when appropriate (e.g., include both Chinese and English forms; keep local proper nouns in original script).
-- Each query MUST be atomic (single intent). Do NOT merge multiple entities or alternatives in one query using connectors like "vs/VS", "比较", or "对比". For comparative tasks, emit separate per-entity queries and optionally a distinct comparison-metric query.
+- Each query MUST be atomic (single intent). Do NOT merge multiple entities or alternatives in one query using connectors like "vs/VS". For comparative tasks, emit separate per-entity queries and optionally a distinct comparison-metric query.
 - Do NOT translate or alter the canonical entity string from the user; keep it verbatim in quotes; add aliases/transliterations as OR variants.
 - Only include an entity verification query when the Knowledge Gap is about entity identity/ambiguity; if the entity has already been confirmed (e.g., official site/registration identifier identified), focus on substantive aspects instead of re-verification.
 - Use Boolean operators and operators such as quotes, OR, site:, filetype:, intitle:, inurl: where helpful.
@@ -116,20 +116,25 @@ Instructions:
 - Evaluate progress toward each research objective based on the provided summaries.
 - Keep per-objective progress MONOTONIC: never decrease any score below the previously reported value.
 - Unless the research is truly comprehensive and complete, generate follow-up queries to deepen understanding.
-- Generate 1-2 specific follow-up queries; prioritize queries that advance the target objective if provided.
+- Generate up to 2 follow-up queries; only output 2 when they are CLEARLY non-overlapping vs the Past Follow-up list. If you cannot guarantee non-overlap, output ONLY 1.
 - CRITICAL: Follow-up queries MUST directly resolve the stated knowledge_gap. Avoid drifting to unrelated subtopics.
 - If the knowledge_gap indicates ENTITY AMBIGUITY/CONFLICT (e.g., multiple companies with similar names):
   1) Focus FIRST on disambiguation: canonical name, aliases/拼写/翻译, location (city/province/country), business scope/industry, registration identifiers.
   2) Add geography qualifiers (e.g., 深圳/Shenzhen) and language variants (中文/English) where appropriate.
-  3) Prefer authoritative registries for Chinese entities: 天眼查, 企查查, 爱企查 (use site: filters when possible). Include queries that can verify UCC/统一社会信用代码、法定代表人、注册地址。
+  3) Prefer authoritative registries for Chinese entities: 天眼查, 企查查, 爱企查 (use site: filters when possible). Include queries that can verify UCC/统一社会信用代码、法定代表人、注册地址.
 - If the entity has already been confirmed (e.g., official website or registration identifier identified in prior steps), do NOT generate further entity verification queries; focus on substantive objectives.
-- Do NOT repeat any query in the Past Follow-up list or trivial rewrites. If similar direction is needed, add strong refinements (time window, geography, product/version, metrics, site:domain, filetype, Boolean operators, synonyms in multiple languages).
+- STRICT DE-DUP: Treat "Past Follow-up Queries" as a BLOCKLIST. Do NOT repeat, paraphrase, or template-flip any past item. Normalize by lowercasing and removing punctuation/stopwords; discard any candidate whose normalized form matches or is a near-synonym of a past item.
+- DIFFERENTIATION: Each new follow-up MUST differ along at least ONE explicit dimension: source constraint (e.g., site:, filetype:), time window, geography, document type (e.g., registry vs news), or attribute/metric specificity. Make the differentiating constraint explicit in the query.
+- If a founders/leadership question already exists, do NOT ask it again. Prefer a distinct angle, e.g., "Verify founders via authoritative registry (天眼查/企查查/爱企查) including 统一社会信用代码" OR "Locate leadership profiles via site:linkedin.com/company OR site:crunchbase.com".
+- Avoid near-duplicate templates (e.g., merely adding adjectives like "key/main" or swapping word order). Such candidates MUST be rejected.
+- If only one truly unique and useful follow-up remains after de-duplication, output just that one.
 - Focus on technical details, implementation specifics, recent developments, or areas not fully covered in the summaries.
 
 Requirements:
 - Ensure each follow-up query is self-contained and includes necessary context for web search.
 - Keep non-English proper nouns in original script (quoted) in the query; add transliterations/English aliases as variants when useful.
 - At least one follow-up MUST be an entity verification query when the knowledge_gap is about entity identity/ambiguity.
+- Do NOT repeat any query in the Past Follow-up list or trivial rewrites. If similar direction is needed, add strong refinements (time window, geography, product/version, metrics, site:domain, filetype, Boolean operators, synonyms in multiple languages).
 - Do not rephrase the original question; make the query precise, unique, and directly actionable.
 - Assess completion level for each research objective (0.0 = not started, 1.0 = fully completed) using the rubric above.
 - Compute overall_completion as the AVERAGE of objectives_progress; set is_sufficient true if overall_completion >= 0.8.
@@ -284,14 +289,14 @@ simple_fact_answer_instructions = """你将直接回答一个无需联网检索�
 
 
 # generate_research_plan | Gemini 2.5 Flash (专业研究规划)
-research_plan_instructions = """你是一位专业的研究规划专家。
+research_plan_instructions = """你是一位专业的全球化多语种研究规划专家。
 
-基于用户的研究主题，制定一个详细的研究计划供用户审核。
+你将基于研究主题，制定一个详细的研究计划。
 
 指导原则：
 - 任务1：分析研究主题，制定1~5个清晰的研究目标，规划具体的方法论和搜索策略和信息收集步骤
 - 任务2：从研究主题和研究目标中提取1~10个紧密相关的查询关键词或短语（适合搜索引擎）
-- 语言：保持与研究主题相同的语言设立研究目标和研究方法（指英文、中文等，对于特定专业术语，应使用（或自动翻译成）其来源国的语言）
+- 语言：编写研究目标和研究方法时，保持与研究主题相同的语言（主题是英文就用英文、主题是中文就用中文等，对于特定专业术语，应使用（或自动翻译成）其来源国的语言）
 - 技巧：planned_queries部分，为了确保搜索引擎的召回效果，应尽可能的混合使用多种语言（英、中、日等），生成多样化的关键搜索词
 - 约束：planned_queries 列表中每一项必须是独立的“原子查询”（一条查询只表达一个意图/一个主体）。严禁在同一条查询里使用“vs/VS/比较/对比”等把多个实体或备选合并；若需要比较，请拆分为多条（各实体分别查询），并可额外增加一条比较指标/时间范围的查询。
 - 特定：对于不知名的实体，参考NER命名实体的拆解方法，弄清该主体是什么，在做什么，逐步扩展到6W（Who What Where When Why How），使用金字塔式递进构词，确保关键搜索词MECE不重不漏，例如：研究主题：“研究下深圳犀照科技发展前景”，可先搜索 "深圳 犀照科技" -> 再扩展搜索 "深圳 犀照科技 主营业务" -> 再进一步发散到科技等关键词 -> 用多语言进一步发散

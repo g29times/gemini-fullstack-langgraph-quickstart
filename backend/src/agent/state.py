@@ -84,6 +84,8 @@ class QueryGenerationState(TypedDict):
     current_queries: list
     # Carry-over planned queries backlog for dispatch scheduling
     planned_backlog: NotRequired[list[str]]
+    # Already dispatched queries carried over so the dispatcher can filter them out
+    dispatched_queries: NotRequired[list[str]]
 
 
 class WebSearchState(TypedDict):

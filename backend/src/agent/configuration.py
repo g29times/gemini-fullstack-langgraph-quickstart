@@ -147,13 +147,13 @@ class Configuration(BaseModel):
     )
     # For later loops: enable small parallel when progress < min(PARALLEL_LOW_PROGRESS_FLOOR, effort_thr * PARALLEL_LOW_PROGRESS_RATIO)
     parallel_low_progress_floor: float = Field(
-        default=0.40,
+        default=0.90,
         metadata={
             "description": "Absolute floor for low-progress gate to allow small parallelism on later loops.",
         },
     )
     parallel_low_progress_ratio: float = Field(
-        default=0.60,
+        default=1.0,
         metadata={
             "description": "Relative ratio of effort threshold for low-progress gate (combined with floor via min).",
         },

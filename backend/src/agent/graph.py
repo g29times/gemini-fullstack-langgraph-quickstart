@@ -655,7 +655,8 @@ def continue_to_web_research(state: QueryGenerationState, config: RunnableConfig
                 float(configurable.parallel_low_progress_floor),
                 float(thr) - float(configurable.parallel_reduce_buffer),
             ):
-                k = min(2, base_k)
+                # 后续轮并发上限 = 3
+                k = min(3, base_k)
             else:
                 k = base_k
             batch = list(filtered[:k])

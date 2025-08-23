@@ -14,7 +14,7 @@ Low: 最多1轮研究循环
 Medium: 最多3轮研究循环
 High: 最多10轮研究循环
 
-# Effort 最新设计 “主阈值 + 缓冲” 设计
+# Effort 最新 “主阈值 + 缓冲” 设计
 
 本节说明早终止与动态并发的核心门槛如何由 Effort 主阈值与缓冲（buffer）共同决定，便于统一调参与 A/B 测试。
 
@@ -119,7 +119,32 @@ High: 最多10轮研究循环
 - 若达到最大研究轮次或 `is_sufficient=True`，终止。
 - 若 `reflection` 未给出任何可用 `follow_up_queries`，直接终止（避免空转）。
 
-# 查询关键词多轮延续设计
+# 查询关键词多轮延续读取设计
+
+
+### 目标
+- 保证“计划中的查询”在多轮内被持续覆盖，避免遗漏与重复。
+- 当后续轮突然产生多条新查询时，提高触发小并发的概率，加快收敛。
+
+### 关键数据结构（`backend/src/agent/state.py`）
+- `planned_backlog: list[str]`：跨轮携带的“计划查询”待办池。
+- `dispatched_queries: list[str]`：累积记录已派发执行过的查询（用于去重）。
+
+### 数据流与去重（`backend/src/agent/graph.py`）
+- `generate_query()`：
+  - 若存在 `research_plan.planned_queries` 且为首次执行，则设置 `current_queries` 与 `planned_backlog`（首轮直接覆盖）。
+  - 若存在 `follow_up_queries`，进行拆解与长度截断，写入 `current_queries`。
+- `continue_to_web_research()`：
+  - 合并当轮 `current_queries` 与 `planned_backlog` 的剩余项；使用 `dispatched_queries` 做规范化去重（去大小写、多空格、标点）。
+  - 进行 site:domain 级去重（每域保留 1 条）。
+  - 若 backlog 尚有未覆盖项，至少将 1 条 planned 项提升到本批首位，保证跨批覆盖。
+  - 轻量相关性排序：在存在 `research_objectives` 时，按目标关键词命中数排序。
+  - 安全上限：候选最多 20 条。
+  - 并发派发：
+    - 首轮：基于 Effort 主阈值与 `parallel_reduce_buffer` 决定 `k ∈ {1, min(2, base_k), base_k}`。
+    - 后续轮：当 `progress < min(parallel_low_progress_floor, thr * parallel_low_progress_ratio)` 时使用“小并发”，当前代码为 `k = min(2, base_k)`；否则顺序（`k=1`）。
+- `web_research()`：
+  - 每执行 1 个查询，向状态追加 `dispatched_queries += [original_query]`，用于后续轮避免重复派发。
 
 
 # 研究目标达成度评估系统
