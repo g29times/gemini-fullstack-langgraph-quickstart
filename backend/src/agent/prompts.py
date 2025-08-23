@@ -5,21 +5,24 @@ from datetime import datetime
 def get_current_date():
     return datetime.now().strftime("%B %d, %Y")
 
-# generate_query | Gemini 2.5 Flash-Lite (快速查询生成)
+
+# 生成问题 generate_query | Gemini 2.5 Flash-Lite (快速查询生成)
 query_writer_instructions = """Your goal is to generate sophisticated and diverse web search queries. These queries are intended for an advanced automated web research tool capable of analyzing complex results, following links, and synthesizing information.
 
 Instructions:
-- Always prefer a single search query, only add another query if the original question requests multiple aspects or elements and one query is not enough.
-- Each query should focus on one specific aspect of the original question.
-- Don't produce more than {number_queries} queries.
-- Queries should be diverse, if the topic is broad, generate more than 1 query.
-- Don't generate multiple similar queries, 1 is enough.
-- Query should ensure that the most current information is gathered. The current date is {current_date}.
+- Generate 2–4 diverse queries by default; produce 1 only when the topic is trivially simple or purely definitional.
+- Each query should focus on one specific aspect and avoid near-duplicates.
+- Include exactly one entity verification query only when the topic involves an entity and its identity remains unresolved; if the entity has already been confirmed (e.g., official site/registration identifier found), do not include verification queries.
+- Keep non-English proper nouns in their original script in quotes (e.g., "深圳犀照科技"); add transliterations/English aliases as OR variants, not replacements; add geographic qualifiers when helpful.
+- DO NOT combine multiple entities or alternatives in a single query using connectors like "vs/VS", "比较", or "对比". Produce separate atomic queries (one query per list item). If comparison is needed, emit per-entity queries and optionally a separate comparison-metric query.
+- For China-based entities, consider authority registries: site:天眼查 OR site:企查查 OR site:aiqicha.baidu.com.
+- Ensure recency. The current date is {current_date}.
+- Keep total distinct queries <= {number_queries} (hard cap 20). Remove near-duplicates.
 
 Format: 
 - Format your response as a JSON object with ALL two of these exact keys:
    - "rationale": Brief explanation of why these queries are relevant
-   - "query": A list of search queries
+   - "query": A list of search queries (each element must be a single, atomic query; do not join multiple queries into one string)
 
 Example:
 
@@ -33,6 +36,40 @@ Topic: What revenue grew more last year apple stock or the number of people buyi
 
 Context: {research_topic}"""
 
+
+# followup_decomposer | Gemini 2.5 Flash-Lite (跟进问题拆解为可执行关键词)
+followup_decomposer_instructions = """You will transform high-level follow-up questions into executable, keyword-level search queries.
+
+Goal:
+- Convert follow-up questions into 2 or more concise search queries that directly attack the Knowledge Gap.
+
+Inputs:
+- Research Topic: {research_topic}
+- Knowledge Gap: {knowledge_gap}
+- Follow-ups (verbatim):\n{follow_ups}
+- Current Date: {current_date}
+
+Instructions:
+- The queries MUST directly address the Knowledge Gap. If the gap indicates entity ambiguity/conflict, FIRST focus on entity disambiguation before product/details.
+- Apply NER-style decomposition. Extract canonical names, aliases, translations, geographic qualifiers, and industry descriptors.
+- Use MECE decomposition: start from core entity proof (Who/What/Where) then expand to minimal additional qualifiers (When/Why/How) only if required to resolve the gap.
+- Prefer concise keyword-style queries over long natural sentences.
+- Use cross-lingual variants when appropriate (e.g., include both Chinese and English forms; keep local proper nouns in original script).
+- Each query MUST be atomic (single intent). Do NOT merge multiple entities or alternatives in one query using connectors like "vs/VS", "比较", or "对比". For comparative tasks, emit separate per-entity queries and optionally a distinct comparison-metric query.
+- Do NOT translate or alter the canonical entity string from the user; keep it verbatim in quotes; add aliases/transliterations as OR variants.
+- Only include an entity verification query when the Knowledge Gap is about entity identity/ambiguity; if the entity has already been confirmed (e.g., official site/registration identifier identified), focus on substantive aspects instead of re-verification.
+- Use Boolean operators and operators such as quotes, OR, site:, filetype:, intitle:, inurl: where helpful.
+- For China-based entities, consider authority registries: site:天眼查 OR site:企查查 OR site:aiqicha.baidu.com；consider using “统一社会信用代码/工商/注册地址/法定代表人” as keywords.
+- Keep total distinct queries <= {number_queries} (hard cap 10). Remove near-duplicates.
+
+Output Format (JSON):
+{{
+  "rationale": "Why these queries close the gap",
+  "query": ["query1", "query2", "..."]
+}}
+"""
+
+
 # web_research | Gemini 2.5 Flash-Lite (快速信息收集)
 web_searcher_instructions = """Conduct targeted Google Searches to gather the most recent, credible information on "{research_topic}" and synthesize it into a verifiable text artifact.
 
@@ -40,26 +77,19 @@ Instructions:
 - Query should ensure that the most current information is gathered. The current date is {current_date}.
 - Conduct multiple, diverse searches to gather comprehensive information.
 - Prioritize understanding the user's intent, including vague phrasing or typos; do not over-assume specifics that the user did not state.
+- For entity disambiguation, prioritize authoritative registries and the entity's official website; verify identifiers where applicable (e.g., 统一社会信用代码, ICP/备案信息).
+- If the entity has already been confirmed in prior steps, focus on substantive information and avoid re-verification.
+- Preserve local proper nouns in their original script within queries and synthesis; on first mention, you may add an English alias in parentheses.
 - When a relevant entity likely has an official site, prefer opening the official homepage first via URL context, then navigate the site's primary navigation to reach the relevant area. Do not guess internal paths; discover them via navigation or search under the site.
 - Consolidate key findings while meticulously tracking the source(s) for each specific piece of information.
 - The output should be a well-written summary or report based on your search findings. 
 - Only include the information found in the search results, don't make up any information.
+- IMPORTANT: When using URL context retrieval, open/use at most 20 distinct URLs in total to stay within tool limits. If you anticipate exceeding this, prioritize and reduce the set.
 
 Research Topic:
 {research_topic}
 """
 
-# answer_simple_fact | Gemini 2.5 Flash-Lite (快速事实应答)
-simple_fact_answer_instructions = """你将直接回答一个无需联网检索的简单事实问题。
-
-规则：
-- 不进行任何外部搜索或引用。
-- 直接、简洁作答。
-
-用户问题：{research_topic}
-
-请给出直接答案，不要添加无关说明或引用。
-"""
 
 # reflection | Gemini 2.5 Flash (流程驱动分析)
 reflection_instructions = """You are an expert research assistant analyzing summaries about "{research_topic}".
@@ -67,16 +97,42 @@ reflection_instructions = """You are an expert research assistant analyzing summ
 Research Objectives (if available):
 {research_objectives}
 
+Context History:
+- Past Follow-up Queries (do NOT repeat or paraphrase):
+{previous_followups}
+- Past Knowledge Gaps (avoid asking the same; refine if absolutely necessary):
+{previous_gaps}
+- Previous Objectives Progress (for monotonic scoring):
+{previous_objectives_progress}
+
+Scoring Rubric (apply strictly and keep scores non-decreasing vs previous):
+{progress_scoring_rules}
+
+Scheduling Strategy:
+- Strategy: {scheduling_strategy}
+- Target Objective to focus next (if provided): {target_objective}
+
 Instructions:
 - Evaluate progress toward each research objective based on the provided summaries.
-- Unless the research is truly comprehensive and complete, you should generate follow-up queries to deepen understanding.
-- Generate 1-2 specific follow-up queries that would add valuable information to the research.
+- Keep per-objective progress MONOTONIC: never decrease any score below the previously reported value.
+- Unless the research is truly comprehensive and complete, generate follow-up queries to deepen understanding.
+- Generate 1-2 specific follow-up queries; prioritize queries that advance the target objective if provided.
+- CRITICAL: Follow-up queries MUST directly resolve the stated knowledge_gap. Avoid drifting to unrelated subtopics.
+- If the knowledge_gap indicates ENTITY AMBIGUITY/CONFLICT (e.g., multiple companies with similar names):
+  1) Focus FIRST on disambiguation: canonical name, aliases/拼写/翻译, location (city/province/country), business scope/industry, registration identifiers.
+  2) Add geography qualifiers (e.g., 深圳/Shenzhen) and language variants (中文/English) where appropriate.
+  3) Prefer authoritative registries for Chinese entities: 天眼查, 企查查, 爱企查 (use site: filters when possible). Include queries that can verify UCC/统一社会信用代码、法定代表人、注册地址。
+- If the entity has already been confirmed (e.g., official website or registration identifier identified in prior steps), do NOT generate further entity verification queries; focus on substantive objectives.
+- Do NOT repeat any query in the Past Follow-up list or trivial rewrites. If similar direction is needed, add strong refinements (time window, geography, product/version, metrics, site:domain, filetype, Boolean operators, synonyms in multiple languages).
 - Focus on technical details, implementation specifics, recent developments, or areas not fully covered in the summaries.
 
 Requirements:
-- Ensure the follow-up query is self-contained and includes necessary context for web search.
+- Ensure each follow-up query is self-contained and includes necessary context for web search.
+- Keep non-English proper nouns in original script (quoted) in the query; add transliterations/English aliases as variants when useful.
+- At least one follow-up MUST be an entity verification query when the knowledge_gap is about entity identity/ambiguity.
 - Do not rephrase the original question; make the query precise, unique, and directly actionable.
-- Assess completion level for each research objective (0.0 = not started, 1.0 = fully completed).
+- Assess completion level for each research objective (0.0 = not started, 1.0 = fully completed) using the rubric above.
+- Compute overall_completion as the AVERAGE of objectives_progress; set is_sufficient true if overall_completion >= 0.8.
 
 Output Format:
 - Format your response as a JSON object with these exact keys:
@@ -108,7 +164,8 @@ Summaries:
 {summaries}
 """
 
-# finalize_answer | Gemini 2.5 Pro (高质量最终答案)
+
+# finalize_answer | Gemini 2.5 Flash (高质量最终答案)
 answer_instructions = """Generate a high-quality answer to the user's question based on the provided summaries.
 
 Instructions:
@@ -125,6 +182,7 @@ User Context:
 Summaries:
 {summaries}
 """
+
 
 # classify_intent | Gemini 2.5 Flash-Lite (快速意图识别)
 intent_classifier_instructions = """You are an intent classification expert. Determine if the user's request should:
@@ -152,18 +210,22 @@ Context:
 {research_topic}
 """
 
+
 # find_official_site | Gemini 2.5 Flash-Lite (快速站点发现)
 official_site_finder_instructions = """You are discovering the official website or primary authoritative domain for the given entity.
 
 Instructions:
 - Use Google Search tool calls to find the official site of the entity.
+- When searching, include the entity's local name in quotes; add transliterations/English aliases as OR variants where helpful.
 - Prefer the canonical homepage (root domain) that represents the entity (e.g., producthunt.com for Product Hunt). Avoid deep links unless no homepage can be identified.
 - Avoid social media, aggregator, or third-party sites if the official site exists.
+- Verify candidate domains using on-site About, ICP, avoid similar but non-same entity sites.
 - Return the top one or two candidate domains in your reasoning, but the calling code will extract them from grounding metadata.
 
 Entity:
 {entity}
 """
+
 
 # direct_lookup | Gemini 2.5 Flash-Lite (快速直接查询)
 direct_lookup_instructions = """Perform a focused lookup only within the official domain to answer the user's request.
@@ -171,6 +233,7 @@ direct_lookup_instructions = """Perform a focused lookup only within the officia
 Rules:
 - Understand the user's intent; handle ambiguous phrasing or typos by clarifying intent from context. Do not assume specifics that the user did not ask for.
 - Restrict queries and retrieval to: site:{official_domain}
+- Preserve the entity's local name (quoted) when searching/navigating; ensure the page clearly corresponds to the exact entity (e.g., legal name, address, registration identifiers).
 - Homepage-first navigation: when the user's time scope is recent or unspecified, start from the official homepage and navigate using on-site menus/search rather than assuming internal paths.
 - Official Homepage seed (for navigation): https://{official_domain}/
 - Prefer opening the relevant page via URL context; you can also use Google Search to discover the right page under the official domain.
@@ -179,6 +242,7 @@ Rules:
 - Do not guess fixed paths; discover them by navigating the site.
 - Produce a concise, high-quality answer. The current date is {current_date}.
 - Citations will be automatically added from grounding or URL context metadata.
+- IMPORTANT: When using URL context retrieval, open/use at most 20 distinct URLs in total to stay within tool limits.
 
 User Request:
 {research_topic}
@@ -186,6 +250,7 @@ User Request:
 Entity (if any): {entity}
 Attribute (if any): {attribute}
 """
+
 
 # Fallback quick lookup when no official domain is available | Gemini 2.5 Flash-Lite (快速回退查询)
 quick_lookup_fallback_instructions = """Perform a focused quick lookup across the web to answer the user's request when no official domain is available.
@@ -204,33 +269,48 @@ Entity (if any): {entity}
 Attribute (if any): {attribute}
 """
 
-# generate_research_plan | Gemini 2.5 Flash-Lite (快速研究规划)
-research_plan_instructions = """你是一位专业的研究规划专家。基于用户的研究主题，制定一个详细的研究计划供人类审核。
+
+# answer_simple_fact | Gemini 2.5 Flash-Lite (快速事实应答)
+simple_fact_answer_instructions = """你将直接回答一个无需联网检索的简单事实问题。保持与用户相同的语言。（但对于特定领域，必要时可以结合英语等专业术语）
+
+规则：
+- 不进行任何外部搜索或引用。
+- 直接、简洁作答。
+
+用户问题：{research_topic}
+
+请给出直接答案，不要添加无关说明或引用。
+"""
+
+
+# generate_research_plan | Gemini 2.5 Flash (专业研究规划)
+research_plan_instructions = """你是一位专业的研究规划专家。
+
+基于用户的研究主题，制定一个详细的研究计划供用户审核。
 
 指导原则：
-- 分析研究主题的复杂度和范围
-- 制定清晰的研究目标和方法论
-- 规划具体的搜索策略和信息收集步骤
-- 估算研究时间和预期成果
-- 考虑可能的挑战和替代方案
+- 任务1：分析研究主题，制定1~5个清晰的研究目标，规划具体的方法论和搜索策略和信息收集步骤
+- 任务2：从研究主题和研究目标中提取1~10个紧密相关的查询关键词或短语（适合搜索引擎）
+- 语言：保持与研究主题相同的语言设立研究目标和研究方法（指英文、中文等，对于特定专业术语，应使用（或自动翻译成）其来源国的语言）
+- 技巧：planned_queries部分，为了确保搜索引擎的召回效果，应尽可能的混合使用多种语言（英、中、日等），生成多样化的关键搜索词
+- 约束：planned_queries 列表中每一项必须是独立的“原子查询”（一条查询只表达一个意图/一个主体）。严禁在同一条查询里使用“vs/VS/比较/对比”等把多个实体或备选合并；若需要比较，请拆分为多条（各实体分别查询），并可额外增加一条比较指标/时间范围的查询。
+- 特定：对于不知名的实体，参考NER命名实体的拆解方法，弄清该主体是什么，在做什么，逐步扩展到6W（Who What Where When Why How），使用金字塔式递进构词，确保关键搜索词MECE不重不漏，例如：研究主题：“研究下深圳犀照科技发展前景”，可先搜索 "深圳 犀照科技" -> 再扩展搜索 "深圳 犀照科技 主营业务" -> 再进一步发散到科技等关键词 -> 用多语言进一步发散
+- 特定：对于中国企业信息，要重点关注“天眼查”，“企查查”，“爱企查”三个企业分析平台的数据，其他国家的也类似的使用当地的信息中枢
 
 输出格式（JSON）：
 {{
     "research_objectives": ["目标1", "目标2", "..."],
-    "planned_queries": ["查询1", "查询2", "..."],
-    "research_methodology": "详细的研究方法描述",
-    "expected_outcomes": "预期研究成果描述",
-    "estimated_time": "预估研究时间",
-    "potential_challenges": ["挑战1", "挑战2", "..."],
-    "alternative_approaches": ["方案1", "方案2", "..."]
+    "research_methodology": "详细的研究方法、搜索策略、信息收集步骤",
+    "planned_queries": ["查询1（某关键词）", "查询2（某短语）", "..."]
 }}
 
 研究主题：{research_topic}
 当前日期：{current_date}
 """
 
-# thinking_startup_stage | Gemini 2.5 Flash-Lite (快速起步思考)
-thinking_startup_instructions = """你正处于研究的起步阶段，需要进行"概述分解规划"。
+
+# thinking_startup_stage | Gemini 2.5 Flash (流程起步思考)
+thinking_startup_instructions = """你正处于研究的起步阶段，需要进行"概述分解规划"。使用与研究主题相同的语言进行思考。
 
 任务：
 1. **概述**：对研究主题进行全面概述，识别核心概念和关键要素
@@ -252,7 +332,7 @@ thinking_startup_instructions = """你正处于研究的起步阶段，需要进
 """
 
 # thinking_middle_stage | Gemini 2.5 Flash (流程驱动深化)
-thinking_middle_instructions = """你正处于研究的中间阶段，需要进行"洞察梳理深化"。
+thinking_middle_instructions = """你正处于研究的中间阶段，需要进行"洞察梳理深化"。使用与研究主题相同的语言进行思考。
 
 任务：
 1. **洞察**：从已收集的信息中提取关键洞察和发现
@@ -277,7 +357,7 @@ thinking_middle_instructions = """你正处于研究的中间阶段，需要进�
 """
 
 # thinking_finalization_stage | Gemini 2.5 Flash (收尾思考)
-thinking_finalization_instructions = """你正处于研究的收尾阶段，需要进行"洞察梳理总结"。
+thinking_finalization_instructions = """你正处于研究的收尾阶段，需要进行"洞察梳理总结"。使用与研究主题相同的语言进行思考。
 
 任务：
 1. **洞察**：综合所有研究发现，提取最终洞察
@@ -304,26 +384,6 @@ thinking_finalization_instructions = """你正处于研究的收尾阶段，需�
 当前日期：{current_date}
 """
 
-# generate_enhanced_report | Gemini 2.5 Pro (高质量报告生成)
-enhanced_report_instructions = """生成一份高质量的结构化研究报告。
-
-报告结构要求：
-1. **摘要**：简洁的执行摘要
-2. **章节结构**：清晰的章节划分
-3. **图表支持**：适当的markdown表格和图表
-4. **引用标注**：完整的引用链接
-
-输出格式：
-- 使用markdown格式
-- 包含目录结构
-- 章节编号和标题
-- 适当的表格和列表
-- 完整的引用链接
-
-研究主题：{research_topic}
-研究结果：{summaries}
-报告大纲：{report_outline}
-"""
 
 # detect_follow_up | Gemini 2.5 Flash-Lite (快速追问检测)
 follow_up_detection_instructions = """你是一个专业的对话分析助手，需要判断用户的当前消息是否为追问（follow-up question）。
@@ -347,13 +407,13 @@ follow_up_detection_instructions = """你是一个专业的对话分析助手，
 
 返回结果：
 - is_follow_up: true/false
-- confidence: 0.0-1.0的置信度
-- reasoning: 判断理由
-- previous_context_relevant: 之前的内容是否与当前问题相关
+- confidence: 0.0-1.0 置信度
 """
 
+
 # handle_follow_up | Gemini 2.5 Flash-Lite (快速追问处理)
-follow_up_instructions = """你是一个专业的研究助手，用户基于之前的研究报告提出了追问。请基于之前的报告内容和新的问题，提供精准的回答或进行补充研究。
+follow_up_instructions = """你是一个专业的研究助手。
+用户基于之前的研究报告提出了追问。请基于之前的报告内容和新的问题，提供精准的回答或进行补充研究。
 
 之前的研究报告：
 {previous_report}
@@ -370,7 +430,34 @@ follow_up_instructions = """你是一个专业的研究助手，用户基于之�
 
 回答格式：
 - can_answer_directly: true/false
-- direct_answer: 如果可以直接回答，提供答案
+- direct_answer: 如果可以直接回答，提供答案，保持与用户相同的语言。（但对于特定领域，必要时可以结合英语等专业术语）
 - needs_research: true/false  
-- research_queries: 如果需要研究，提供具体的搜索查询列表
+- research_queries: 如果需要研究，提供具体的搜索查询列表，保持与研究报告相同的语言（指英文、中文等）。
+"""
+
+
+# generate_enhanced_report | Gemini 2.5 Pro (高质量报告生成)
+enhanced_report_instructions = """生成一份高质量的结构化研究报告。使用与研究主题相同的语言（指英文、中文等）生成报告。
+
+报告结构要求：
+1. **标题和摘要**：大标题+简洁的摘要
+2. **章节结构**：清晰的章节划分
+3. **图表支持**：适当的markdown表格和图表
+4. **引用标注**：在相关段落内进行“内联编号引用”
+
+输出格式：
+- 使用markdown格式
+- 报告标题和摘要（可选目录结构）
+- 章节标题/编号（灵活的，不一定要有“第一章”这样的字眼）
+- 适当的表格和图表
+- 引用请在相关句子后内联标注为 [n](SHORT_URL)，例如 [1](SHORT_URL) ；同一来源可在多处复用同一编号；引用仅能从“研究结果”中复用，不要杜撰；若未包含引用，可不添加
+- 结合主题，适时增加Appendix、Glossary等部分以丰富内容
+- 实体命名：首次出现时保留原语言名称，括号中可附英文或音译别名；全文保持一致。
+
+不要做任何语气类的、应答类的陈述，如“好的，下面是我为您生成的一份报告”等，而是直接按照格式输出报告。
+
+当前日期：{current_date}
+研究主题：{research_topic}
+研究结果：{summaries}
+报告大纲：{report_outline}
 """

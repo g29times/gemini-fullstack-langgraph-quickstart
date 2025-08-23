@@ -81,18 +81,6 @@ class ResearchPlan(BaseModel):
     research_methodology: str = Field(
         description="Detailed description of research methodology."
     )
-    expected_outcomes: str = Field(
-        description="Description of expected research outcomes."
-    )
-    estimated_time: str = Field(
-        description="Estimated time for research completion."
-    )
-    potential_challenges: List[str] = Field(
-        description="List of potential challenges and risks."
-    )
-    alternative_approaches: List[str] = Field(
-        description="List of alternative research approaches."
-    )
 
 
 class ThinkingStage(BaseModel):

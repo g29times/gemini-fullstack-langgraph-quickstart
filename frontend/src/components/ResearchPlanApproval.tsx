@@ -9,10 +9,6 @@ interface ResearchPlan {
   research_objectives: string[];
   planned_queries: string[];
   research_methodology: string;
-  expected_outcomes: string;
-  estimated_time: string;
-  potential_challenges: string[];
-  alternative_approaches: string[];
 }
 
 interface ResearchPlanApprovalProps {
@@ -100,56 +96,6 @@ export const ResearchPlanApproval: React.FC<ResearchPlanApprovalProps> = ({
             </div>
           </CardContent>
         </Card>
-
-        {/* Expected Outcomes & Time */}
-        <div className="grid md:grid-cols-2 gap-6">
-          <Card className="bg-neutral-900 border-neutral-700">
-            <CardHeader>
-              <CardTitle className="text-neutral-100">预期成果</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <p className="text-neutral-300">{researchPlan.expected_outcomes}</p>
-            </CardContent>
-          </Card>
-
-          <Card className="bg-neutral-900 border-neutral-700">
-            <CardHeader>
-              <CardTitle className="text-neutral-100">预估时间</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <p className="text-neutral-300 font-semibold">{researchPlan.estimated_time}</p>
-            </CardContent>
-          </Card>
-        </div>
-
-        {/* Challenges & Alternatives */}
-        <div className="grid md:grid-cols-2 gap-6">
-          <Card className="bg-neutral-900 border-neutral-700">
-            <CardHeader>
-              <CardTitle className="text-neutral-100 text-sm">潜在挑战</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <ul className="space-y-1 text-sm">
-                {researchPlan.potential_challenges.map((challenge, index) => (
-                  <li key={index} className="text-neutral-400">• {challenge}</li>
-                ))}
-              </ul>
-            </CardContent>
-          </Card>
-
-          <Card className="bg-neutral-900 border-neutral-700">
-            <CardHeader>
-              <CardTitle className="text-neutral-100 text-sm">备选方案</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <ul className="space-y-1 text-sm">
-                {researchPlan.alternative_approaches.map((approach, index) => (
-                  <li key={index} className="text-neutral-400">• {approach}</li>
-                ))}
-              </ul>
-            </CardContent>
-          </Card>
-        </div>
 
         {/* Modification Input */}
         {showModifications && (

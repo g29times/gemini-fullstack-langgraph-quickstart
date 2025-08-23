@@ -23,11 +23,11 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 from langgraph.errors import NodeInterrupt
 from google.genai import Client
-from urllib.parse import urlparse
 
 from agent.state import OverallState, ReflectionState, QueryGenerationState, WebSearchState, FollowUpDetection
 from agent.prompts import (
     query_writer_instructions,
+    followup_decomposer_instructions,
     web_searcher_instructions,
     reflection_instructions,
     answer_instructions,
@@ -68,6 +68,164 @@ if os.getenv("GEMINI_API_KEY") is None:
 
 # Used for Google Search API
 genai_client = Client(api_key=os.getenv("GEMINI_API_KEY"))
+
+
+# Unified summaries separator and builder
+SUMMARY_SEPARATOR = "\n\n---\n\n"
+
+def _prepare_summaries(results: list[str] | None, max_items: int = 10, max_chars: int = 10000) -> str:
+    """Build a normalized, light deduped and size-capped summaries string.
+
+    - Filters non-strings
+    - Deduplicates by normalized lowercase + collapsed whitespace
+    - Caps by items count and total characters
+    - Joins with a unified separator
+    """
+    if not results:
+        return "暂无研究结果"
+    # 过滤与轻量去重
+    safe = [s for s in results if isinstance(s, str)]
+    seen: set[str] = set()
+    dedup: list[str] = []
+    for s in safe:
+        try:
+            norm = " ".join(s.lower().split())
+        except Exception:
+            norm = str(s).lower()
+        if norm in seen:
+            continue
+        seen.add(norm)
+        dedup.append(s)
+
+    # 按预算裁剪
+    out: list[str] = []
+    total = 0
+    for s in dedup:
+        if len(out) >= max_items:
+            break
+        sep_len = len(SUMMARY_SEPARATOR) if out else 0
+        if total + sep_len + len(s) > max_chars:
+            remaining = max_chars - total - sep_len
+            if remaining > 0:
+                out.append(s[:remaining])
+            break
+        out.append(s)
+        total += sep_len + len(s)
+    return SUMMARY_SEPARATOR.join(out) if out else "暂无研究结果"
+
+
+def _contains_cjk(text: str) -> bool:
+    """Lightweight detection for CJK characters to decide if translation is needed."""
+    try:
+        return bool(re.search(r"[\u4e00-\u9fff]", text or ""))
+    except Exception:
+        return False
+
+
+def _extract_cjk_terms(text: str) -> list[str]:
+    """Extract unique CJK substrings (length>=2) to preserve local entity names in queries."""
+    try:
+        terms = re.findall(r"[\u4e00-\u9fff]{2,}", text or "")
+        out: list[str] = []
+        seen: set[str] = set()
+        for t in terms:
+            if t not in seen:
+                seen.add(t)
+                out.append(t)
+        return out
+    except Exception:
+        return []
+
+
+def _split_composite_query(q: str) -> list[str]:
+    """Split a composite query like '"A" vs "B" vs "C"' into ['"A"', '"B"', '"C"'].
+
+    - Protect quoted spans, split only on connectors outside quotes: vs/VS/对比/比较
+    - If no connectors found outside quotes, return [q].
+    """
+    try:
+        if not q or len(q) < 4:
+            return [q]
+        placeholders: dict[str, str] = {}
+        idx = 0
+        def _repl(m: re.Match) -> str:
+            nonlocal idx
+            key = f"__Q{idx}__"
+            placeholders[key] = m.group(0)
+            idx += 1
+            return key
+        tmp = re.sub(r'"[^"]+"', _repl, q)
+        parts = re.split(r"\s*(?:vs\.?|VS\.?|对比|比较)\s*", tmp)
+        if len(parts) <= 1:
+            return [q]
+        restored: list[str] = []
+        for p in parts:
+            frag = p
+            for k, v in placeholders.items():
+                frag = frag.replace(k, v)
+            frag = frag.strip().strip(";，,。")
+            if frag:
+                restored.append(frag)
+        # 去重
+        uniq: list[str] = []
+        seen: set[str] = set()
+        for it in restored:
+            norm = " ".join(it.lower().split())
+            if norm not in seen:
+                seen.add(norm)
+                uniq.append(it)
+        return uniq or [q]
+    except Exception:
+        return [q]
+
+
+def _sanitize_queries(queries: list[str], limit: int | None = None) -> list[str]:
+    """Flatten queries by splitting composites and trimming; optionally cap to limit."""
+    flat: list[str] = []
+    for q in queries or []:
+        if re.search(r"(?:\bvs\b|VS|对比|比较)", q or ""):
+            flat.extend(_split_composite_query(q))
+        else:
+            flat.append(q)
+    # 去重与清理
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for x in flat:
+        s = (x or "").strip()
+        if not s:
+            continue
+        n = " ".join(s.lower().split())
+        if n in seen:
+            continue
+        seen.add(n)
+        cleaned.append(s)
+    if limit is not None and limit > 0:
+        return cleaned[: max(1, limit)] or cleaned[:1]
+    return cleaned
+
+
+def _translate_to_english(text: str, model_name: str) -> str:
+    """Translate Chinese query to concise English using the same LLM family. Fallback to original on failure."""
+    try:
+        llm = ChatGoogleGenerativeAI(
+            model=model_name,
+            temperature=0.0,
+            max_retries=2,
+            api_key=os.getenv("GEMINI_API_KEY"),
+        )
+        prompt = (
+            "Translate the following Chinese search query into concise English suitable for web search. （Keep the Local NER name or terminology）"
+            "Only output the translation without quotes.\n\n" + (text or "")
+        )
+        res = llm.invoke(prompt)
+        translated = (getattr(res, "content", "") or "").strip()
+        return translated
+    except Exception:
+        try:
+            logger.exception("[translation] failed to translate query; using original")
+        except Exception:
+            pass
+        return ""
 
 
 def _repair_json_format(raw_content: str) -> dict | None:
@@ -118,8 +276,59 @@ def _repair_json_format(raw_content: str) -> dict | None:
     return None
 
 
-# Nodes
-def generate_query(state: OverallState, config: RunnableConfig) -> QueryGenerationState:
+# Effort utilities
+def _infer_effort(state: OverallState, configurable: Configuration) -> str:
+    """Infer effort level from state; prefer explicit state['effort'] if provided.
+
+    Decoupled from max_research_loops. Fallback mapping based only on
+    initial_search_query_count:
+      - high: initial >= 5
+      - medium: initial >= 3
+      - low: otherwise
+    """
+    try:
+        explicit = (state.get("effort") or "").lower()
+        if explicit in {"low", "medium", "high"}:
+            return explicit
+    except Exception:
+        pass
+
+    try:
+        initial = int(state.get("initial_search_query_count") or configurable.number_of_initial_queries)
+    except Exception:
+        initial = configurable.number_of_initial_queries
+
+    if initial >= 5:
+        return "high"
+    if initial >= 3:
+        return "medium"
+    return "low"
+
+
+def _effort_completion_threshold(configurable: Configuration, effort: str) -> float:
+    if effort == "high":
+        return float(configurable.effort_high_completion_threshold)
+    if effort == "medium":
+        return float(configurable.effort_medium_completion_threshold)
+    return float(configurable.effort_low_completion_threshold)
+
+
+def _effort_max_parallel(configurable: Configuration, effort: str) -> int:
+    base = int(configurable.max_parallel_queries)
+    try:
+        if effort == "high" and configurable.effort_high_max_parallel_queries is not None:
+            return int(configurable.effort_high_max_parallel_queries)
+        if effort == "medium" and configurable.effort_medium_max_parallel_queries is not None:
+            return int(configurable.effort_medium_max_parallel_queries)
+        if effort == "low" and configurable.effort_low_max_parallel_queries is not None:
+            return int(configurable.effort_low_max_parallel_queries)
+    except Exception:
+        pass
+    return max(1, base)
+
+
+# 重点方法 生成查询 高度遵循 0.2 Gemini 2.5 Flash-Lite
+def generate_query(state: OverallState, config: RunnableConfig) -> OverallState:
     """LangGraph node that generates search queries based on the User's question.
 
     Uses Gemini 2.5 Flash-Lite to create an optimized search queries for web research based on
@@ -134,22 +343,85 @@ def generate_query(state: OverallState, config: RunnableConfig) -> QueryGenerati
     """
     configurable = Configuration.from_runnable_config(config)
 
-    # 若反射阶段已产出跟进查询，则优先使用这些查询，保证顺序循环闭环
+    # check for custom initial search query count (before any path returns)
+    if state.get("initial_search_query_count") is None:
+        state["initial_search_query_count"] = configurable.number_of_initial_queries
+
+    # 若反射阶段已产出跟进查询，则将其“拆解”为关键词级可执行查询，避免原样照搬
     follow_ups = state.get("follow_up_queries") or []
     if isinstance(follow_ups, list) and len(follow_ups) > 0:
-        logger.info("[routing] using %d follow-up queries from reflection", len(follow_ups))
-        return {"search_query": follow_ups}
-    
+        try:
+            llm = ChatGoogleGenerativeAI(
+                model=configurable.query_generator_model,
+                temperature=0.2,
+                max_retries=2,
+                api_key=os.getenv("GEMINI_API_KEY"),
+            )
+            structured_llm = llm.with_structured_output(SearchQueryList)
+            current_date = get_current_date()
+            followups_text = "\n".join(f"• {q}" for q in follow_ups)
+            # 严格对齐 prompt 的 1~5 要求：仅用于跟进拆解，不影响初始生成路径
+            try:
+                _init_cnt = int(state.get("initial_search_query_count") or configurable.number_of_initial_queries)
+            except Exception:
+                _init_cnt = configurable.number_of_initial_queries
+            max_followup_queries = max(1, min(_init_cnt, 5))
+            formatted_prompt = followup_decomposer_instructions.format(
+                research_topic=get_research_topic(state["messages"]),
+                knowledge_gap=state.get("knowledge_gap", ""),
+                follow_ups=followups_text,
+                current_date=current_date,
+                number_queries=max_followup_queries,
+            )
+            result = structured_llm.invoke(formatted_prompt)
+            try:
+                logger.info(
+                    "[routing] decomposed %d follow-ups -> %d executable queries",
+                    len(follow_ups), len(getattr(result, "query", []) or []),
+                )
+            except Exception:
+                pass
+            # 空结果回退 + 长度截断
+            try:
+                count = int(state.get("initial_search_query_count") or configurable.number_of_initial_queries)
+            except Exception:
+                count = configurable.number_of_initial_queries
+            queries = list(getattr(result, "query", []) or [])
+            if not queries:
+                try:
+                    logger.info("[routing] decomposition returned 0 queries; fallback to raw follow-ups")
+                except Exception:
+                    pass
+                fallback = _sanitize_queries(list(follow_ups), max(1, count))
+                return {"current_queries": fallback, "search_query": fallback}
+            sanitized = _sanitize_queries(queries, max(1, count))
+            return {"current_queries": sanitized, "search_query": sanitized}
+        except Exception:
+            try:
+                logger.exception("[routing] follow-up decomposition failed, fallback to raw follow-ups")
+            except Exception:
+                pass
+            # 发生异常时也进行长度截断
+            try:
+                count = int(state.get("initial_search_query_count") or configurable.number_of_initial_queries)
+            except Exception:
+                count = configurable.number_of_initial_queries
+            fallback = _sanitize_queries(list(follow_ups), max(1, count))
+            return {"current_queries": fallback, "search_query": fallback}
+
     # 优先使用研究计划中的查询（如果存在且是首次执行）
     research_plan = state.get("research_plan", {})
     planned_queries = research_plan.get("planned_queries", [])
     if planned_queries and not state.get("search_query"):  # 首次执行且有计划查询
-        logger.info("[routing] using %d planned queries from research plan", len(planned_queries))
-        return {"search_query": planned_queries}
-
-    # check for custom initial search query count
-    if state.get("initial_search_query_count") is None:
-        state["initial_search_query_count"] = configurable.number_of_initial_queries
+        logger.info("[first_query] using %d planned queries from research plan", len(planned_queries))
+        try:
+            count = int(state.get("initial_search_query_count") or configurable.number_of_initial_queries)
+        except Exception:
+            count = configurable.number_of_initial_queries
+        # 首次：传递所有计划查询，并记录 backlog 以便后续逐轮覆盖
+        full = list(planned_queries)
+        sanitized_full = _sanitize_queries(full, None)  # 不在此处截断，保留完整计划并由调度分批覆盖
+        return {"current_queries": sanitized_full, "search_query": sanitized_full, "planned_backlog": sanitized_full}
     
     # Debug: print runtime parameters
     try:
@@ -157,12 +429,12 @@ def generate_query(state: OverallState, config: RunnableConfig) -> QueryGenerati
                    state.get("initial_search_query_count", 0), 
                    state.get("max_research_loops", configurable.max_research_loops))
     except Exception:
-        pass
+        logger.exception("[generate_query] Runtime params logging failed")
 
     # init Gemini 2.5 Flash-Lite
     llm = ChatGoogleGenerativeAI(
         model=configurable.query_generator_model,
-        temperature=1.0,
+        temperature=0.2,
         max_retries=2,
         api_key=os.getenv("GEMINI_API_KEY"),
     )
@@ -191,7 +463,14 @@ def generate_query(state: OverallState, config: RunnableConfig) -> QueryGenerati
         logger.info("[query] generated %d initial queries", len(getattr(result, "query", []) or []))
     except Exception:
         pass
-    return {"search_query": result.query}
+    # 长度截断，确保不超过 initial_search_query_count
+    try:
+        count = int(state.get("initial_search_query_count") or configurable.number_of_initial_queries)
+    except Exception:
+        count = configurable.number_of_initial_queries
+    queries = list(getattr(result, "query", []) or [])
+    sanitized = _sanitize_queries(queries, max(1, count))
+    return {"current_queries": sanitized, "search_query": sanitized}
 
 
 def continue_to_web_research(state: QueryGenerationState, config: RunnableConfig):
@@ -200,9 +479,40 @@ def continue_to_web_research(state: QueryGenerationState, config: RunnableConfig
     This is used to spawn n number of web research nodes, one for each search query.
     """
     configurable = Configuration.from_runnable_config(config)
-    queries = state.get("search_query", [])
+    # 优先使用当轮待派发的 current_queries，避免历史聚合干扰
+    using_current = bool(state.get("current_queries"))
+    queries = state.get("current_queries") or state.get("search_query", [])
+    # 合并计划 backlog（剔除已派发），确保 planned 逐轮覆盖；并从 queries 中移除已派发项
+    try:
+        backlog = list(state.get("planned_backlog") or [])
+        dispatched_list = list(state.get("dispatched_queries") or [])
+        # 规范化比较，避免因大小写/多空格/标点造成重复
+        def _norm0(q: str) -> str:
+            try:
+                return " ".join((q or "").strip().lower().split())
+            except Exception:
+                return str(q)
+        dispatched_norms = { _norm0(x) for x in dispatched_list }
+        # 从当轮待选中剔除已派发
+        if queries:
+            queries = [q for q in list(queries) if _norm0(q) not in dispatched_norms]
+        # 追加 backlog 的剩余项（未派发）
+        if backlog:
+            remaining = [q for q in backlog if _norm0(q) not in dispatched_norms]
+            if remaining:
+                queries = list(queries) + remaining
+    except Exception:
+        pass
     if not queries:
-        return []
+        try:
+            logger.info("[dispatch] no queries available after generation; finalize")
+        except Exception:
+            pass
+        return "thinking_finalization_stage"
+    try:
+        logger.info("[dispatch] using %s queries: %d", "current" if using_current else "aggregated", len(queries))
+    except Exception:
+        pass
 
     # 1) 轻量去重：
     # - 规范化字符串去重（大小写/多空格）
@@ -249,17 +559,110 @@ def continue_to_web_research(state: QueryGenerationState, config: RunnableConfig
             seen_domains.add(dom)
         filtered.append(q)
 
-    if not filtered:
-        return []
+    # 若 backlog 仍有剩余（按规范化对比），至少提升一条 planned 到前部，保证每批覆盖
+    try:
+        backlog = list(state.get("planned_backlog") or [])
+        dispatched_list = list(state.get("dispatched_queries") or [])
+        def _norm(q: str) -> str:
+            try:
+                return " ".join((q or "").strip().lower().split())
+            except Exception:
+                return str(q)
+        dispatched_norms = { _norm(x) for x in dispatched_list }
+        remaining = [q for q in backlog if _norm(q) not in dispatched_norms]
+        if remaining:
+            remaining_norms = { _norm(q) for q in remaining }
+            for i, q in enumerate(filtered):
+                if _norm(q) in remaining_norms:
+                    if i != 0:
+                        filtered.insert(0, filtered.pop(i))
+                    break
+    except Exception:
+        pass
 
-    # 2) 首轮并行、后续顺序
+    # 调度：根据 reflection 同步的策略选择目标 objective，并按相关性对查询进行轻量排序
+    # 仅在存在 objectives 时启用排序，避免无意义扰动
+    try:
+        research_plan = state.get("research_plan", {}) or {}
+        research_objectives = research_plan.get("research_objectives", []) or []
+        prev_obj_prog: dict = state.get("objectives_progress", {}) or {}
+        strategy = (configurable.scheduling_strategy or "balanced").lower()
+        target_objective = ""
+        if research_objectives:
+            if strategy in ("round_robin", "balanced"):
+                rr_index = int(state.get("objective_rr_index", 0)) % len(research_objectives)
+                target_objective = research_objectives[rr_index]
+            elif strategy == "greedy_high":
+                cands = sorted(research_objectives, key=lambda o: prev_obj_prog.get(o, 0.0), reverse=True)
+                target_objective = next((o for o in cands if prev_obj_prog.get(o, 0.0) < 1.0), cands[0] if cands else "")
+            elif strategy == "greedy_low":
+                cands = sorted(research_objectives, key=lambda o: prev_obj_prog.get(o, 0.0))
+                target_objective = cands[0] if cands else ""
+        try:
+            logger.info("[dispatch] strategy=%s target_objective='%s' available=%d", strategy, (target_objective or ""), len(filtered))
+        except Exception:
+            pass
+
+        def _score_query(q: str) -> int:
+            if not target_objective:
+                return 0
+            try:
+                ql = (q or "").lower()
+                toks = [t for t in re.split(r"[^\w]+", target_objective.lower()) if len(t) > 2]
+                return sum(1 for t in toks if t and t in ql)
+            except Exception:
+                return 0
+
+        if target_objective and filtered:
+            filtered = sorted(filtered, key=_score_query, reverse=True)
+    except Exception:
+        pass
+
+    # 安全上限：限制一次累积可派发的候选数，避免过量工具调用
+    try:
+        before = len(filtered)
+        filtered = filtered[:20]
+        if before > len(filtered):
+            logger.info("[dispatch] truncated queries from %d to %d to respect tool limits", before, len(filtered))
+    except Exception:
+        pass
+
+    if not filtered:
+        try:
+            logger.info("[dispatch] queries filtered to empty; finalize")
+        except Exception:
+            pass
+        return "thinking_finalization_stage"
+
+    # 2) 首轮并行、后续顺序（加入 effort 与完成度驱动的动态并行度）
     loop_count = int(state.get("research_loop_count", 0) or 0)
+    progress = 0.0
+    try:
+        progress = float(state.get("overall_completion") or 0.0)
+    except Exception:
+        progress = 0.0
+    # Effort-aware controls
+    effort = _infer_effort(state, configurable)
+    thr = _effort_completion_threshold(configurable, effort)
+    base_k = _effort_max_parallel(configurable, effort)
     if loop_count <= 0:
         # 首轮：按配置决定是否并行和并行度
         if configurable.enable_parallel_research:
-            k = max(1, int(configurable.max_parallel_queries))
+            # 动态并行度：完成度越高，并发越低；阈值按 effort 级别调节
+            if progress >= thr:
+                k = 1
+            elif progress >= max(
+                float(configurable.parallel_low_progress_floor),
+                float(thr) - float(configurable.parallel_reduce_buffer),
+            ):
+                k = min(2, base_k)
+            else:
+                k = base_k
             batch = list(filtered[:k])
-            # TODO(neofs): 动态并行度，可按质量/预算/循环次数调整 k
+            try:
+                logger.info("[dispatch first] loop=%d effort=%s progress=%.2f thr=%.2f k=%d (base=%d)", loop_count, effort, progress, thr, k, base_k)
+            except Exception:
+                pass
             return [
                 Send("web_research", {"search_query": q, "id": int(i)})
                 for i, q in enumerate(batch)
@@ -268,11 +671,28 @@ def continue_to_web_research(state: QueryGenerationState, config: RunnableConfig
             first_query = filtered[0]
             return [Send("web_research", {"search_query": first_query, "id": 0})]
     else:
-        # 后续轮：强制顺序，仅派发一个查询
-        first_query = filtered[0]
-        return [Send("web_research", {"search_query": first_query, "id": 0})]
+        # 后续轮：默认顺序；若完成度较低，允许小并发加速收敛
+        low_progress_gate = min(
+            float(configurable.parallel_low_progress_floor),
+            float(thr) * float(configurable.parallel_low_progress_ratio),
+        )
+        if configurable.enable_parallel_research and progress < low_progress_gate:
+            k = min(len(filtered), max(1, min(2, base_k)))
+            batch = list(filtered[:k])
+            try:
+                logger.info("[dispatch later] loop=%d (later) effort=%s progress=%.2f (<%.2f) -> small parallel k=%d", loop_count, effort, progress, low_progress_gate, k)
+            except Exception:
+                pass
+            return [
+                Send("web_research", {"search_query": q, "id": int(i)})
+                for i, q in enumerate(batch)
+            ]
+        else:
+            # 强制顺序，仅派发一个查询
+            first_query = filtered[0]
+            return [Send("web_research", {"search_query": first_query, "id": 0})]
 
-
+# 重点方法
 def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
     """LangGraph node that performs web research using the native Google Search API tool.
 
@@ -287,79 +707,157 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
     """
     # Configure
     configurable = Configuration.from_runnable_config(config)
-    formatted_prompt = web_searcher_instructions.format(
-        current_date=get_current_date(),
-        research_topic=state["search_query"],
-    )
-
-    # Uses the google genai client as the langchain client doesn't return grounding metadata
-    response = genai_client.models.generate_content(
-        model=configurable.query_generator_model,
-        contents=formatted_prompt,
-        config={
-            # Enable both URL context and Google Search so the model can search then open URLs directly
-            "tools": [{"url_context": {}}, {"google_search": {}}],
-            "temperature": 0,
-        },
-    )
-    # Prefer Google Search grounding when available; otherwise fallback to URL context metadata
+    original_query = state.get("search_query", "")
+    # Translate Chinese queries to English for better coverage
+    translated_query = _translate_to_english(original_query, configurable.query_generator_model) if _contains_cjk(original_query) else ""
+    primary_query = translated_query or original_query
+    # 保留中文实体词到主查询中（即使已翻译）
     try:
-        chunks = response.candidates[0].grounding_metadata.grounding_chunks
+        cjk_terms = _extract_cjk_terms(original_query)
+        if translated_query and cjk_terms:
+            missing = [t for t in cjk_terms if t not in primary_query]
+            if missing:
+                suffix = " ".join(f'"{t}"' for t in missing)
+                primary_query = f"{primary_query} {suffix}".strip()
     except Exception:
-        chunks = []
+        pass
+    secondary_query = original_query if translated_query else None
 
-    if chunks:
-        # resolve the urls to short urls for saving tokens and time
-        resolved_urls = resolve_urls(chunks, state["id"])
-        # Gets the citations and adds them to the generated text
-        citations = get_citations(response, resolved_urls)
-        base_text = response.text or ""
-        modified_text = insert_citation_markers(base_text, citations)
-        sources_gathered = [item for citation in citations for item in citation["segments"]]
+    def _run_and_extract(query_text: str, allow_url_context: bool = True):
+        formatted = web_searcher_instructions.format(
+            current_date=get_current_date(),
+            research_topic=query_text,
+        )
+        logger.info("[web_searcher] formatted: %s", formatted)
+        tools = [{"google_search": {}}]
+        if allow_url_context:
+            tools = [{"url_context": {}}, {"google_search": {}}]
+        # 调用模型并捕获异常；如 URL 超限/服务错误，降级重试（禁用 url_context）
         try:
-            grounded_list = [seg.get("value") for citation in citations for seg in citation["segments"]]
-            logger.info("[grounding] urls => %s", grounded_list)
+            resp = genai_client.models.generate_content(
+                model=configurable.query_generator_model,
+                contents=formatted,
+                config={
+                    "tools": tools,
+                    "temperature": 0,
+                },
+            )
+        except Exception as e:
+            msg = str(e)
+            try:
+                logger.warning("[web_searcher] primary call failed: %s", msg)
+            except Exception:
+                pass
+            # 针对 URL 超限或服务端错误，回退禁用 url_context 再试一次
+            if allow_url_context and ("exceeds the limit" in msg or "INVALID_ARGUMENT" in msg or "500" in msg or "unavailable" in msg.lower()):
+                try:
+                    resp = genai_client.models.generate_content(
+                        model=configurable.query_generator_model,
+                        contents=formatted,
+                        config={
+                            "tools": [{"google_search": {}}],
+                            "temperature": 0,
+                        },
+                    )
+                except Exception as e2:
+                    try:
+                        logger.error("[web_searcher] fallback without url_context failed: %s", str(e2))
+                    except Exception:
+                        pass
+                    return [], "[web_search error suppressed] " + (msg or "")
+            else:
+                return [], "[web_search error suppressed] " + (msg or "")
+        # Prefer Google Search grounding when available; otherwise fallback to URL context metadata
+        try:
+            ch = resp.candidates[0].grounding_metadata.grounding_chunks
+        except Exception:
+            ch = []
+
+        if ch:
+            # Truncate grounding chunks to at most 20 to respect URL context limit
+            limited_chunks = ch[:20]
+            resolved = resolve_urls(limited_chunks, state["id"])
+            cits = get_citations(resp, resolved)
+            base = resp.text or ""
+            mod = insert_citation_markers(base, cits)
+            src = [item for citation in cits for item in citation["segments"]]
+            try:
+                grounded_list = [seg.get("value") for citation in cits for seg in citation["segments"]]
+                # logger.info("[grounding] urls => %s", grounded_list)
+            except Exception:
+                pass
+            return src, mod
+        else:
+            # URL context fallback
+            urls = []
+            try:
+                url_meta = resp.candidates[0].url_context_metadata.url_metadata
+                for m in url_meta:
+                    status = getattr(m, "url_retrieval_status", None)
+                    if not status or "SUCCESS" in status:
+                        try:
+                            urls.append(getattr(m, "url", None) or getattr(m, "final_url", None))
+                        except Exception:
+                            pass
+                urls = [u for u in urls if u]
+            except Exception:
+                urls = []
+            logger.info("[url_context] retrieved URLs => %s", urls)
+
+            # Truncate to at most 20 URLs
+            if len(urls) > 20:
+                urls = urls[:20]
+
+            prefix = "https://vertexaisearch.cloud.google.com/id/"
+            resolved = {u: f"{prefix}{state['id']}-{i}" for i, u in enumerate(urls)}
+            text_len = len(resp.text or "")
+            segments = []
+            for u in urls:
+                try:
+                    netloc = urlparse(u).netloc or u
+                    label = netloc.split(":")[0]
+                except Exception:
+                    label = u
+                segments.append({"label": label, "short_url": resolved[u], "value": u})
+            cits = []
+            if segments:
+                cits.append({"start_index": text_len, "end_index": text_len, "segments": segments})
+            base = resp.text or ""
+            mod = insert_citation_markers(base, cits)
+            return segments, mod
+
+    # First attempt with primary (possibly translated) query
+    try:
+        sources_gathered, modified_text = _run_and_extract(primary_query)
+    except Exception as e:
+        # 兜底：任何未预期异常都不应中断流程
+        try:
+            logger.exception("[web_searcher] unexpected error (primary)")
         except Exception:
             pass
-    else:
-        # URL context fallback: gather retrieved URLs and append citations at the end of text
-        urls = []
+        sources_gathered, modified_text = [], "[web_search error suppressed] " + str(e)
+    # Retry with secondary (original) if no sources gathered
+    if not sources_gathered and secondary_query:
         try:
-            url_meta = response.candidates[0].url_context_metadata.url_metadata
-            for m in url_meta:
-                status = getattr(m, "url_retrieval_status", None)
-                if not status or "SUCCESS" in status:
-                    urls.append(getattr(m, "retrieved_url", None))
-            urls = [u for u in urls if u]
+            logger.info("[retry] zero sources with primary; retrying with original query")
         except Exception:
-            urls = []
-        logger.info("[url_context] retrieved URLs => %s", urls)
-
-        # Build short-url map
-        prefix = "https://vertexaisearch.cloud.google.com/id/"
-        resolved_urls = {u: f"{prefix}{state['id']}-{i}" for i, u in enumerate(urls)}
-
-        # Build one citation that appends markers at the end
-        text_len = len(response.text or "")
-        segments = []
-        for u in urls:
+            pass
+        try:
+            sources_gathered, modified_text = _run_and_extract(secondary_query)
+        except Exception as e:
             try:
-                netloc = urlparse(u).netloc or u
-                label = netloc.split(":")[0]
+                logger.exception("[web_searcher] unexpected error (secondary)")
             except Exception:
-                label = u
-            segments.append({"label": label, "short_url": resolved_urls[u], "value": u})
-        citations = []
-        if segments:
-            citations.append({"start_index": text_len, "end_index": text_len, "segments": segments})
-        base_text = response.text or ""
-        modified_text = insert_citation_markers(base_text, citations)
-        sources_gathered = segments
+                pass
+            sources_gathered, modified_text = [], "[web_search error suppressed] " + str(e)
 
+    # 记录已派发查询，避免重复
+    dispatched_out = [original_query] if original_query else []
     return {
         "sources_gathered": sources_gathered,
         "search_query": [state["search_query"]],
         "web_research_result": [modified_text],
+        "dispatched_queries": dispatched_out,
     }
 
 
@@ -549,7 +1047,7 @@ def direct_lookup(state: OverallState, config: RunnableConfig) -> OverallState:
             attribute=attribute,
         )
         logger.info("[direct_lookup] no official domain; using quick lookup fallback")
-    response = genai_client.models.generate_content(
+        response = genai_client.models.generate_content(
         model=configurable.query_generator_model,
         contents=formatted_prompt,
         config={
@@ -566,14 +1064,16 @@ def direct_lookup(state: OverallState, config: RunnableConfig) -> OverallState:
 
     if chunks:
         # Resolve URLs and construct citations from grounding chunks
-        resolved_urls = resolve_urls(chunks, 0)
+        # Truncate grounding chunks to at most 20 to respect URL context limit
+        limited_chunks = chunks[:20]
+        resolved_urls = resolve_urls(limited_chunks, 0)
         citations = get_citations(response, resolved_urls)
         base_text = response.text or ""
         modified_text = insert_citation_markers(base_text, citations)
         sources_gathered = [item for citation in citations for item in citation["segments"]]
         try:
             grounded_list = [seg.get("value") for citation in citations for seg in citation["segments"]]
-            logger.info("[direct_lookup][grounding] urls => %s", grounded_list)
+            # logger.info("[direct_lookup][grounding] urls => %s", grounded_list)
         except Exception:
             pass
     else:
@@ -584,15 +1084,22 @@ def direct_lookup(state: OverallState, config: RunnableConfig) -> OverallState:
             for m in url_meta:
                 status = getattr(m, "url_retrieval_status", None)
                 if not status or "SUCCESS" in status:
-                    urls.append(getattr(m, "retrieved_url", None))
+                    try:
+                        urls.append(getattr(m, "url", None) or getattr(m, "final_url", None))
+                    except Exception:
+                        pass
             urls = [u for u in urls if u]
         except Exception:
             urls = []
         logger.info("[direct_lookup][url_context] retrieved URLs => %s", urls)
 
+        # Truncate to at most 20 URLs
+        if len(urls) > 20:
+            urls = urls[:20]
+
         # Build short-url map
         prefix = "https://vertexaisearch.cloud.google.com/id/"
-        resolved_urls = {u: f"{prefix}0-{i}" for i, u in enumerate(urls)}
+        short = {u: f"{prefix}{state['id']}-d{i}" for i, u in enumerate(urls)}
 
         # Build one citation that appends markers at the end
         text_len = len(response.text or "")
@@ -644,6 +1151,7 @@ def answer_simple_fact(state: OverallState, config: RunnableConfig) -> OverallSt
     }
 
 
+# 反思 # 重点方法
 def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
     """LangGraph node that identifies knowledge gaps and generates potential follow-up queries.
 
@@ -671,11 +1179,71 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
     research_objectives = research_plan.get("research_objectives", [])
     objectives_text = "\n".join(f"• {obj}" for obj in research_objectives) if research_objectives else "no objectives"
     
+    # Prepare history-aware context
+    prev_followups: list[str] = state.get("followups_history", []) or []
+    prev_gaps: list[str] = state.get("knowledge_gap_history", []) or []
+    prev_obj_prog: dict = state.get("objectives_progress", {}) or {}
+
+    # Decide scheduling target objective
+    strategy = (configurable.scheduling_strategy or "balanced").lower()
+    target_objective = ""
+    if research_objectives:
+        try:
+            if strategy in ("round_robin", "balanced"):
+                rr_index = int(state.get("objective_rr_index", 0)) % len(research_objectives)
+                target_objective = research_objectives[rr_index]
+                state["objective_rr_index"] = rr_index + 1
+            elif strategy == "greedy_high":
+                # Pick objective with highest current progress (<1.0 preferred)
+                cands = sorted(research_objectives, key=lambda o: prev_obj_prog.get(o, 0.0), reverse=True)
+                # Prefer the first with < 1.0 if exists
+                target_objective = next((o for o in cands if prev_obj_prog.get(o, 0.0) < 1.0), cands[0] if cands else "")
+            elif strategy == "greedy_low":
+                cands = sorted(research_objectives, key=lambda o: prev_obj_prog.get(o, 0.0))
+                target_objective = cands[0] if cands else ""
+        except Exception:
+            target_objective = research_objectives[0]
+
+    # 可观测性：记录策略与目标
+    try:
+        logger.info(
+            "[reflection] scheduling strategy=%s, target_objective='%s', prev_overall=%.2f, objectives=%d",
+            strategy,
+            (target_objective or ""),
+            float(state.get("overall_completion") or 0.0),
+            len(prev_obj_prog),
+        )
+    except Exception:
+        pass
+
+    # Scoring rubric text from wiki
+    progress_scoring_rules = (
+        "- 0.0-0.3: 未开始或初步收集\n"
+        "- 0.4-0.6: 部分完成，有基础信息\n"
+        "- 0.7-0.8: 大部分完成，信息较全面\n"
+        "- 0.9-1.0: 完全达成，信息充分详细\n"
+    )
+
+    try:
+        import json  # ensure available
+        prev_obj_prog_text = json.dumps(prev_obj_prog, ensure_ascii=False)
+    except Exception:
+        prev_obj_prog_text = str(prev_obj_prog)
+
+    previous_followups_text = "\n".join(f"• {q}" for q in prev_followups) if prev_followups else "(none)"
+    previous_gaps_text = "\n".join(f"• {g}" for g in prev_gaps) if prev_gaps else "(none)"
+
     formatted_prompt = reflection_instructions.format(
         current_date=current_date,
         research_topic=get_research_topic(state["messages"]),
         research_objectives=objectives_text,
-        summaries="\n\n---\n\n".join(safe_results),
+        previous_followups=previous_followups_text,
+        previous_gaps=previous_gaps_text,
+        previous_objectives_progress=prev_obj_prog_text,
+        progress_scoring_rules=progress_scoring_rules,
+        scheduling_strategy=strategy,
+        target_objective=target_objective or "",
+        summaries=_prepare_summaries(safe_results),
     )
     # init Reasoning Model
     llm = ChatGoogleGenerativeAI(
@@ -769,6 +1337,55 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
 
     # Ensure follow_up_queries is properly extracted
     follow_up_queries = getattr(result, "follow_up_queries", []) or []
+    # Deduplicate with history if enabled
+    try:
+        if configurable.dedup_followups:
+            def _norm(s: str) -> str:
+                return " ".join((s or "").lower().split())
+            hist = set(_norm(x) for x in (state.get("followups_history", []) or []))
+            follow_up_queries = [q for q in follow_up_queries if _norm(q) not in hist]
+    except Exception:
+        pass
+
+    # Monotonic merge for objectives_progress and recompute overall_completion
+    try:
+        new_prog = getattr(result, "objectives_progress", {}) or {}
+        merged_prog = dict(prev_obj_prog)
+        for k, v in new_prog.items():
+            try:
+                merged_prog[k] = max(float(merged_prog.get(k, 0.0) or 0.0), float(v or 0.0))
+            except Exception:
+                merged_prog[k] = merged_prog.get(k, 0.0)
+        if merged_prog:
+            overall_completion = sum(merged_prog.values()) / max(len(merged_prog), 1)
+        else:
+            overall_completion = getattr(result, "overall_completion", 0.0)
+    except Exception:
+        merged_prog = getattr(result, "objectives_progress", {}) or {}
+        overall_completion = getattr(result, "overall_completion", 0.0)
+
+    # 可观测性：记录合并后的进度与总体完成度
+    try:
+        logger.info(
+            "[reflection] merged objectives=%d, overall_after=%.2f",
+            len(merged_prog or {}),
+            float(overall_completion or 0.0),
+        )
+    except Exception:
+        pass
+
+    # Update histories
+    try:
+        history_max = int(configurable.history_max_len)
+    except Exception:
+        history_max = 50
+    new_followups_history = (state.get("followups_history", []) or []) + follow_up_queries
+    new_followups_history = new_followups_history[-history_max:]
+    new_gap_history = (state.get("knowledge_gap_history", []) or [])
+    if getattr(result, "knowledge_gap", None):
+        new_gap_history = (new_gap_history + [result.knowledge_gap])[-history_max:]
+    new_prog_history = (state.get("objectives_progress_history", []) or []) + [merged_prog]
+    new_prog_history = new_prog_history[-history_max:]
     
     # Debug: log the actual return values
     try:
@@ -781,13 +1398,18 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
         pass
 
     return {
-        "is_sufficient": result.is_sufficient,
-        "knowledge_gap": result.knowledge_gap,
+        # None-safe extraction to avoid AttributeError when result is None
+        "is_sufficient": bool(getattr(result, "is_sufficient", False)),
+        "knowledge_gap": (getattr(result, "knowledge_gap", "") or ""),
         "follow_up_queries": follow_up_queries,
-        "objectives_progress": getattr(result, "objectives_progress", {}),
-        "overall_completion": getattr(result, "overall_completion", 0.0),
+        "objectives_progress": merged_prog,
+        "overall_completion": overall_completion,
         "research_loop_count": state["research_loop_count"],
-        "number_of_ran_queries": len(state["search_query"]),
+        "number_of_ran_queries": len(state.get("search_query") or []),
+        "followups_history": new_followups_history,
+        "knowledge_gap_history": new_gap_history,
+        "objectives_progress_history": new_prog_history,
+        "objective_rr_index": state.get("objective_rr_index"),
     }
 
 
@@ -816,6 +1438,9 @@ def evaluate_research(
     if state["is_sufficient"] or state["research_loop_count"] >= max_research_loops:
         return "finalize_answer"
     else:
+        # If no follow-ups, finalize (aligned with wiki major termination conditions)
+        if not state.get("follow_up_queries"):
+            return "finalize_answer"
         return [
             Send(
                 "web_research",
@@ -850,7 +1475,7 @@ def finalize_answer(state: OverallState, config: RunnableConfig):
     formatted_prompt = answer_instructions.format(
         current_date=current_date,
         research_topic=get_research_topic(state["messages"]),
-        summaries="\n---\n\n".join(safe_results),
+        summaries=_prepare_summaries(safe_results),
     )
 
     # init Reasoning Model, default to Gemini 2.5 Flash
@@ -864,7 +1489,7 @@ def finalize_answer(state: OverallState, config: RunnableConfig):
 
     # Replace the short urls with the original urls and add all used urls to the sources_gathered
     unique_sources = []
-    for source in state["sources_gathered"]:
+    for source in state.get("sources_gathered", []):
         if source["short_url"] in result.content:
             result.content = result.content.replace(
                 source["short_url"], source["value"]
@@ -876,16 +1501,14 @@ def finalize_answer(state: OverallState, config: RunnableConfig):
         "sources_gathered": unique_sources,
     }
 
-
-# New HITL and Enhanced Thinking Nodes
-
+# gemini-2.5-flash 生成计划 高度遵循 0.2
 def generate_research_plan(state: OverallState, config: RunnableConfig) -> OverallState:
     """Generate a research plan for human review and approval."""
     configurable = Configuration.from_runnable_config(config)
     
     llm = ChatGoogleGenerativeAI(
-        model=configurable.query_generator_model,
-        temperature=0.7,
+        model=configurable.reflection_model,
+        temperature=0.2,
         max_retries=2,
         api_key=os.getenv("GEMINI_API_KEY"),
     )
@@ -897,15 +1520,59 @@ def generate_research_plan(state: OverallState, config: RunnableConfig) -> Overa
         research_topic=get_research_topic(state["messages"]),
     )
     
-    result = structured_llm.invoke(formatted_prompt)
-    
+    logger.debug("[research_plan] prompt => %s", formatted_prompt)
+    # 优先使用结构化输出；失败则回退到非结构化并解析；最终提供安全默认
+    plan_dict = None
+    try:
+        result = structured_llm.invoke(formatted_prompt)
+    except Exception as e:
+        try:
+            logger.warning("[research_plan] structured invoke failed: %s", str(e))
+        except Exception:
+            pass
+        result = None
+    # 如果有结构化结果，优先使用
+    if result is not None and hasattr(result, "model_dump"):
+        try:
+            plan_dict = result.model_dump()
+        except Exception:
+            plan_dict = None
+    # 回退：调用原始 LLM 并尝试解析 JSON
+    if plan_dict is None:
+        try:
+            raw = llm.invoke(formatted_prompt)
+            content = getattr(raw, "content", "") or ""
+            import json  # 局部导入，避免修改全局imports
+            obj = {}
+            try:
+                obj = json.loads(content)
+            except Exception:
+                obj = {}
+            plan_dict = {
+                "research_objectives": list(obj.get("research_objectives") or []),
+                "planned_queries": list(obj.get("planned_queries") or []),
+                "research_methodology": obj.get("research_methodology") or "",
+            }
+        except Exception as e2:
+            try:
+                logger.error("[research_plan] fallback parse failed: %s", str(e2))
+            except Exception:
+                pass
+            plan_dict = None
+    # 最终兜底：提供结构正确但内容为空的计划，避免打断流程
+    if plan_dict is None:
+        plan_dict = {
+            "research_objectives": [],
+            "planned_queries": [],
+            "research_methodology": "",
+        }
     return {
-        "research_plan": result.model_dump(),
+        "research_plan": plan_dict,
         "thinking_stage": "startup",
         "plan_approved": False,
     }
 
-
+# # 重点方法 New HITL and Enhanced Thinking Nodes
 def wait_for_human_approval(state: OverallState, config: RunnableConfig) -> OverallState:
     """Wait for human approval of the research plan."""
     # Check if the last message contains approval/modification
@@ -952,38 +1619,32 @@ def wait_for_human_approval(state: OverallState, config: RunnableConfig) -> Over
     if not state.get("hitl_shown", False):
         research_plan = state.get("research_plan", {})
         plan_summary = f"""
-## 研究计划待确认
+            ## 研究计划待确认
 
-**研究目标：**
-{chr(10).join(f"• {obj}" for obj in research_plan.get('research_objectives', []))}
+            **研究目标：**
+            {chr(10).join(f"• {obj}" for obj in research_plan.get('research_objectives', []))}
 
-**计划查询：**
-{chr(10).join(f"• {query}" for query in research_plan.get('planned_queries', []))}
+            **计划查询：**
+            {chr(10).join(f"• {query}" for query in research_plan.get('planned_queries', []))}
 
-**研究方法：**
-{research_plan.get('research_methodology', '未指定')}
+            **研究方法：**
+            {research_plan.get('research_methodology', '未指定')}
 
-**预期结果：**
-{research_plan.get('expected_outcomes', '未指定')}
-
-**预估时间：**
-{research_plan.get('estimated_time', '未指定')}
-
-请通过前端界面确认此计划，或提供修改建议。
-"""
+            请通过前端界面确认此计划，或提供修改建议。
+            """
         # 中断并返回标记状态
         raise NodeInterrupt(plan_summary)
     
     # 如果已经显示过HITL但没有批准消息，返回等待状态并标记
     return {"waiting_for_approval": True, "hitl_shown": True}
 
-
+# 重点方法 三阶段思考
 def thinking_startup_stage(state: OverallState, config: RunnableConfig) -> OverallState:
     """Execute the startup thinking stage: 概述分解规划."""
     configurable = Configuration.from_runnable_config(config)
     
     llm = ChatGoogleGenerativeAI(
-        model=configurable.query_generator_model,
+        model=configurable.reflection_model,
         temperature=0.8,
         max_retries=2,
         api_key=os.getenv("GEMINI_API_KEY"),
@@ -1041,7 +1702,7 @@ def thinking_middle_stage(state: OverallState, config: RunnableConfig) -> Overal
     
     # Get research topic from messages or use a fallback
     research_topic = get_research_topic(messages) if messages else "研究主题"
-    summaries = "\n\n---\n\n".join(safe_results) if safe_results else "暂无研究结果"
+    summaries = _prepare_summaries(safe_results)
     
     formatted_prompt = thinking_middle_instructions.format(
         current_date=current_date,
@@ -1087,7 +1748,7 @@ def thinking_finalization_stage(state: OverallState, config: RunnableConfig) -> 
     
     llm = ChatGoogleGenerativeAI(
         model=configurable.reflection_model,
-        temperature=0.6,
+        temperature=0.5,
         max_retries=2,
         api_key=os.getenv("GEMINI_API_KEY"),
     )
@@ -1102,7 +1763,7 @@ def thinking_finalization_stage(state: OverallState, config: RunnableConfig) -> 
     
     research_topic = get_research_topic(messages) if messages else "研究主题"
     safe_results = [s for s in web_research_result if isinstance(s, str)]
-    summaries = "\n\n---\n\n".join(safe_results) if safe_results else "暂无研究结果"
+    summaries = _prepare_summaries(safe_results)
     insights = "\n".join(insights_gathered) if insights_gathered else "暂无洞察"
     
     formatted_prompt = thinking_finalization_instructions.format(
@@ -1126,7 +1787,7 @@ def thinking_finalization_stage(state: OverallState, config: RunnableConfig) -> 
         "thinking_stage": "completed",
     }
 
-
+# 重点方法 最终报告
 def generate_enhanced_report(state: OverallState, config: RunnableConfig) -> OverallState:
     """Generate an enhanced structured report similar to Google DeepResearch."""
     configurable = Configuration.from_runnable_config(config)
@@ -1144,16 +1805,15 @@ def generate_enhanced_report(state: OverallState, config: RunnableConfig) -> Ove
     formatted_prompt = enhanced_report_instructions.format(
         current_date=current_date,
         research_topic=get_research_topic(state["messages"]),
-        summaries="\n---\n\n".join(safe_results),
+        summaries=_prepare_summaries(safe_results),
         report_outline=state.get("report_sections", {}),
-        sources=state["sources_gathered"],
     )
     
     result = llm.invoke(formatted_prompt)
     
     # Process sources as before
     unique_sources = []
-    for source in state["sources_gathered"]:
+    for source in state.get("sources_gathered", []):
         if source["short_url"] in result.content:
             result.content = result.content.replace(
                 source["short_url"], source["value"]
@@ -1231,6 +1891,7 @@ def handle_follow_up(state: OverallState, config: RunnableConfig) -> OverallStat
     elif result.needs_research:
         # Need additional research
         return {
+            "current_queries": result.research_queries,
             "search_query": result.research_queries,
             "is_follow_up": True,
             "thinking_stage": "middle",  # Start with middle stage for follow-up
@@ -1315,8 +1976,9 @@ def detect_follow_up(state: OverallState, config: RunnableConfig) -> OverallStat
         else:
             detection_result = dict(result)
         
-        # 只有高置信度才判定为追问
-        is_follow_up = detection_result.get("is_follow_up", False) and detection_result.get("confidence", 0.0) >= 0.7
+        # 只有高置信度才判定为追问（可配置阈值）
+        threshold = float(configurable.follow_up_confidence_threshold)
+        is_follow_up = detection_result.get("is_follow_up", False) and detection_result.get("confidence", 0.0) >= threshold
         
         return {
             "is_follow_up": is_follow_up,
@@ -1396,7 +2058,12 @@ def route_thinking_stage(state: OverallState):
     else:
         return "generate_query"
 
-
+# 重点方法 在反思之后，路径决策 日志 [router][after_reflection] | [route_after_reflection] 
+# 早终止条件合取为任一成立即触发（见 1607-1613）：
+# is_sufficient 为 True
+# followups 数量为 0
+# completion >= thr（高完成度）
+# completion >= decent_gate 且 loop >= 1（不错完成度）
 def route_after_reflection(state: OverallState, config: RunnableConfig):
     """Enhanced routing after reflection to include thinking stages."""
     configurable = Configuration.from_runnable_config(config)
@@ -1410,11 +2077,12 @@ def route_after_reflection(state: OverallState, config: RunnableConfig):
     is_sufficient = state.get("is_sufficient", False)
     research_loop_count = state.get("research_loop_count", 0)
     followups = state.get("follow_up_queries") or []
+    completion = float(state.get("overall_completion", 0.0) or 0.0)
 
     # Debug: detailed reflection analysis
     try:
-        logger.info("[route_after_reflection] Detailed analysis: is_sufficient=%s, research_loop_count=%d, max_research_loops=%d, followups_count=%d", 
-                   is_sufficient, research_loop_count, max_research_loops, len(followups))
+        logger.info("[route_after_reflection] Detailed analysis: is_sufficient=%s, research_loop_count=%d, max_research_loops=%d, followups_count=%d, completion=%.2f", 
+                   is_sufficient, research_loop_count, max_research_loops, len(followups), completion)
         if len(followups) == 0:
             logger.info("[route_after_reflection] No followups generated - checking reflection logic")
         for i, followup in enumerate(followups):
@@ -1422,14 +2090,33 @@ def route_after_reflection(state: OverallState, config: RunnableConfig):
     except Exception:
         pass
 
-    # Early stop if no actionable follow-ups
-    should_finalize = bool(is_sufficient or research_loop_count >= max_research_loops or len(followups) == 0)
+    # Early stop if no actionable follow-ups or high completion (effort-aware)
+    # should_finalize = bool(is_sufficient or research_loop_count >= max_research_loops or len(followups) == 0)
+    effort = _infer_effort(state, configurable)
+    completion_finalize_threshold = _effort_completion_threshold(configurable, effort)
+    # If completion is very high, or decent completion after at least one loop, allow early finalize
+    high_completion = completion >= completion_finalize_threshold
+    decent_gate = max(
+        float(configurable.finalize_decent_min_floor),
+        float(completion_finalize_threshold) - float(configurable.finalize_decent_buffer),
+    )
+    decent_completion = completion >= decent_gate and research_loop_count >= 1
+    should_finalize = bool(
+        is_sufficient
+        or research_loop_count >= max_research_loops
+        or len(followups) == 0
+        or high_completion
+        or decent_completion
+    )
 
     try:
         logger.info(
-            "[router][after_reflection] loop=%d/%d sufficient=%s followups=%d => %s",
+            "[router][after_reflection] loop=%d/%d effort=%s completion=%.2f thr=%.2f sufficient=%s followups=%d => %s",
             research_loop_count,
             max_research_loops,
+            effort,
+            completion,
+            completion_finalize_threshold,
             bool(is_sufficient),
             len(followups),
             "finalize" if should_finalize else "continue"
@@ -1488,7 +2175,7 @@ builder.add_conditional_edges(
 # Structured thinking flow
 builder.add_edge("thinking_startup_stage", "generate_query")
 builder.add_conditional_edges(
-    "generate_query", continue_to_web_research, ["web_research"]
+    "generate_query", continue_to_web_research, ["web_research", "thinking_finalization_stage"]
 )
 builder.add_edge("web_research", "reflection")
 builder.add_conditional_edges(

@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import TypedDict
 
 from langgraph.graph import add_messages
-from typing_extensions import Annotated
+from typing_extensions import Annotated, NotRequired
 
 
 import operator
@@ -13,12 +13,20 @@ import operator
 class OverallState(TypedDict):
     messages: Annotated[list, add_messages]
     search_query: Annotated[list, operator.add]
+    # Latest batch of queries to dispatch in this round (non-accumulating)
+    current_queries: list
     web_research_result: Annotated[list, operator.add]
     sources_gathered: Annotated[list, operator.add]
     initial_search_query_count: int
     max_research_loops: int
     research_loop_count: int
     reasoning_model: str
+    # Optional explicit effort level provided by frontend: "low" | "medium" | "high"
+    effort: NotRequired[str]
+    # Planning backlog for ensuring planned queries are covered across rounds
+    planned_backlog: NotRequired[list[str]]
+    # Track dispatched queries across web_research nodes
+    dispatched_queries: Annotated[list, operator.add]
     # Fields for intent routing (optional and set early in the flow)
     intent: dict | None
     official_site_candidates: list[str]
@@ -43,6 +51,11 @@ class OverallState(TypedDict):
     knowledge_gap: str | None  # Identified knowledge gaps
     objectives_progress: dict | None  # Progress on research objectives
     overall_completion: float  # Overall research completion percentage
+    # History & scheduling (optional)
+    followups_history: NotRequired[list[str]]
+    knowledge_gap_history: NotRequired[list[str]]
+    objectives_progress_history: NotRequired[list[dict]]
+    objective_rr_index: NotRequired[int]
 
 
 class ReflectionState(TypedDict):
@@ -51,13 +64,13 @@ class ReflectionState(TypedDict):
     follow_up_queries: list
     research_loop_count: int
     number_of_ran_queries: int
+    objectives_progress: NotRequired[dict]
+    overall_completion: NotRequired[float]
 
 
 class FollowUpDetection(TypedDict):
     is_follow_up: bool
     confidence: float
-    reasoning: str
-    previous_context_relevant: bool
 
 
 class Query(TypedDict):
@@ -67,6 +80,10 @@ class Query(TypedDict):
 
 class QueryGenerationState(TypedDict):
     search_query: list[Query]
+    # Non-accumulating queries for the next dispatch cycle
+    current_queries: list
+    # Carry-over planned queries backlog for dispatch scheduling
+    planned_backlog: NotRequired[list[str]]
 
 
 class WebSearchState(TypedDict):
@@ -79,8 +96,6 @@ class ResearchPlanState(TypedDict):
     research_objectives: list[str]
     planned_queries: list[str]
     research_methodology: str
-    expected_outcomes: str
-    estimated_time: str
 
 
 class ThinkingStageState(TypedDict):

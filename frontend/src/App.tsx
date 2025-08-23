@@ -8,6 +8,7 @@ import { ResearchPlanApproval } from "@/components/ResearchPlanApproval";
 import { CollapsedResearchPlan } from "@/components/CollapsedResearchPlan";
 import { EnhancedReport } from "@/components/EnhancedReport";
 import { Button } from "@/components/ui/button";
+import { DEFAULT_EFFORT, DEFAULT_REASONING_MODEL } from "@/lib/modelConfig";
 
 export default function App() {
   const [processedEventsTimeline, setProcessedEventsTimeline] = useState<
@@ -26,11 +27,17 @@ export default function App() {
   const [finalReport, setFinalReport] = useState<any>(null);
   const [thinkingProcess, setThinkingProcess] = useState<any[]>([]);
   const [sourcesGathered, setSourcesGathered] = useState<any[]>([]);
+  // Remember user's selected config to reuse during HITL (approve/modify/quick-lookup)
+  const [currentEffort, setCurrentEffort] = useState<string>(DEFAULT_EFFORT);
+  const [currentModel, setCurrentModel] = useState<string>(DEFAULT_REASONING_MODEL);
+  const [currentInitQueries, setCurrentInitQueries] = useState<number>(1);
+  // const [currentMaxLoops, setCurrentMaxLoops] = useState<number>(1);
   const thread = useStream<{
     messages: Message[];
     initial_search_query_count: number;
-    max_research_loops: number;
+    // max_research_loops: number;
     reasoning_model: string;
+    effort?: string;
   }>({
     apiUrl: import.meta.env.DEV
       ? "http://localhost:2024"
@@ -71,12 +78,6 @@ export default function App() {
         processedEvent = {
           title: "生成研究计划",
           data: `研究目标: ${plan?.research_objectives?.length || 0}个，计划查询: ${plan?.planned_queries?.length || 0}个`,
-        };
-      } else if (event.wait_for_human_approval && !finalReport && !showPlanCollapsed) {
-        setShowHitlApproval(true);
-        processedEvent = {
-          title: "等待人工确认",
-          data: "研究计划已生成，等待您的确认...",
         };
       } else if (event.thinking_startup_stage) {
         processedEvent = {
@@ -206,35 +207,39 @@ export default function App() {
       // medium means max 3 loops and 3 queries
       // high means max 10 loops and 5 queries
       let initial_search_query_count = 0;
-      let max_research_loops = 0;
+      // let max_research_loops = 0;
       switch (effort) {
         case "low":
           initial_search_query_count = 1;
-          max_research_loops = 1;
+          // max_research_loops = 1;
           break;
         case "medium":
           initial_search_query_count = 3;
-          max_research_loops = 3;
+          // max_research_loops = 3;
           break;
         case "high":
           initial_search_query_count = 5;
-          max_research_loops = 10;
+          // max_research_loops = 10;
           break;
       }
 
-      const newMessages: Message[] = [
-        ...(thread.messages || []),
-        {
-          type: "human",
-          content: submittedInputValue,
-          id: Date.now().toString(),
-        },
-      ];
+      // Persist current user-selected config for subsequent HITL actions
+      setCurrentEffort(effort);
+      setCurrentModel(model);
+      setCurrentInitQueries(initial_search_query_count);
+      // setCurrentMaxLoops(max_research_loops);
+
+      const newMessage: Message = {
+        type: "human",
+        content: submittedInputValue,
+        id: Date.now().toString(),
+      };
       thread.submit({
-        messages: newMessages,
+        messages: [newMessage],
         initial_search_query_count: initial_search_query_count,
-        max_research_loops: max_research_loops,
+        // max_research_loops: max_research_loops,
         reasoning_model: model,
+        effort: effort,
       });
     },
     [thread]
@@ -266,16 +271,17 @@ export default function App() {
     // 关键修复：不重新提交整个对话，而是继续当前流程
     // 通过添加批准消息到现有消息中，但保持当前的配置参数
     const currentConfig = {
-      initial_search_query_count: 3,
-      max_research_loops: 3,
-      reasoning_model: "gemini-1.5-pro",
+      initial_search_query_count: currentInitQueries,
+      // max_research_loops: currentMaxLoops,
+      reasoning_model: currentModel,
+      effort: currentEffort,
     };
     
     thread.submit({
-      messages: [...thread.messages, approvalMessage],
+      messages: [approvalMessage],
       ...currentConfig
     });
-  }, [thread, researchPlan]);
+  }, [thread, researchPlan, currentInitQueries, currentModel, currentEffort]);
 
   const handleModifyResearchPlan = useCallback((modifications: string) => {
     setShowHitlApproval(false);
@@ -293,12 +299,13 @@ export default function App() {
     };
     
     thread.submit({
-      messages: [...thread.messages, modificationMessage],
-      initial_search_query_count: 3,
-      max_research_loops: 3,
-      reasoning_model: "gemini-1.5-pro",
+      messages: [modificationMessage],
+      initial_search_query_count: currentInitQueries,
+      // max_research_loops: currentMaxLoops,
+      reasoning_model: currentModel,
+      effort: currentEffort,
     });
-  }, [thread]);
+  }, [thread, currentInitQueries, currentModel, currentEffort]);
 
   const handleQuickLookup = useCallback(() => {
     // 隐藏 HITL，直接触发后端快速查询路由
@@ -314,12 +321,13 @@ export default function App() {
     };
 
     thread.submit({
-      messages: [...thread.messages, quickLookupMessage],
-      initial_search_query_count: 3,
-      max_research_loops: 3,
-      reasoning_model: "gemini-1.5-pro",
+      messages: [quickLookupMessage],
+      initial_search_query_count: currentInitQueries,
+      // max_research_loops: currentMaxLoops,
+      reasoning_model: currentModel,
+      effort: currentEffort,
     });
-  }, [thread]);
+  }, [thread, currentInitQueries, currentModel, currentEffort]);
 
   return (
     <div className="flex min-h-screen bg-neutral-800 text-neutral-100 font-sans antialiased">

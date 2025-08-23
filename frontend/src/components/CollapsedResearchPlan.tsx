@@ -7,10 +7,6 @@ interface ResearchPlan {
   research_objectives: string[];
   planned_queries: string[];
   research_methodology: string;
-  expected_outcomes: string;
-  estimated_time: string;
-  potential_challenges: string[];
-  alternative_approaches: string[];
 }
 
 interface CollapsedResearchPlanProps {
@@ -84,16 +80,6 @@ export const CollapsedResearchPlan: React.FC<CollapsedResearchPlanProps> = ({
               <p className="text-neutral-300">{researchPlan.research_methodology}</p>
             </div>
 
-            <div className="flex gap-4">
-              <div>
-                <h4 className="font-medium text-neutral-200 mb-1">预期成果</h4>
-                <p className="text-neutral-300">{researchPlan.expected_outcomes}</p>
-              </div>
-              <div>
-                <h4 className="font-medium text-neutral-200 mb-1">预估时间</h4>
-                <p className="text-neutral-300">{researchPlan.estimated_time}</p>
-              </div>
-            </div>
           </div>
         )}
       </CardContent>
