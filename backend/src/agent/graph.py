@@ -327,7 +327,7 @@ def _effort_max_parallel(configurable: Configuration, effort: str) -> int:
     return max(1, base)
 
 
-# 重点方法 生成查询 高度遵循 0.2 Gemini 2.5 Flash-Lite
+# 重点方法 生成查询 高度遵循 Gemini 2.5 Flash-Lite 0.2
 def generate_query(state: OverallState, config: RunnableConfig) -> OverallState:
     """LangGraph node that generates search queries based on the User's question.
 
@@ -693,7 +693,7 @@ def continue_to_web_research(state: QueryGenerationState, config: RunnableConfig
             first_query = filtered[0]
             return [Send("web_research", {"search_query": first_query, "id": 0})]
 
-# 重点方法
+# 重点方法 搜索 Google API Gemini 2.5 Flash-Lite 0.0
 def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
     """LangGraph node that performs web research using the native Google Search API tool.
 
@@ -740,7 +740,7 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
                 contents=formatted,
                 config={
                     "tools": tools,
-                    "temperature": 0,
+                    "temperature": 0.1,
                 },
             )
         except Exception as e:
@@ -1141,7 +1141,7 @@ def answer_simple_fact(state: OverallState, config: RunnableConfig) -> OverallSt
 
     llm = ChatGoogleGenerativeAI(
         model=reasoning_model,
-        temperature=0.0,
+        temperature=0.5,
         max_retries=2,
         api_key=os.getenv("GEMINI_API_KEY"),
     )
@@ -1152,7 +1152,7 @@ def answer_simple_fact(state: OverallState, config: RunnableConfig) -> OverallSt
     }
 
 
-# 反思 # 重点方法
+# 重点方法 反思 Gemini 2.5 Flash 0.2
 def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
     """LangGraph node that identifies knowledge gaps and generates potential follow-up queries.
 
@@ -1249,7 +1249,7 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
     # init Reasoning Model
     llm = ChatGoogleGenerativeAI(
         model=reasoning_model,
-        temperature=1.0,
+        temperature=0.2,
         max_retries=2,
         api_key=os.getenv("GEMINI_API_KEY"),
     )
@@ -1502,7 +1502,7 @@ def finalize_answer(state: OverallState, config: RunnableConfig):
         "sources_gathered": unique_sources,
     }
 
-# gemini-2.5-flash 生成计划 高度遵循 0.2
+# 重点方法 生成计划 Gemini 2.5 Flash 0.2
 def generate_research_plan(state: OverallState, config: RunnableConfig) -> OverallState:
     """Generate a research plan for human review and approval."""
     configurable = Configuration.from_runnable_config(config)
@@ -1573,7 +1573,7 @@ def generate_research_plan(state: OverallState, config: RunnableConfig) -> Overa
         "plan_approved": False,
     }
 
-# # 重点方法 New HITL and Enhanced Thinking Nodes
+# 重点方法 New HITL and Enhanced Thinking Nodes
 def wait_for_human_approval(state: OverallState, config: RunnableConfig) -> OverallState:
     """Wait for human approval of the research plan."""
     # Check if the last message contains approval/modification
@@ -1639,14 +1639,14 @@ def wait_for_human_approval(state: OverallState, config: RunnableConfig) -> Over
     # 如果已经显示过HITL但没有批准消息，返回等待状态并标记
     return {"waiting_for_approval": True, "hitl_shown": True}
 
-# 重点方法 三阶段思考
+# 重点方法 三阶段思考 Gemini 2.5 Flash-Lite 0.5
 def thinking_startup_stage(state: OverallState, config: RunnableConfig) -> OverallState:
     """Execute the startup thinking stage: 概述分解规划."""
     configurable = Configuration.from_runnable_config(config)
     
     llm = ChatGoogleGenerativeAI(
-        model=configurable.reflection_model,
-        temperature=0.8,
+        model=configurable.query_generator_model,
+        temperature=0.5,
         max_retries=2,
         api_key=os.getenv("GEMINI_API_KEY"),
     )
@@ -1671,7 +1671,6 @@ def thinking_startup_stage(state: OverallState, config: RunnableConfig) -> Overa
         "thinking_stage": "middle",
     }
 
-
 def thinking_middle_stage(state: OverallState, config: RunnableConfig) -> OverallState:
     """Execute the middle thinking stage: 洞察梳理深化."""
     configurable = Configuration.from_runnable_config(config)
@@ -1687,8 +1686,8 @@ def thinking_middle_stage(state: OverallState, config: RunnableConfig) -> Overal
         pass
     
     llm = ChatGoogleGenerativeAI(
-        model=configurable.reflection_model,
-        temperature=0.8,
+        model=configurable.query_generator_model,
+        temperature=0.5,
         max_retries=2,
         api_key=os.getenv("GEMINI_API_KEY"),
     )
@@ -1742,13 +1741,12 @@ def thinking_middle_stage(state: OverallState, config: RunnableConfig) -> Overal
     
     return preserved_state
 
-
 def thinking_finalization_stage(state: OverallState, config: RunnableConfig) -> OverallState:
     """Execute the finalization thinking stage: 洞察梳理总结."""
     configurable = Configuration.from_runnable_config(config)
     
     llm = ChatGoogleGenerativeAI(
-        model=configurable.reflection_model,
+        model=configurable.query_generator_model,
         temperature=0.5,
         max_retries=2,
         api_key=os.getenv("GEMINI_API_KEY"),
@@ -1788,7 +1786,7 @@ def thinking_finalization_stage(state: OverallState, config: RunnableConfig) -> 
         "thinking_stage": "completed",
     }
 
-# 重点方法 最终报告
+# 重点方法 最终报告 Gemini 2.5 Pro 0.3
 def generate_enhanced_report(state: OverallState, config: RunnableConfig) -> OverallState:
     """Generate an enhanced structured report similar to Google DeepResearch."""
     configurable = Configuration.from_runnable_config(config)
