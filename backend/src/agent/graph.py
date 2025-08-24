@@ -1040,6 +1040,15 @@ def direct_lookup(state: OverallState, config: RunnableConfig) -> OverallState:
             attribute=attribute,
         )
         logger.info("[direct_lookup] using official domain: %s", domain)
+        response = genai_client.models.generate_content(
+        model=configurable.query_generator_model,
+        contents=formatted_prompt,
+        config={
+            # Allow direct page retrieval under the official domain
+            "tools": [{"url_context": {}}, {"google_search": {}}],
+            "temperature": configurable.direct_lookup_temperature,
+        },
+    )
     else:
         formatted_prompt = quick_lookup_fallback_instructions.format(
             current_date=get_current_date(),
@@ -1111,7 +1120,7 @@ def direct_lookup(state: OverallState, config: RunnableConfig) -> OverallState:
                 label = netloc.split(":")[0]
             except Exception:
                 label = u
-            segments.append({"label": label, "short_url": resolved_urls[u], "value": u})
+            segments.append({"label": label, "short_url": short[u], "value": u})
         citations = []
         if segments:
             citations.append({"start_index": text_len, "end_index": text_len, "segments": segments})
@@ -1881,26 +1890,27 @@ def handle_follow_up(state: OverallState, config: RunnableConfig) -> OverallStat
     
     result = structured_llm.invoke(formatted_prompt)
     
-    if result.can_answer_directly:
+    # Prefer research continuation when indicated, even if a direct answer is also provided
+    if getattr(result, "needs_research", False):
+        queries = list(getattr(result, "research_queries", []) or [])
+        return {
+            "current_queries": queries,
+            "search_query": queries,
+            "is_follow_up": True,
+            "thinking_stage": "middle",  # Start with middle stage for follow-up
+            "needs_research": True,
+        }
+    if getattr(result, "can_answer_directly", False):
         # Can answer directly from existing report
         return {
             "messages": [AIMessage(content=result.direct_answer)],
             "is_follow_up": True,
         }
-    elif result.needs_research:
-        # Need additional research
-        return {
-            "current_queries": result.research_queries,
-            "search_query": result.research_queries,
-            "is_follow_up": True,
-            "thinking_stage": "middle",  # Start with middle stage for follow-up
-        }
-    else:
-        # Fallback to general response
-        return {
-            "messages": [AIMessage(content="我需要更多信息来回答您的问题。请提供更具体的问题。")],
-            "is_follow_up": True,
-        }
+    # Fallback to general response
+    return {
+        "messages": [AIMessage(content="我需要更多信息来回答您的问题。请提供更具体的问题。")],
+        "is_follow_up": True,
+    }
 
 
 def detect_follow_up(state: OverallState, config: RunnableConfig) -> OverallState:
@@ -2057,6 +2067,26 @@ def route_thinking_stage(state: OverallState):
     else:
         return "generate_query"
 
+
+def route_after_handle_follow_up(state: OverallState):
+    """Route after handling a follow-up.
+
+    - If follow-up requires further research (queries present or stage is middle),
+      continue to the middle thinking stage.
+    - Otherwise, assume answered directly and end the flow.
+    """
+    # Continue research when explicit flag or queries/stage indicate it
+    if (
+        state.get("needs_research", False)
+        or state.get("search_query")
+        or state.get("current_queries")
+        or state.get("thinking_stage") == "middle"
+    ):
+        # Delegate to unified thinking stage router
+        return route_thinking_stage(state)
+    # Direct answer path ends the conversation
+    return END
+
 # 重点方法 在反思之后，路径决策 日志 [router][after_reflection] | [route_after_reflection] 
 # 早终止条件合取为任一成立即触发（见 1607-1613）：
 # is_sufficient 为 True
@@ -2157,7 +2187,9 @@ builder.add_edge(START, "detect_follow_up")
 builder.add_conditional_edges(
     "detect_follow_up", route_follow_up_detection, ["handle_follow_up", "classify_intent", "thinking_startup_stage", "find_official_site"]
 )
-builder.add_edge("handle_follow_up", END)
+builder.add_conditional_edges(
+    "handle_follow_up", route_after_handle_follow_up, ["generate_query", "thinking_middle_stage", "thinking_finalization_stage", END]
+)
 builder.add_conditional_edges(
     "classify_intent", route_after_classify, ["answer_simple_fact", "find_official_site", "generate_research_plan"]
 )
@@ -2172,7 +2204,9 @@ builder.add_conditional_edges(
 )
 
 # Structured thinking flow
-builder.add_edge("thinking_startup_stage", "generate_query")
+builder.add_conditional_edges(
+    "thinking_startup_stage", route_thinking_stage, ["generate_query", "thinking_middle_stage", "thinking_finalization_stage"]
+)
 builder.add_conditional_edges(
     "generate_query", continue_to_web_research, ["web_research", "thinking_finalization_stage"]
 )

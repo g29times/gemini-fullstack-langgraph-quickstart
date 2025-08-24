@@ -3,11 +3,10 @@
 官网查询：Python最新稳定版本号是多少？
 研究转直接查询：特朗普今天发言对乌克兰有何影响？
 研究：
-  研究下深圳犀照科技发展前景
-  研究下深圳犀照科技和Material Bank的业务相似性和商业潜力
-  研究下2025年记忆Agent的市场前景
-  Research on the market prospects of Memory-Enhanced AI Agents in 2025
-
+  low 研究下深圳犀照科技和Material Bank的业务相似性和商业潜力
+  mid Research Macaron AI founder team, business and tech
+  研究这个网站 https://decoris.ch/
+  研读这篇论文 https://arxiv.org/html/2508.14971v1
 
 # TODO
     核心：
@@ -17,7 +16,10 @@
       手动解决两次HITL问题
       LLM给出预估时间过长 （天）
       web_research 确认是否固定翻译（不要总是翻译）
+      500 中断恢复
+      handle_follow_up
     开发类
+      thinking_startup_stage 之后 支持直接阅读网址或文件内容
       目标TODO
       查询词拆分
       Error友好
