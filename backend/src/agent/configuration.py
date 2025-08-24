@@ -1,4 +1,5 @@
 import os
+import re
 from pydantic import BaseModel, Field
 from typing import Any, Optional
 
@@ -179,6 +180,58 @@ class Configuration(BaseModel):
         },
     )
 
+    # RAG controls
+    enable_rag: bool = Field(
+        default=False,
+        metadata={
+            "description": "Enable parallel Mock RAG retrieval as an internal knowledge source.",
+        },
+    )
+    rag_corpus_globs: list[str] = Field(
+        default=["WIKI/**/*.md"],
+        metadata={
+            "description": "Glob patterns for local markdown corpus used by Mock RAG (recursive supported).",
+        },
+    )
+    rag_top_k: int = Field(
+        default=5,
+        metadata={
+            "description": "Top-K chunks to retrieve from Mock RAG per query.",
+        },
+    )
+
+    # RAG REST integration (mock-friendly)
+    enable_rag_rest: bool = Field(
+        default=False,
+        metadata={
+            "description": "Enable RAG via external REST API. If true, rag_search will call REST client instead of local TF-IDF.",
+        },
+    )
+    rag_rest_endpoint: str | None = Field(
+        default=None,
+        metadata={
+            "description": "RAG REST endpoint URL. If empty, client will use local JSON mock.",
+        },
+    )
+    rag_rest_api_key: str | None = Field(
+        default=None,
+        metadata={
+            "description": "Optional API key for RAG REST endpoint (Authorization: Bearer).",
+        },
+    )
+    rag_rest_timeout: int = Field(
+        default=8,
+        metadata={
+            "description": "HTTP timeout (seconds) for RAG REST calls.",
+        },
+    )
+    rag_rest_local_json: str = Field(
+        default="backend/examples/vendor_projects.json",
+        metadata={
+            "description": "Local JSON file path for mock vendor projects when no REST endpoint is configured.",
+        },
+    )
+
     @classmethod
     def from_runnable_config(
         cls, config: Optional[RunnableConfig] = None
@@ -196,5 +249,24 @@ class Configuration(BaseModel):
 
         # Filter out None values
         values = {k: v for k, v in raw_values.items() if v is not None}
+
+        # Light coercion for RAG fields from env/configurable strings
+        try:
+            if isinstance(values.get("rag_corpus_globs"), str):
+                s = values["rag_corpus_globs"]
+                # split by comma or whitespace
+                parts = [p.strip() for p in re.split(r"[\s,]+", s) if p.strip()]
+                if parts:
+                    values["rag_corpus_globs"] = parts
+            if isinstance(values.get("rag_top_k"), str) and values["rag_top_k"].strip():
+                values["rag_top_k"] = int(values["rag_top_k"])  # pydantic also handles
+            if isinstance(values.get("enable_rag"), str) and values["enable_rag"].strip():
+                values["enable_rag"] = values["enable_rag"].strip().lower() in ("1", "true", "yes", "y", "on")
+            if isinstance(values.get("enable_rag_rest"), str) and values["enable_rag_rest"].strip():
+                values["enable_rag_rest"] = values["enable_rag_rest"].strip().lower() in ("1", "true", "yes", "y", "on")
+            if isinstance(values.get("rag_rest_timeout"), str) and values["rag_rest_timeout"].strip():
+                values["rag_rest_timeout"] = int(values["rag_rest_timeout"])
+        except Exception:
+            pass
 
         return cls(**values)

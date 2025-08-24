@@ -1,5 +1,7 @@
 import argparse
+import json
 from langchain_core.messages import HumanMessage
+from langgraph.errors import NodeInterrupt
 from agent.graph import graph
 
 
@@ -24,6 +26,21 @@ def main() -> None:
         default="gemini-2.5-pro-preview-05-06",
         help="Model for the final answer",
     )
+    parser.add_argument(
+        "--quick-lookup",
+        action="store_true",
+        help="Prefer quick/direct lookup route by injecting {\"action\":\"quick_lookup\"} at HITL",
+    )
+    parser.add_argument(
+        "--direct-lookup",
+        action="store_true",
+        help="Force direct lookup route by injecting {\"action\":\"direct_lookup\"} at HITL",
+    )
+    parser.add_argument(
+        "--auto-approve",
+        action="store_true",
+        help="Automatically approve the research plan at the HITL stage for testing",
+    )
     args = parser.parse_args()
 
     state = {
@@ -33,7 +50,35 @@ def main() -> None:
         "reasoning_model": args.reasoning_model,
     }
 
-    result = graph.invoke(state)
+    # Run graph, handling HITL NodeInterrupt by optionally auto-approving
+    while True:
+        try:
+            result = graph.invoke(state)
+            break
+        except NodeInterrupt as interrupt:
+            print("[CLI] Caught NodeInterrupt (HITL)")
+            # Priorities: quick_lookup/direct_lookup > auto_approve > prompt user
+            if args.quick_lookup or args.direct_lookup:
+                action = "quick_lookup" if args.quick_lookup else "direct_lookup"
+                payload = {"action": action}
+                state.setdefault("messages", []).append(
+                    HumanMessage(content=json.dumps(payload))
+                )
+                print(f"[CLI] Injected HITL action: {action}")
+                continue
+            if args.auto_approve:
+                # Auto-approve: simulate a human message approving the plan
+                approval_payload = {"action": "approve_plan", "plan_approved": True}
+                state.setdefault("messages", []).append(
+                    HumanMessage(content=json.dumps(approval_payload))
+                )
+                print("[CLI] Injected HITL action: approve_plan")
+                continue
+            # Otherwise, show the plan summary and exit with guidance
+            print(str(interrupt))
+            print("\n[HITL] 需要人工批准。可使用 --quick-lookup / --direct-lookup / --auto-approve 以自动注入指令继续执行。")
+            return
+
     messages = result.get("messages", [])
     if messages:
         print(messages[-1].content)

@@ -5,6 +5,19 @@ from datetime import datetime
 def get_current_date():
     return datetime.now().strftime("%B %d, %Y")
 
+# ===== 用户项目（User Project）相关提示片段（中文） =====
+# 在需要时可被上层节点引用；本文件仅定义常量，不改变现有调用路径。
+user_project_summary_guidelines_cn = """若已检索到相关“用户项目”，请在摘要末尾新增“用户项目推荐”小节：
+- 建议以列表展示：项目名、用户（或来源主体）、时间、3-10字标签、1句价值点
+- 避免夸大或无依据推断，保持客观、可溯源
+- 数据可能来自历史案例或演示数据，需与现实业务与合规审查核对"""
+
+user_project_disclaimer_cn = """“用户项目推荐”来源于历史案例或演示数据，仅供灵感参考；
+请结合实际业务约束与合规审查后再行采用。"""
+
+user_project_answer_merge_hint_cn = """若 Summaries 中包含“用户项目推荐”，
+请在回答末段单独列出“建议/案例”段落，按列表复述关键要点，并使用短链引用；
+避免与主体结论混写。"""
 
 # 生成问题 generate_query | Gemini 2.5 Flash-Lite (快速查询生成) 0.2
 query_writer_instructions = """Generate diverse, atomic web search queries for an automated research tool.
@@ -105,6 +118,11 @@ Instructions:
   - Follow-ups:
     - Follow-ups: Up to 2 to close the current knowledge_gap. non-overlapping with Past Follow-ups (strict de-dup); each must include ≥1 explicit constraint (e.g., site:, people, event, time, region, etc.) and be self-contained, precise, and actionable (do not rephrase the original).
     - Identity: Unambiguous identities are VERY IMPORTANT, include Follow-up verification queries (For China-based entities, consider site:天眼查/企查查/爱企查) until confirmed, SKIP re-verification.
+  - RAG-aware Guidance:
+    - The Summaries may include outputs from both Web Search and RAG (including a section like "用户项目推荐"). Treat RAG items as hypotheses or hints; DO NOT increase completion scores unless corroborated by authoritative web sources.
+    - If a "用户项目推荐" section exists, consider generating at least one verification follow-up to assess recency/feasibility, with explicit constraints (e.g., site:, time, region, official channel).
+    - De-duplicate evidence and follow-ups across Web and RAG; avoid double-counting similar items from two sources.
+    - When a follow-up is based primarily on RAG hints, include verification-oriented constraints (e.g., site:gov.cn, site:集团官网 招采/新闻/公告, time window like last 12 months).
   - Style:
     - keep non-English proper nouns in original script (quoted); add transliterations/aliases when useful.
 
@@ -141,6 +159,9 @@ Instructions:
 - You have access to the user's question.
 - Generate a high-quality answer to the user's question based on the provided summaries and the user's question.
 - Include the sources you used from the Summaries in the answer correctly, use markdown format (e.g. [apnews](https://vertexaisearch.cloud.google.com/id/1-0)). THIS IS A MUST.
+
+Optional (when applicable):
+- If the Summaries include a "用户项目推荐" (User Project Recommendations) section, synthesize it into a final "建议/案例" (Recommendations/Examples) paragraph at the end, preserving the original order and adding citations.
 
 User Context:
 - {research_topic}
@@ -411,12 +432,14 @@ enhanced_report_instructions = """生成一份高质量的结构化研究报告�
 3. **图表支持**：适当的markdown表格和图表
 4. **引用标注**：在相关段落内进行“内联编号引用”
 
+5. **用户项目推荐融合（可选）**：若 Summaries 含“用户项目推荐”，在报告第一章新增“建议/案例（用户项目推荐）”章节，按列表呈现，保留原有顺序，并复用短链引用。
+
 输出格式：
 - 使用markdown格式
 - 报告标题和摘要（可选目录结构）
 - 章节标题/编号（灵活的，不一定要有“第一章”这样的字眼）
 - 适当的表格和图表
-- 引用请在相关句子后内联标注为 [n](SHORT_URL)，例如 [1](SHORT_URL) ；同一来源可在多处复用同一编号；引用仅能从“研究结果”中复用，不要杜撰；若未包含引用，可不添加
+- 引用请在相关句子后内联标注为 [n](SHORT_URL)，例如 [1](SHORT_URL) ；同一来源可在多处复用同一编号；引用仅能从“研究结果”中复用，不要杜撹；若未包含引用，可不添加
 - 结合主题，适时增加Appendix、Glossary等部分以丰富内容
 - 实体命名：首次出现时保留原语言名称，括号中可附英文或音译别名；全文保持一致。
 

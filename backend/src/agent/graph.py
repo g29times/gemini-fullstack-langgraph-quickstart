@@ -23,6 +23,7 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 from langgraph.errors import NodeInterrupt
 from google.genai import Client
+from langchain_google_genai import ChatGoogleGenerativeAI
 
 from agent.state import OverallState, ReflectionState, QueryGenerationState, WebSearchState, FollowUpDetection
 from agent.prompts import (
@@ -44,7 +45,6 @@ from agent.prompts import (
     follow_up_instructions,
     simple_fact_answer_instructions,
 )
-from langchain_google_genai import ChatGoogleGenerativeAI
 from agent.utils import (
     get_citations,
     get_research_topic,
@@ -52,6 +52,8 @@ from agent.utils import (
     resolve_urls,
 )
 from agent.prompts import get_current_date
+# from agent.rag import query_rag  # 已弃用，使用 rag_rest 替代
+from agent.rag_rest import query_rag_rest, query_user_projects
 
 load_dotenv()
 
@@ -664,13 +666,18 @@ def continue_to_web_research(state: QueryGenerationState, config: RunnableConfig
                 logger.info("[dispatch first] loop=%d effort=%s progress=%.2f thr=%.2f k=%d (base=%d)", loop_count, effort, progress, thr, k, base_k)
             except Exception:
                 pass
-            return [
-                Send("web_research", {"search_query": q, "id": int(i)})
-                for i, q in enumerate(batch)
-            ]
+            sends = []
+            for i, q in enumerate(batch):
+                sends.append(Send("web_research", {"search_query": q, "id": int(i)}))
+                if getattr(configurable, "enable_rag", False):
+                    sends.append(Send("rag_search", {"search_query": q, "id": int(i)}))
+            return sends
         else:
             first_query = filtered[0]
-            return [Send("web_research", {"search_query": first_query, "id": 0})]
+            sends = [Send("web_research", {"search_query": first_query, "id": 0})]
+            if getattr(configurable, "enable_rag", False):
+                sends.append(Send("rag_search", {"search_query": first_query, "id": 0}))
+            return sends
     else:
         # 后续轮：默认顺序；若完成度较低，允许小并发加速收敛
         low_progress_gate = min(
@@ -684,14 +691,19 @@ def continue_to_web_research(state: QueryGenerationState, config: RunnableConfig
                 logger.info("[dispatch later] loop=%d (later) effort=%s progress=%.2f (<%.2f) -> small parallel k=%d", loop_count, effort, progress, low_progress_gate, k)
             except Exception:
                 pass
-            return [
-                Send("web_research", {"search_query": q, "id": int(i)})
-                for i, q in enumerate(batch)
-            ]
+            sends = []
+            for i, q in enumerate(batch):
+                sends.append(Send("web_research", {"search_query": q, "id": int(i)}))
+                if getattr(configurable, "enable_rag", False):
+                    sends.append(Send("rag_search", {"search_query": q, "id": int(i)}))
+            return sends
         else:
             # 强制顺序，仅派发一个查询
             first_query = filtered[0]
-            return [Send("web_research", {"search_query": first_query, "id": 0})]
+            sends = [Send("web_research", {"search_query": first_query, "id": 0})]
+            if getattr(configurable, "enable_rag", False):
+                sends.append(Send("rag_search", {"search_query": first_query, "id": 0}))
+            return sends
 
 # 重点方法 搜索 Google API Gemini 2.5 Flash-Lite 0.0
 def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
@@ -856,6 +868,118 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
     dispatched_out = [original_query] if original_query else []
     return {
         "sources_gathered": sources_gathered,
+        "search_query": [state["search_query"]],
+        "web_research_result": [modified_text],
+        "dispatched_queries": dispatched_out,
+    }
+
+
+def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
+    """Mock RAG node: retrieve local markdown knowledge and produce web-compatible outputs.
+
+    Returns fields compatible with downstream consumers:
+    - sources_gathered: list of segments with label/short_url/value
+    - web_research_result: list with a single synthesized summary string
+    - search_query: echo back dispatched query for traceability
+    - dispatched_queries: record the query to dedup in dispatcher
+    """
+    configurable = Configuration.from_runnable_config(config)
+    original_query = state.get("search_query", "")
+
+    try:
+        top_k = int(getattr(configurable, "rag_top_k", 5) or 5)
+    except Exception:
+        top_k = 5
+
+    # Decide which RAG backend to use: REST (if enabled) or local TF-IDF
+    hits = []
+    user_hits = []
+    err = ""
+    try:
+        if getattr(configurable, "enable_rag_rest", False):
+            hits = query_rag_rest(
+                original_query,
+                endpoint=getattr(configurable, "rag_rest_endpoint", None),
+                api_key=getattr(configurable, "rag_rest_api_key", None),
+                timeout=int(getattr(configurable, "rag_rest_timeout", 8) or 8),
+                local_json=getattr(configurable, "rag_rest_local_json", "backend/examples/vendor_projects.json"),
+                top_k=top_k,
+            )
+        else:
+            hits = query_rag(
+                original_query,
+                getattr(configurable, "rag_corpus_globs", ["WIKI/**/*.md"]) or [],
+                top_k=top_k,
+            )
+    except Exception as e:
+        try:
+            logger.exception("[rag_search] RAG backend failed")
+        except Exception:
+            pass
+        hits = []
+        err = str(e)
+
+    # Optionally fetch user project recommendations when we can infer a user/vendor name
+    try:
+        candidate_name = None
+        if state.get("intent") and isinstance(state["intent"], dict):
+            candidate_name = state["intent"].get("entity")
+        # Only call when RAG REST integration is enabled (internal gate, no new flag)
+        if candidate_name and getattr(configurable, "enable_rag_rest", False):
+            user_hits = query_user_projects(
+                user_name=candidate_name,
+                local_json=getattr(configurable, "rag_rest_local_json", "backend/examples/vendor_projects.json"),
+                top_k=min(3, max(1, int(top_k))),
+            )
+    except Exception:
+        # Do not fail overall RAG on user project issues
+        user_hits = []
+
+    combined_hits = (hits or []) + (user_hits or [])
+
+    # Map hits to segments used downstream (label/short_url/value)
+    segments = []
+    for h in combined_hits:
+        try:
+            url = h.get("url") or ""
+            label = h.get("label") or "RAG"
+            segments.append({
+                "label": label,
+                "short_url": url,
+                "value": url,
+            })
+        except Exception:
+            continue
+
+    # Build a compact synthesized text
+    if hits:
+        bullets = []
+        for i, h in enumerate(hits[:top_k], 1):
+            label = h.get("label") or f"RAG{i}"
+            snippet = (h.get("text") or "").strip().replace("\n", " ")
+            if len(snippet) > 400:
+                snippet = snippet[:400] + "..."
+            bullets.append(f"[{label}] {snippet}")
+        modified_text = _prepare_summaries(bullets, max_items=top_k, max_chars=8000)
+    else:
+        modified_text = "[RAG] No relevant knowledge found." + (f" Error: {err}" if err else "")
+
+    # Append user project recommendations into the synthesized text for compatibility
+    if user_hits:
+        up_bullets = []
+        for i, uh in enumerate(user_hits[: min(3, top_k)], 1):
+            label = uh.get("label") or f"用户项目{i}"
+            snippet = (uh.get("text") or "").strip().replace("\n", " ")
+            if len(snippet) > 400:
+                snippet = snippet[:400] + "..."
+            up_bullets.append(f"[{label}] {snippet}")
+        up_text = _prepare_summaries(["用户项目推荐："] + up_bullets, max_items=min(1 + len(up_bullets), top_k + 1), max_chars=4000)
+        modified_text = (modified_text + SUMMARY_SEPARATOR + up_text) if modified_text else up_text
+
+
+    dispatched_out = [original_query] if original_query else []
+    return {
+        "sources_gathered": segments,
         "search_query": [state["search_query"]],
         "web_research_result": [modified_text],
         "dispatched_queries": dispatched_out,
@@ -1071,6 +1195,7 @@ def direct_lookup(state: OverallState, config: RunnableConfig) -> OverallState:
         chunks = response.candidates[0].grounding_metadata.grounding_chunks
     except Exception:
         chunks = []
+
 
     if chunks:
         # Resolve URLs and construct citations from grounding chunks
@@ -1451,16 +1576,30 @@ def evaluate_research(
         # If no follow-ups, finalize (aligned with wiki major termination conditions)
         if not state.get("follow_up_queries"):
             return "finalize_answer"
-        return [
-            Send(
-                "web_research",
-                {
-                    "search_query": follow_up_query,
-                    "id": state["number_of_ran_queries"] + int(idx),
-                },
+        sends = []
+        base_id = int(state["number_of_ran_queries"])
+        for idx, follow_up_query in enumerate(state["follow_up_queries"]):
+            qid = base_id + int(idx)
+            sends.append(
+                Send(
+                    "web_research",
+                    {
+                        "search_query": follow_up_query,
+                        "id": qid,
+                    },
+                )
             )
-            for idx, follow_up_query in enumerate(state["follow_up_queries"])
-        ]
+            if getattr(configurable, "enable_rag", False):
+                sends.append(
+                    Send(
+                        "rag_search",
+                        {
+                            "search_query": follow_up_query,
+                            "id": qid,
+                        },
+                    )
+                )
+        return sends
 
 
 def finalize_answer(state: OverallState, config: RunnableConfig):
@@ -2176,6 +2315,7 @@ builder.add_node("wait_for_human_approval", wait_for_human_approval)
 builder.add_node("thinking_startup_stage", thinking_startup_stage)
 builder.add_node("generate_query", generate_query)
 builder.add_node("web_research", web_research)
+builder.add_node("rag_search", rag_search)
 builder.add_node("thinking_middle_stage", thinking_middle_stage)
 builder.add_node("reflection", reflection)
 builder.add_node("thinking_finalization_stage", thinking_finalization_stage)
@@ -2208,9 +2348,10 @@ builder.add_conditional_edges(
     "thinking_startup_stage", route_thinking_stage, ["generate_query", "thinking_middle_stage", "thinking_finalization_stage"]
 )
 builder.add_conditional_edges(
-    "generate_query", continue_to_web_research, ["web_research", "thinking_finalization_stage"]
+    "generate_query", continue_to_web_research, ["web_research", "rag_search", "thinking_finalization_stage"]
 )
 builder.add_edge("web_research", "reflection")
+builder.add_edge("rag_search", "reflection")
 builder.add_conditional_edges(
     "reflection", route_after_reflection, ["thinking_middle_stage", "thinking_finalization_stage"]
 )
