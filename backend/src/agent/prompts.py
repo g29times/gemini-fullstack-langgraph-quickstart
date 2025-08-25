@@ -5,21 +5,9 @@ from datetime import datetime
 def get_current_date():
     return datetime.now().strftime("%B %d, %Y")
 
-# ===== 用户项目（User Project）相关提示片段（中文） =====
-# 在需要时可被上层节点引用；本文件仅定义常量，不改变现有调用路径。
-user_project_summary_guidelines_cn = """若已检索到相关“用户项目”，请在摘要末尾新增“用户项目推荐”小节：
-- 建议以列表展示：项目名、用户（或来源主体）、时间、3-10字标签、1句价值点
-- 避免夸大或无依据推断，保持客观、可溯源
-- 数据可能来自历史案例或演示数据，需与现实业务与合规审查核对"""
 
-user_project_disclaimer_cn = """“用户项目推荐”来源于历史案例或演示数据，仅供灵感参考；
-请结合实际业务约束与合规审查后再行采用。"""
 
-user_project_answer_merge_hint_cn = """若 Summaries 中包含“用户项目推荐”，
-请在回答末段单独列出“建议/案例”段落，按列表复述关键要点，并使用短链引用；
-避免与主体结论混写。"""
-
-# 生成问题 generate_query | Gemini 2.5 Flash-Lite (快速查询生成) 0.2
+# 快速生成查询 生成问题 generate_query | Gemini 2.5 Flash-Lite 0.2
 query_writer_instructions = """Generate diverse, atomic web search queries for an automated research tool.
 
 Rules:
@@ -65,7 +53,7 @@ Output JSON:
 """
 
 
-# web_research | Gemini 2.5 Flash-Lite (快速信息收集) 0.1
+# 快速信息收集 web_research | Gemini 2.5 Flash-Lite 0.1
 web_searcher_instructions = """Conduct focused Google searches for "{research_topic}" and synthesize a verifiable summary.
 
 Rules:
@@ -82,7 +70,7 @@ Research Topic:
 """
 
 
-# reflection | Gemini 2.5 Flash (流程驱动反思) 0.2
+# 流程驱动反思 reflection | Gemini 2.5 Flash 0.2
 reflection_instructions = """You are an expert research assistant analyzing summaries about "{research_topic}".
 
 Research Objectives (if available):
@@ -149,7 +137,7 @@ Summaries:
 """
 
 
-# finalize_answer | Gemini 2.5 Flash (高质量回答)
+# 高质量回答 finalize_answer | Gemini 2.5 Flash 0
 answer_instructions = """Generate a high-quality answer to the user's question based on the provided summaries.
 
 Instructions:
@@ -171,18 +159,39 @@ Summaries:
 """
 
 
-# classify_intent | Gemini 2.5 Flash-Lite (快速意图识别) 0.2
+# 快速意图识别 意图分类 classify_intent | Gemini 2.5 Flash-Lite 0.2
 intent_classifier_instructions = """You are an intent classification expert. Determine if the user's request should:
 1) be answered directly without any web research (SIMPLE_FACT),
 2) be answered via a simple direct lookup from an official source (DIRECT_LOOKUP), or
 3) require a multi-step research process (RESEARCH).
 
 Instructions:
-- Identify SIMPLE_FACT requests that can be answered immediately without browsing, such as: current date/time/weekday, timezone conversions, short calculations, unit conversions, acronym expansions, or other deterministic facts that do not require external sources.
+- Identify SIMPLE_FACT requests that can be answered immediately without browsing, such as: short calculations, unit conversions, acronym expansions, general knowledge questions, or other deterministic facts that do not require external sources.
+- Identify DIRECT_LOOKUP for real-time or location-specific information like: current date/time/weekday, weather inquiries, timezone conversions, stock prices, or other data that requires authoritative sources.
 - Identify DIRECT_LOOKUP when an official site likely contains the answer (e.g., today's top items, release notes, pricing, docs).
-- Otherwise choose RESEARCH.
-- Extract an entity (canonical name) and attribute (what is being asked) when possible.
+- Choose RESEARCH for complex topics requiring multi-step analysis, such as: industry trends, historical analysis, comparative studies, or broad conceptual topics.
+- Extract an entity (canonical name) and attribute (what is being asked) when possible:
+  * Entity: The main subject/object being asked about (e.g., "北京", "Product Hunt", "OpenAI")
+  * Attribute: What specific information is requested (e.g., "weather", "function", "latest products")  
+  * For broad research topics (e.g., "history of AI development", "industry trends"), the entity can be the research domain and the attribute the research focus
+  * For general questions without specific entities, set entity to null
+- **Key Element Completeness Check**: Verify the presence of all essential elements:
+  * **Time Element**: Is the time range specified (e.g., "today", "now", "latest", etc.)?
+  * **Location Element**: Is the geographic location clearly defined (especially for weather, traffic, or local service queries)?
+  * **Subject/Entity Element**: Is the subject of the query clearly identified (company, product, person, etc.)?
+  * **Event/Attribute Element**: Is the specific event or attribute being asked about explicit?
+- **Clarification Requirement Assessment**: If any key element is missing, set `needs_clarification` to true and list the missing elements in `missing_elements`.
 - Provide a confidence score between 0 and 1.
+
+Examples:
+- "今天北京天气怎么样？" → entity: "北京", attribute: "天气", intent_label: "DIRECT_LOOKUP"
+- "What's the weather like in New York today?" → entity: "New York", attribute: "weather", intent_label: "DIRECT_LOOKUP"
+- "你好" → entity: null, attribute: null, intent_label: "SIMPLE_FACT"
+- "What is machine learning?" → entity: null, attribute: null, intent_label: "SIMPLE_FACT"
+- "Product Hunt的最新功能" → entity: "Product Hunt", attribute: "最新功能", intent_label: "DIRECT_LOOKUP"
+- "What are the latest features of GitHub?" → entity: "GitHub", attribute: "latest features", intent_label: "DIRECT_LOOKUP"
+- "AI行业发展趋势分析" → entity: "AI行业", attribute: "发展趋势", intent_label: "RESEARCH"
+- "Analysis of blockchain technology trends" → entity: "blockchain technology", attribute: "trends analysis", intent_label: "RESEARCH"
 
 Output Format (JSON):
 {{
@@ -190,7 +199,10 @@ Output Format (JSON):
   "intent_label": "SIMPLE_FACT" | "DIRECT_LOOKUP" | "RESEARCH",
   "confidence": number,
   "entity": string | null,
-  "attribute": string | null
+  "attribute": string | null,
+  "needs_clarification": boolean,
+  "missing_elements": ["time", "location", "subject", "event"] | [],
+  "clarification_reason": string | null
 }}
 
 Context:
@@ -258,16 +270,18 @@ Attribute (if any): {attribute}
 
 
 # answer_simple_fact | Gemini 2.5 Flash-Lite (快速事实应答) 0.5
-simple_fact_answer_instructions = """你将直接回答一个无需联网检索的简单事实问题。保持与用户相同的语言。（但对于特定领域，必要时可以结合英语等专业术语）
+simple_fact_answer_instructions = """你将直接回答一个无需联网检索的简单事实问题。保持与用户相同的语言（但对于特定领域，必要时可以结合英语等专业术语）
 
 规则：
-- 不进行任何外部搜索或引用。
-- 直接、简洁作答。
+- 基于已有知识直接回答，无需外部搜索
+- 保持简洁、准确、友好的语调
+- 如果输入包含对话历史，要考虑上下文关联
+- 回答后可以询问用户是否还有其他问题
 
-用户问题：{research_topic}
+用户问题（或对话历史）：
+'''{research_topic}'''
 
-请给出直接答案，不要添加无关说明或引用。
-"""
+请回答用户的问题。如果输入包含多轮对话，请基于完整上下文回答最新的问题。如果问题不明确，可以友好地请求澄清。"""
 
 
 # generate_research_plan | Gemini 2.5 Flash (专业研究规划) 0.2
@@ -450,3 +464,105 @@ enhanced_report_instructions = """生成一份高质量的结构化研究报告�
 研究结果：{summaries}
 报告大纲：{report_outline}
 """
+
+
+# ===== 用户项目（User Project）相关提示片段（中文） =====
+# 在需要时可被上层节点引用；本文件仅定义常量，不改变现有调用路径。
+user_project_summary_guidelines_cn = """若已检索到相关“用户项目”，请在摘要末尾新增“用户项目推荐”小节：
+- 建议以列表展示：项目名、用户（或来源主体）、时间、3-10字标签、1句价值点
+- 避免夸大或无依据推断，保持客观、可溯源
+- 数据可能来自历史案例或演示数据，需与现实业务与合规审查核对"""
+
+user_project_disclaimer_cn = """“用户项目推荐”来源于历史案例或演示数据，仅供灵感参考；
+请结合实际业务约束与合规审查后再行采用。"""
+
+user_project_answer_merge_hint_cn = """若 Summaries 中包含“用户项目推荐”，
+请在回答末段单独列出“建议/案例”段落，按列表复述关键要点，并使用短链引用；
+避免与主体结论混写。"""
+
+
+# 意图澄清 clarify_intent | Gemini 2.5 Flash-Lite (多轮对话澄清用户意图)
+intent_clarification_instructions = """你是一个全球多语种智能助手，专门帮助澄清用户的模糊查询意图。
+
+当前对话历史：
+{conversation_history}
+
+用户最新消息：{user_message}
+
+当前识别状态：
+- 意图标签：{current_intent_label}
+- 置信度：{current_confidence}
+- 识别实体：{current_entity}
+- 关注属性：{current_attribute}
+
+任务：分析用户查询是否包含足够信息进行准确的意图识别和后续处理。
+
+判断标准：
+1. **信息充足** - 用户身份明确，查询目标具体，可以直接进行搜索或研究
+2. **信息不足** - 缺少关键信息（如用户身份、具体需求、时间范围等）
+
+如果信息不足，生成1-2个澄清问题，帮助用户提供更多细节。
+
+输出JSON格式：
+{{
+  "needs_clarification": true/false,
+  "confidence_score": 0.0-1.0,
+  "missing_info": ["缺失的关键信息类型"],
+  "clarification_questions": ["澄清问题1", "澄清问题2"],
+  "suggested_entity": "从对话中推测的实体名称或null",
+  "suggested_attribute": "从对话中推测的关注属性或null",
+  "reasoning": "判断理由"
+}}
+
+澄清问题示例：
+- "请问您是哪家公司或机构？这样我可以为您推荐更相关的项目机会。"
+- "您主要关注哪个行业或领域的项目？比如建筑、IT、制造等。"
+- "您希望了解最近多长时间内的项目信息？比如最近3个月、半年等。"
+- "您的公司主要提供什么类型的服务或产品？"
+- "请问您想了解哪个城市或地区的天气？比如北京、上海、深圳等。"
+- "您需要查询哪家公司或产品的具体信息？请提供准确的名称。"
+
+当前日期：{current_date}"""
+
+
+# 实体特异性检查 entity_specificity_check | Gemini 2.5 Flash-Lite (检查实体是否足够具体)
+entity_specificity_check_instructions = """你是一个多语种智能分析助手，专门判断实体信息是否足够具体，可以进行有效的研究查询。
+
+待检查实体：{entity}
+
+判断标准：
+**不够具体的实体**（需要澄清）：
+- 泛化词汇：项目、公司、企业、业务、组织、供应商、厂商、承包商、服务、产品、解决方案（中英文均可）
+- 过于简短：少于3个字符且非明显品牌名
+- 纯描述性：仅包含行业类别而无具体名称（如"建筑项目"、"科技公司"）
+
+**足够具体的实体**（可直接研究）：
+- 具体公司名：华信科技、Apple Inc.、阿里巴巴集团
+- 带有明确标识的项目：北京大兴国际机场、深圳地铁4号线
+- 包含公司后缀：有限公司、股份、集团、Inc、Ltd、Corp、LLC
+- 具体产品/服务名：微信支付、ChatGPT、Tesla Model 3
+- 地理+类型组合：深圳酒店建设、上海医院项目
+- 明确的研究领域或技术概念：AI、人工智能、机器学习、区块链、云计算
+
+输出JSON格式：
+{{
+  "is_specific": true/false,
+  "confidence": 0.0-1.0,
+  "reasoning": "判断理由",
+  "missing_aspects": ["缺失的具体信息类型"],
+  "suggestions": ["建议澄清的方向"]
+}}
+
+请基于上述标准判断实体"{entity}"是否足够具体。"""
+
+# 回退对话模式 fallback_chat_mode | Gemini 2.5 Flash-Lite (澄清失败后的友好对话)
+fallback_chat_mode_instructions = """你是一个友好的AI助手。用户的查询比较模糊，无法进行具体的研究，所以我们转入对话模式。
+
+用户查询：{research_topic}
+
+请提供一个友好、有帮助的回答，并引导用户提供更具体的信息。你可以：
+1. 解释为什么需要更多信息
+2. 提供一些具体的例子或建议
+3. 询问用户是否有其他问题
+
+保持对话自然、有帮助。如果用户后续提供了更具体的信息，我们可以进行更深入的研究。"""

@@ -45,6 +45,10 @@ class OverallState(TypedDict):
     is_follow_up: bool  # Whether this is a follow-up question
     previous_report: str | None  # Previous research report for context
     conversation_history: Annotated[list, operator.add]  # Full conversation context
+    # Intent clarification support
+    clarification_count: int  # Number of clarification rounds
+    max_clarification_rounds: int  # Maximum allowed clarification rounds
+    intent_clarified: bool  # Whether intent has been successfully clarified
     # Reflection state fields
     follow_up_queries: list  # Follow-up queries from reflection (replaced each time)
     is_sufficient: bool  # Whether current research is sufficient
@@ -106,6 +110,26 @@ class ThinkingStageState(TypedDict):
     stage_objectives: list[str]
     stage_insights: list[str]
     next_actions: list[str]
+
+
+class IntentClarificationResult(TypedDict):
+    """Result from intent clarification process"""
+    needs_clarification: bool
+    confidence_score: float
+    missing_info: list[str]
+    clarification_questions: list[str]
+    suggested_entity: str | None
+    suggested_attribute: str | None
+    reasoning: str
+
+
+class EntitySpecificityResult(TypedDict):
+    """Result from entity specificity check"""
+    is_specific: bool
+    confidence: float
+    reasoning: str
+    missing_aspects: list[str]
+    suggestions: list[str]
 
 
 @dataclass(kw_only=True)

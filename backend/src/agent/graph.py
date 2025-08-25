@@ -22,10 +22,11 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 from langgraph.errors import NodeInterrupt
+from langgraph.types import interrupt
 from google.genai import Client
 from langchain_google_genai import ChatGoogleGenerativeAI
 
-from agent.state import OverallState, ReflectionState, QueryGenerationState, WebSearchState, FollowUpDetection
+from agent.state import OverallState, ReflectionState, QueryGenerationState, WebSearchState, FollowUpDetection, IntentClarificationResult, EntitySpecificityResult
 from agent.prompts import (
     query_writer_instructions,
     followup_decomposer_instructions,
@@ -44,6 +45,9 @@ from agent.prompts import (
     follow_up_detection_instructions,
     follow_up_instructions,
     simple_fact_answer_instructions,
+    intent_clarification_instructions,
+    entity_specificity_check_instructions,
+    fallback_chat_mode_instructions,
 )
 from agent.utils import (
     get_citations,
@@ -84,7 +88,7 @@ def _prepare_summaries(results: list[str] | None, max_items: int = 10, max_chars
     - Joins with a unified separator
     """
     if not results:
-        return "暂无研究结果"
+        return "No research results available"
     # 过滤与轻量去重
     safe = [s for s in results if isinstance(s, str)]
     seen: set[str] = set()
@@ -113,7 +117,7 @@ def _prepare_summaries(results: list[str] | None, max_items: int = 10, max_chars
             break
         out.append(s)
         total += sep_len + len(s)
-    return SUMMARY_SEPARATOR.join(out) if out else "暂无研究结果"
+    return SUMMARY_SEPARATOR.join(out) if out else "No research results available"
 
 
 def _contains_cjk(text: str) -> bool:
@@ -142,7 +146,7 @@ def _extract_cjk_terms(text: str) -> list[str]:
 def _split_composite_query(q: str) -> list[str]:
     """Split a composite query like '"A" vs "B" vs "C"' into ['"A"', '"B"', '"C"'].
 
-    - Protect quoted spans, split only on connectors outside quotes: vs/VS/对比/比较
+    - Protect quoted spans, split only on connectors outside quotes: vs/VS
     - If no connectors found outside quotes, return [q].
     """
     try:
@@ -796,7 +800,7 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
             src = [item for citation in cits for item in citation["segments"]]
             try:
                 grounded_list = [seg.get("value") for citation in cits for seg in citation["segments"]]
-                # logger.info("[grounding] urls => %s", grounded_list)
+                # logger.info("[NEO_LOG] grounding urls => %s", grounded_list)
             except Exception:
                 pass
             return src, mod
@@ -815,7 +819,7 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
                 urls = [u for u in urls if u]
             except Exception:
                 urls = []
-            logger.info("[url_context] retrieved URLs => %s", urls)
+            logger.info("[NEO_LOG] [web_searcher] url_context retrieved URLs => %s", urls)
 
             # Truncate to at most 20 URLs
             if len(urls) > 20:
@@ -906,11 +910,13 @@ def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
                 top_k=top_k,
             )
         else:
-            hits = query_rag(
-                original_query,
-                getattr(configurable, "rag_corpus_globs", ["WIKI/**/*.md"]) or [],
-                top_k=top_k,
-            )
+            # hits = query_rag(
+            #     original_query,
+            #     getattr(configurable, "rag_corpus_globs", ["WIKI/**/*.md"]) or [],
+            #     top_k=top_k,
+            # )
+            # 本地TF-IDF RAG已注释，暂时回退到空结果
+            hits = []
     except Exception as e:
         try:
             logger.exception("[rag_search] RAG backend failed")
@@ -968,7 +974,7 @@ def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
     if user_hits:
         up_bullets = []
         for i, uh in enumerate(user_hits[: min(3, top_k)], 1):
-            label = uh.get("label") or f"用户项目{i}"
+            label = uh.get("label") or f"用户项目 {i}" # 保留此处两个特定业务中文
             snippet = (uh.get("text") or "").strip().replace("\n", " ")
             if len(snippet) > 400:
                 snippet = snippet[:400] + "..."
@@ -1010,15 +1016,13 @@ def classify_intent(state: OverallState, config: RunnableConfig) -> OverallState
         max_retries=2,
         api_key=os.getenv("GEMINI_API_KEY"),
     )
-    logger.debug("[param] llm => %s", llm)
-
     structured_llm = llm.with_structured_output(Intent)
 
     topic = get_research_topic(state["messages"])
-    logger.debug("[param] topic => %s", topic)
-
+    logger.debug("[NEO_LOG] [classify_intent] topic => %s", topic)
+    
     prompt = intent_classifier_instructions.format(research_topic=topic)
-    logger.debug("[intent] prompt => %s", prompt)
+    # logger.debug("[NEO_LOG] [classify_intent] prompt => %s", prompt)
 
     try:
         result = structured_llm.invoke(prompt)
@@ -1033,18 +1037,10 @@ def classify_intent(state: OverallState, config: RunnableConfig) -> OverallState
         payload.setdefault("confidence", 0.0)
         payload.setdefault("entity", None)
         payload.setdefault("attribute", None)
-        # logger.debug("[intent] structured payload => %s", payload)
+        logger.info("[NEO_LOG] [classify_intent] structured payload => %s", payload)
         return {"intent": payload}
-    except Exception:
-        # Log the exception and attempt to fetch raw text for debugging
-        logger.exception("[intent] structured parsing failed; falling back to RESEARCH")
-        try:
-            raw_msg = llm.invoke(prompt)
-            raw_text = getattr(raw_msg, "content", str(raw_msg))
-            logger.debug("[intent] raw LLM text => %s", raw_text)
-        except Exception:
-            logger.exception("[intent] fetching raw LLM text also failed")
-        # Robust fallback: default to research path on any parsing/validation error
+    except Exception as e:
+        logger.error("[NEO_LOG] [classify_intent] classification failed reason => %s", e)
         return {
             "intent": {
                 "is_simple_lookup": False,
@@ -1056,7 +1052,122 @@ def classify_intent(state: OverallState, config: RunnableConfig) -> OverallState
         }
 
 
-def _extract_domains_from_chunks(chunks) -> list[str]:
+def clarify_intent(state: OverallState, config: RunnableConfig) -> OverallState:
+    """Clarify user intent through interactive dialogue when confidence is low or information is insufficient.
+    
+    This node implements a multi-turn clarification process that continues until:
+    1. Intent confidence reaches acceptable threshold
+    2. Sufficient information is gathered
+    3. Maximum clarification rounds reached
+    4. User explicitly opts out
+    """
+    configurable = Configuration.from_runnable_config(config)
+    
+    # Initialize clarification state if not present
+    clarification_count = state.get("clarification_count", 0)
+    max_rounds = state.get("max_clarification_rounds", 3)
+    
+    # Get current intent and conversation context
+    intent = state.get("intent", {})
+    topic = get_research_topic(state["messages"])
+    conversation_history = state.get("conversation_history", [])
+    
+    # Create structured LLM for intent clarification
+    llm = ChatGoogleGenerativeAI(
+        model=configurable.query_generator_model,
+        temperature=0.3,
+        max_retries=2,
+        api_key=os.getenv("GEMINI_API_KEY"),
+    )
+    
+    structured_llm = llm.with_structured_output(IntentClarificationResult)
+    
+    # Format conversation history for context
+    history_text = "\n".join([
+        f"{'User' if msg.get('role') == 'user' else 'Assistant'}: {msg.get('content', '')}"
+        for msg in conversation_history[-5:]  # Last 5 messages for context
+    ])
+    
+    # Create clarification prompt
+    prompt = intent_clarification_instructions.format(
+        research_topic=topic,
+        user_message=topic,  # 使用研究主题作为用户消息
+        current_intent=intent,
+        current_intent_label=intent.get('intent_label', 'UNKNOWN'),
+        current_confidence=intent.get('confidence', 0.0),
+        current_entity=intent.get('entity') or 'Not specified',
+        current_attribute=intent.get('attribute') or 'Not specified',
+        conversation_history=history_text,
+        clarification_count=clarification_count,
+        max_rounds=max_rounds,
+        current_date=get_current_date()
+    )
+    
+    try:
+        result = structured_llm.invoke(prompt)
+        clarification_result = result.model_dump() if hasattr(result, 'model_dump') else dict(result)
+        
+        logger.info("[NEO_LOG] [clarify_intent] needs_clarification=%s confidence=%.2f missing_info=%s", 
+                   clarification_result.get("needs_clarification", False),
+                   clarification_result.get("confidence_score", 0.0),
+                   clarification_result.get("missing_info", []))
+        
+        # Update state with clarification results
+        updated_state = {
+            "clarification_count": clarification_count + 1,
+            "intent_clarified": not clarification_result.get("needs_clarification", True)
+        }
+        
+        # If clarification is needed, prepare questions for user
+        if clarification_result.get("needs_clarification", True) and clarification_count < max_rounds:
+            questions = clarification_result.get("clarification_questions", [])
+            if questions:
+                # Format questions as a user-friendly message
+                question_text = "为了更好地帮助您，我需要了解一些额外信息：\n\n"
+                for i, question in enumerate(questions, 1):
+                    question_text += f"{i}. {question}\n"
+                question_text += "\n请回答上述问题，或者输入'跳过'直接进行研究。"
+                
+                # Add clarification message to conversation
+                updated_state["conversation_history"] = [
+                    {"role": "assistant", "content": question_text}
+                ]
+                
+                # Interrupt for user input
+                raise NodeInterrupt(question_text)
+        
+        # If intent is clarified or max rounds reached, update intent with gathered info
+        if not clarification_result.get("needs_clarification", True) or clarification_count >= max_rounds:
+            updated_intent = intent.copy()
+            
+            # Update intent with clarified information
+            if clarification_result.get("suggested_entity"):
+                updated_intent["entity"] = clarification_result["suggested_entity"]
+            if clarification_result.get("suggested_attribute"):
+                updated_intent["attribute"] = clarification_result["suggested_attribute"]
+            
+            # Increase confidence if clarification was successful
+            if not clarification_result.get("needs_clarification", True):
+                updated_intent["confidence"] = min(0.9, clarification_result.get("confidence_score", 0.5))
+            else:
+                # If still needs clarification but reached max rounds, mark for chat mode
+                updated_intent["fallback_to_chat"] = True
+            
+            updated_state["intent"] = updated_intent
+            updated_state["intent_clarified"] = True
+        
+        return updated_state
+        
+    except Exception as e:
+        logger.error("[NEO_LOG] [clarify_intent] clarification failed: %s", e)
+        # Fallback: mark as clarified to continue with research
+        return {
+            "clarification_count": clarification_count + 1,
+            "intent_clarified": True
+        }
+
+
+def _extract_domains_from_chunks(chunks: list) -> list[str]:
     domains = []
     seen = set()
     for ch in chunks or []:
@@ -1091,6 +1202,47 @@ def _pick_official_domain(entity: str | None, domains: list[str]) -> tuple[str |
     return domains[0], 0.6
 
 
+def _is_entity_specific_enough(entity: str, config: RunnableConfig) -> bool:
+    """
+    Use LLM to check if an entity is specific enough for research.
+    Uses the lightweight flash-lite model for fast evaluation.
+    """
+    if not entity or not entity.strip():
+        return False
+    
+    configurable = Configuration.from_runnable_config(config)
+    
+    # Use the lightweight model for this quick check
+    llm = ChatGoogleGenerativeAI(
+        model=configurable.query_generator_model,  # flash-lite
+        temperature=0.1,
+        max_retries=2,
+        api_key=os.getenv("GEMINI_API_KEY"),
+    )
+    
+    structured_llm = llm.with_structured_output(EntitySpecificityResult)
+    
+    try:
+        prompt = entity_specificity_check_instructions.format(entity=entity)
+        result = structured_llm.invoke(prompt)
+        
+        # Extract result
+        specificity_result = result.model_dump() if hasattr(result, 'model_dump') else dict(result)
+        is_specific = specificity_result.get("is_specific", False)
+        confidence = specificity_result.get("confidence", 0.0)
+        reasoning = specificity_result.get("reasoning", "")
+        
+        logger.info("[NEO_LOG][entity_specificity_check] entity='%s' specific=%s conf=%.2f reason=%s", 
+                   entity, is_specific, confidence, reasoning[:200])
+        
+        return is_specific
+        
+    except Exception as e:
+        logger.error("[NEO_LOG][entity_specificity_check] LLM check failed for entity '%s': %s", entity, e)
+        # Fallback: conservative approach - if we can't check, assume it needs clarification
+        return len(entity.strip()) > 6  # Simple length-based fallback
+
+
 def find_official_site(state: OverallState, config: RunnableConfig) -> OverallState:
     """Use Google Search tool to discover official domain candidates for the entity."""
     configurable = Configuration.from_runnable_config(config)
@@ -1122,9 +1274,10 @@ def find_official_site(state: OverallState, config: RunnableConfig) -> OverallSt
 def route_after_classify(state: OverallState, config: RunnableConfig):
     """Route based on classified intent.
 
-    - SIMPLE_FACT -> answer_simple_fact (if above confidence threshold)
-    - DIRECT_LOOKUP -> find_official_site (if above confidence threshold)
-    - otherwise -> generate_research_plan
+    - High confidence SIMPLE_FACT -> answer_simple_fact
+    - High confidence DIRECT_LOOKUP -> find_official_site  
+    - Low confidence or insufficient info -> clarify_intent (if clarification enabled and not exhausted)
+    - Otherwise -> generate_research_plan
     """
     configurable = Configuration.from_runnable_config(config)
     if not configurable.enable_intent_router:
@@ -1132,14 +1285,93 @@ def route_after_classify(state: OverallState, config: RunnableConfig):
 
     intent = state.get("intent") or {}
     label = intent.get("intent_label")
-    conf = float(intent.get("confidence") or 0.0)
-    logger.info("[router] label=%s conf=%.2f threshold=%.2f", label, conf, configurable.intent_confidence_threshold)
+    confidence = float(intent.get("confidence") or 0.0)
+    
+    # Check if intent clarification is needed and available
+    clarification_count = state.get("clarification_count", 0)
+    max_rounds = state.get("max_clarification_rounds", 3)
+    intent_clarified = state.get("intent_clarified", False)
+    
+    logger.info("[NEO_LOG][route_after_classify] label=%s confidence=%.2f threshold=%.2f clarified=%s round=%d/%d", 
+               label, confidence, configurable.intent_confidence_threshold, 
+               intent_clarified, clarification_count, max_rounds)
 
-    if label == "SIMPLE_FACT" and conf >= configurable.intent_confidence_threshold:
-        return "answer_simple_fact"
-    if label == "DIRECT_LOOKUP" and conf >= configurable.intent_confidence_threshold:
-        return "find_official_site"
+    # If confidence is high enough and has sufficient info, proceed with direct routing
+    if confidence >= configurable.intent_confidence_threshold:
+        if label == "SIMPLE_FACT":
+            return "answer_simple_fact"
+        if label == "DIRECT_LOOKUP":
+            # Check if clarification is needed based on LLM analysis
+            needs_clarification = intent.get("needs_clarification", False)
+            missing_elements = intent.get("missing_elements", [])
+            
+            logger.info("[NEO_LOG][route_after_classify] needs_clarification=%s missing_elements=%s", 
+                       needs_clarification, missing_elements)
+            
+            if needs_clarification and not intent_clarified and clarification_count < max_rounds:
+                logger.info("[NEO_LOG][route_after_classify] Missing elements %s, routing to clarify", missing_elements)
+                return "clarify_intent"
+
+            return "find_official_site"
+        # For RESEARCH, check if we have sufficient and specific entity information
+        if label == "RESEARCH":
+            entity = intent.get("entity") or ""
+            entity = entity.strip() if entity else ""
+            # Check if entity is specific enough for research
+            if _is_entity_specific_enough(entity, config):
+                # Has specific entity info, can proceed with research
+                pass  # Will fall through to research plan
+            else:
+                # Entity too vague or missing, should clarify even with good confidence
+                if not intent_clarified and clarification_count < max_rounds:
+                    logger.info("[NEO_LOG][route_after_classify] Entity '%s' not specific enough, routing to clarify", entity)
+                    return "clarify_intent"
+    
+    # If confidence is low and clarification is available, try to clarify intent
+    if (not intent_clarified and 
+        clarification_count < max_rounds and 
+        confidence < configurable.intent_confidence_threshold):
+        return "clarify_intent"
+    
+    # Default to research plan
     return "generate_research_plan"
+
+
+def route_after_clarify(state: OverallState, config: RunnableConfig):
+    """Route after intent clarification.
+    
+    - If intent is now clarified with high confidence -> route based on updated intent
+    - If max clarification rounds reached -> generate_research_plan
+    - Otherwise -> clarify_intent (continue clarification loop)
+    """
+    configurable = Configuration.from_runnable_config(config)
+    
+    intent = state.get("intent") or {}
+    label = intent.get("intent_label")
+    conf = float(intent.get("confidence") or 0.0)
+    
+    clarification_count = state.get("clarification_count", 0)
+    max_rounds = state.get("max_clarification_rounds", 3)
+    intent_clarified = state.get("intent_clarified", False)
+    
+    logger.info("[NEO_LOG] [route_after_clarify] label=%s conf=%.2f clarified=%s count=%d/%d", 
+               label, conf, intent_clarified, clarification_count, max_rounds)
+    
+    # If intent is clarified or max rounds reached, proceed with routing
+    if intent_clarified or clarification_count >= max_rounds:
+        # Check if should fallback to chat mode for very unclear queries
+        if intent.get("fallback_to_chat", False):
+            return "answer_simple_fact"
+        
+        if conf >= configurable.intent_confidence_threshold:
+            if label == "SIMPLE_FACT":
+                return "answer_simple_fact"
+            if label == "DIRECT_LOOKUP":
+                return "find_official_site"
+        return "generate_research_plan"
+    
+    # Continue clarification if needed
+    return "clarify_intent"
 
 
 def direct_lookup(state: OverallState, config: RunnableConfig) -> OverallState:
@@ -1163,7 +1395,7 @@ def direct_lookup(state: OverallState, config: RunnableConfig) -> OverallState:
             entity=entity,
             attribute=attribute,
         )
-        logger.info("[direct_lookup] using official domain: %s", domain)
+        logger.info("[NEO_LOG] [direct_lookup] search topic '%s' using official domain: %s", topic, domain)
         response = genai_client.models.generate_content(
         model=configurable.query_generator_model,
         contents=formatted_prompt,
@@ -1180,7 +1412,7 @@ def direct_lookup(state: OverallState, config: RunnableConfig) -> OverallState:
             entity=entity,
             attribute=attribute,
         )
-        logger.info("[direct_lookup] no official domain; using quick lookup fallback")
+        logger.info("[NEO_LOG] [direct_lookup] search topic '%s' no official domain; using quick lookup fallback", topic)
         response = genai_client.models.generate_content(
         model=configurable.query_generator_model,
         contents=formatted_prompt,
@@ -1208,7 +1440,7 @@ def direct_lookup(state: OverallState, config: RunnableConfig) -> OverallState:
         sources_gathered = [item for citation in citations for item in citation["segments"]]
         try:
             grounded_list = [seg.get("value") for citation in citations for seg in citation["segments"]]
-            # logger.info("[direct_lookup][grounding] urls => %s", grounded_list)
+            logger.info("[NEO_LOG] [direct_lookup] grounding urls => %s", grounded_list)
         except Exception:
             pass
     else:
@@ -1226,7 +1458,7 @@ def direct_lookup(state: OverallState, config: RunnableConfig) -> OverallState:
             urls = [u for u in urls if u]
         except Exception:
             urls = []
-        logger.info("[direct_lookup][url_context] retrieved URLs => %s", urls)
+        logger.info("[NEO_LOG] [direct_lookup] url_context retrieved URLs => %s", urls)
 
         # Truncate to at most 20 URLs
         if len(urls) > 20:
@@ -1260,29 +1492,86 @@ def direct_lookup(state: OverallState, config: RunnableConfig) -> OverallState:
 
 def answer_simple_fact(state: OverallState, config: RunnableConfig) -> OverallState:
     """Answer simple factual queries directly using LLM without web research.
-
+    Supports continuous conversation mode for chat-like interactions.
     Uses the `simple_fact_answer_instructions` prompt and local datetime context
     to produce a concise answer.
     """
     configurable = Configuration.from_runnable_config(config)
-    reasoning_model = state.get("reasoning_model") or configurable.query_generator_model
-
-    current_date = get_current_date()
-    formatted_prompt = simple_fact_answer_instructions.format(
-        current_date=current_date,
-        research_topic=get_research_topic(state["messages"]),
-    )
-
     llm = ChatGoogleGenerativeAI(
-        model=reasoning_model,
+        model=configurable.query_generator_model,
         temperature=0.5,
         max_retries=2,
         api_key=os.getenv("GEMINI_API_KEY"),
     )
-    result = llm.invoke(formatted_prompt)
 
+    topic = get_research_topic(state["messages"])
+    
+    # Check if this is a fallback from unclear research intent
+    is_fallback = state.get("intent", {}).get("fallback_to_chat", False)
+    
+    if is_fallback:
+        # For fallback cases, provide more conversational response
+        print("===> fallback")
+        prompt = fallback_chat_mode_instructions.format(research_topic=topic)
+    else:
+        print("===> simple_fact")
+        prompt = simple_fact_answer_instructions.format(research_topic=topic)
+    print(f"[NEO_LOG] [answer_simple_fact] prompt => {prompt}")
+    try:
+        response = llm.invoke(prompt)
+        answer_text = response.content if hasattr(response, 'content') else str(response)
+        
+        # Add conversation continuation hint for chat mode
+        if is_fallback:
+            answer_text += "\n\n💬 Feel free to ask more questions or provide additional details. I'm here to help!"
+        
+        return {
+            "messages": [AIMessage(content=answer_text)],
+            "chat_mode": is_fallback,  # Flag to indicate chat mode
+            "continue_conversation": True,  # Allow continuation
+        }
+    except Exception as e:
+        logger.error("[simple_fact] answer generation failed: %s", e)
+        return {
+            "messages": [AIMessage(content="Sorry, I'm unable to answer this question at the moment.")],
+            "chat_mode": is_fallback,
+            "continue_conversation": True,
+        }
+
+
+def route_after_simple_fact(state: OverallState, config: RunnableConfig):
+    """Route after simple fact answer to support conversation continuation."""
+    # Check if user wants to continue conversation
+    continue_conversation = state.get("continue_conversation", False)
+    chat_mode = state.get("chat_mode", False)
+    
+    if continue_conversation or chat_mode:
+        # In chat mode, wait for user input and then re-classify
+        # This creates a loop: answer_simple_fact -> user input -> classify_intent
+        raise NodeInterrupt("请继续提问，或者说'结束'来退出对话。")
+    
+    return END
+
+
+def handle_conversation_input(state: OverallState, config: RunnableConfig) -> OverallState:
+    """Handle user input in conversation mode and route back to classification."""
+    messages = state.get("messages", [])
+    if not messages:
+        return {"continue_conversation": False}
+    
+    last_message = messages[-1]
+    if hasattr(last_message, 'content'):
+        content = last_message.content.strip().lower()
+        # Check for exit commands
+        if content in ['结束', '退出', 'exit', 'quit', 'bye', '再见']:
+            return {"continue_conversation": False}
+    
+    # Reset conversation flags and re-classify the new input
     return {
-        "messages": [AIMessage(content=result.content)],
+        "continue_conversation": False,
+        "chat_mode": False,
+        "clarification_count": 0,
+        "intent_clarified": False,
     }
 
 
@@ -1669,14 +1958,14 @@ def generate_research_plan(state: OverallState, config: RunnableConfig) -> Overa
         research_topic=get_research_topic(state["messages"]),
     )
     
-    logger.debug("[research_plan] prompt => %s", formatted_prompt)
+    logger.debug("[NEO_LOG] [generate_research_plan] prompt => %s", formatted_prompt)
     # 优先使用结构化输出；失败则回退到非结构化并解析；最终提供安全默认
     plan_dict = None
     try:
         result = structured_llm.invoke(formatted_prompt)
     except Exception as e:
         try:
-            logger.warning("[research_plan] structured invoke failed: %s", str(e))
+            logger.warning("[NEO_LOG] [generate_research_plan] structured invoke failed reason => %s", str(e))
         except Exception:
             pass
         result = None
@@ -2047,7 +2336,7 @@ def handle_follow_up(state: OverallState, config: RunnableConfig) -> OverallStat
         }
     # Fallback to general response
     return {
-        "messages": [AIMessage(content="我需要更多信息来回答您的问题。请提供更具体的问题。")],
+        "messages": [AIMessage(content="I need more information to answer your question. Please provide a more specific question.")],
         "is_follow_up": True,
     }
 
@@ -2100,7 +2389,7 @@ def detect_follow_up(state: OverallState, config: RunnableConfig) -> OverallStat
     
     for i, msg in enumerate(messages):
         content = msg.content if hasattr(msg, 'content') else str(msg)
-        role = "用户" if hasattr(msg, 'type') and msg.type == "human" else "助手"
+        role = "User" if hasattr(msg, 'type') and msg.type == "human" else "Assistant"
         if i == len(messages) - 1:
             current_message = content
         else:
@@ -2116,6 +2405,7 @@ def detect_follow_up(state: OverallState, config: RunnableConfig) -> OverallStat
     )
     
     try:
+        logger.info("[NEO_LOG][follow_up_detection] formatted_prompt=%s", formatted_prompt)
         result = structured_llm.invoke(formatted_prompt)
         
         # 转换为字典格式
@@ -2180,14 +2470,14 @@ def route_after_plan_approval(state: OverallState):
     # Check if we need to regenerate the plan (modification requested)
     if state.get("human_modifications") and not state.get("plan_approved", False):
         try:
-            logger.info("[router][plan_approval] human_modifications present -> regenerate plan")
+            logger.info("[NEO_LOG][route_after_plan_approval] human_modifications present -> regenerate plan")
         except Exception:
             pass
         return "generate_research_plan"
     
     # Default: stay in approval waiting state (this should trigger interrupt again)
     try:
-        logger.info("[router][plan_approval] waiting for human approval -> stay")
+        logger.info("[NEO_LOG][route_after_plan_approval] waiting for human approval -> stay")
     except Exception:
         pass
     return "wait_for_human_approval"
@@ -2279,7 +2569,7 @@ def route_after_reflection(state: OverallState, config: RunnableConfig):
 
     try:
         logger.info(
-            "[router][after_reflection] loop=%d/%d effort=%s completion=%.2f thr=%.2f sufficient=%s followups=%d => %s",
+            "[NEO_LOG] [route_after_reflection] loop=%d/%d effort=%s completion=%.2f thr=%.2f sufficient=%s followups=%d => %s",
             research_loop_count,
             max_research_loops,
             effort,
@@ -2307,9 +2597,11 @@ builder = StateGraph(OverallState, config_schema=Configuration)
 builder.add_node("detect_follow_up", detect_follow_up)
 builder.add_node("handle_follow_up", handle_follow_up)
 builder.add_node("classify_intent", classify_intent)
+builder.add_node("clarify_intent", clarify_intent)
 builder.add_node("find_official_site", find_official_site)
 builder.add_node("direct_lookup", direct_lookup)
 builder.add_node("answer_simple_fact", answer_simple_fact)
+builder.add_node("handle_conversation_input", handle_conversation_input)
 builder.add_node("generate_research_plan", generate_research_plan)
 builder.add_node("wait_for_human_approval", wait_for_human_approval)
 builder.add_node("thinking_startup_stage", thinking_startup_stage)
@@ -2331,7 +2623,12 @@ builder.add_conditional_edges(
     "handle_follow_up", route_after_handle_follow_up, ["generate_query", "thinking_middle_stage", "thinking_finalization_stage", END]
 )
 builder.add_conditional_edges(
-    "classify_intent", route_after_classify, ["answer_simple_fact", "find_official_site", "generate_research_plan"]
+    "classify_intent", route_after_classify, ["answer_simple_fact", "find_official_site", "clarify_intent", "generate_research_plan"]
+)
+
+# Intent clarification flow: clarify_intent -> route based on clarification result
+builder.add_conditional_edges(
+    "clarify_intent", route_after_clarify, ["answer_simple_fact", "find_official_site", "generate_research_plan"]
 )
 
 # Direct lookup flow: find official site -> direct lookup
@@ -2368,6 +2665,12 @@ builder.add_edge("direct_lookup", "finalize_answer")
 # Both report paths end the flow
 builder.add_edge("generate_enhanced_report", END)
 builder.add_edge("finalize_answer", END)
-builder.add_edge("answer_simple_fact", END)
+# Conversation flow for answer_simple_fact
+builder.add_conditional_edges(
+    "answer_simple_fact", route_after_simple_fact, ["handle_conversation_input", END]
+)
+builder.add_conditional_edges(
+    "handle_conversation_input", lambda state: "classify_intent" if state.get("continue_conversation", True) else END, ["classify_intent", END]
+)
 
 graph = builder.compile(name="enhanced-deepresearch-agent")

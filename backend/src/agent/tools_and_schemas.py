@@ -55,6 +55,18 @@ class Intent(BaseModel):
         default=None,
         description="Specific attribute being asked (e.g., today's top 5).",
     )
+    needs_clarification: bool = Field(
+        default=False,
+        description="Whether the query lacks essential elements and needs clarification."
+    )
+    missing_elements: List[str] = Field(
+        default_factory=list,
+        description="List of missing key elements: 时间, 地点, 人物/主体, 事件"
+    )
+    clarification_reason: str | None = Field(
+        default=None,
+        description="Explanation of why clarification is needed."
+    )
 
 
 class OfficialSiteCandidates(BaseModel):
