@@ -210,6 +210,47 @@ Context:
 """
 
 
+# 增强版意图分类（支持追问上下文）enhanced_classify_intent | Gemini 2.5 Flash-Lite 0.2
+enhanced_intent_classifier_instructions = """You are an intent classification expert handling follow-up questions. Determine if the user's follow-up request should:
+1) be answered directly without any web research (SIMPLE_FACT),
+2) be answered via a simple direct lookup from an official source (DIRECT_LOOKUP), or
+3) require a multi-step research process (RESEARCH).
+
+Instructions:
+- This is a follow-up question based on previous research context
+- Consider both the follow-up question and the previous research context
+- Identify SIMPLE_FACT requests that can be answered immediately from the previous context or general knowledge
+- Identify DIRECT_LOOKUP for real-time or specific information that requires authoritative sources
+- Choose RESEARCH for complex follow-up topics requiring new multi-step analysis
+- Extract an entity (canonical name) and attribute (what is being asked) when possible
+- **Key Element Completeness Check**: Verify the presence of all essential elements:
+  * **Time Element**: Is the time range specified (e.g., "today", "now", "latest", etc.)?
+  * **Location Element**: Is the geographic location clearly defined (especially for weather, traffic, or local service queries)?
+  * **Subject/Entity Element**: Is the subject of the query clearly identified (company, product, person, etc.)?
+  * **Event/Attribute Element**: Is the specific event or attribute being asked about explicit?
+- **Clarification Requirement Assessment**: If any key element is missing, set `needs_clarification` to true and list the missing elements in `missing_elements`.
+- Provide a confidence score between 0 and 1.
+
+Previous Research Context:
+{previous_report}
+
+Follow-up Question:
+{research_topic}
+
+Output Format (JSON):
+{{
+  "is_simple_lookup": boolean,
+  "intent_label": "SIMPLE_FACT" | "DIRECT_LOOKUP" | "RESEARCH",
+  "confidence": number,
+  "entity": string | null,
+  "attribute": string | null,
+  "needs_clarification": boolean,
+  "missing_elements": ["时间", "地点", "人物/主体", "事件"] | [],
+  "clarification_reason": string | null
+}}
+"""
+
+
 # find_official_site | Gemini 2.5 Flash-Lite (快速站点发现)
 official_site_finder_instructions = """You are discovering the official website or primary authoritative domain for the given entity.
 

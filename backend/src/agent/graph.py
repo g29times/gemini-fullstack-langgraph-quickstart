@@ -34,6 +34,7 @@ from agent.prompts import (
     reflection_instructions,
     answer_instructions,
     intent_classifier_instructions,
+    enhanced_intent_classifier_instructions,
     official_site_finder_instructions,
     direct_lookup_instructions,
     quick_lookup_fallback_instructions,
@@ -899,6 +900,7 @@ def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
     hits = []
     user_hits = []
     err = ""
+    # 调用 REST API 或本地方法 获取RAG搜索结果
     try:
         if getattr(configurable, "enable_rag_rest", False):
             hits = query_rag_rest(
@@ -982,7 +984,6 @@ def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
         up_text = _prepare_summaries(["用户项目推荐："] + up_bullets, max_items=min(1 + len(up_bullets), top_k + 1), max_chars=4000)
         modified_text = (modified_text + SUMMARY_SEPARATOR + up_text) if modified_text else up_text
 
-
     dispatched_out = [original_query] if original_query else []
     return {
         "sources_gathered": segments,
@@ -994,6 +995,7 @@ def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
 
 def classify_intent(state: OverallState, config: RunnableConfig) -> OverallState:
     """Classify whether the user's request is a simple direct lookup or requires research.
+    Enhanced to support follow-up context for unified intent classification.
 
     Stores structured intent info into state["intent"]. If router disabled, set a RESEARCH intent.
     """
@@ -1019,9 +1021,22 @@ def classify_intent(state: OverallState, config: RunnableConfig) -> OverallState
     structured_llm = llm.with_structured_output(Intent)
 
     topic = get_research_topic(state["messages"])
-    logger.debug("[NEO_LOG] [classify_intent] topic => %s", topic)
     
-    prompt = intent_classifier_instructions.format(research_topic=topic)
+    # Enhanced: Check if this is a follow-up question
+    is_follow_up = state.get("is_follow_up", False)
+    previous_report = state.get("previous_report", "")
+    
+    logger.debug("[NEO_LOG] [classify_intent] topic => %s, is_follow_up => %s", topic, is_follow_up)
+    
+    # Enhanced prompt with follow-up context
+    if is_follow_up and previous_report:
+        prompt = enhanced_intent_classifier_instructions.format(
+            research_topic=topic,
+            previous_report=previous_report[:1000],  # Limit context size
+            is_follow_up=is_follow_up
+        )
+    else:
+        prompt = intent_classifier_instructions.format(research_topic=topic)
     # logger.debug("[NEO_LOG] [classify_intent] prompt => %s", prompt)
 
     try:
@@ -1540,39 +1555,56 @@ def answer_simple_fact(state: OverallState, config: RunnableConfig) -> OverallSt
 
 
 def route_after_simple_fact(state: OverallState, config: RunnableConfig):
-    """Route after simple fact answer to support conversation continuation."""
+    """Route after simple fact answer with integrated conversation handling."""
     # Check if user wants to continue conversation
     continue_conversation = state.get("continue_conversation", False)
     chat_mode = state.get("chat_mode", False)
     
     if continue_conversation or chat_mode:
-        # In chat mode, wait for user input and then re-classify
-        # This creates a loop: answer_simple_fact -> user input -> classify_intent
-        raise NodeInterrupt("请继续提问，或者说'结束'来退出对话。")
+        # Check if user input contains exit commands
+        messages = state.get("messages", [])
+        if messages:
+            last_message = messages[-1]
+            if hasattr(last_message, 'content'):
+                content = last_message.content.strip().lower()
+                # Check for exit commands
+                if content in ['结束', '退出', 'exit', 'quit', 'bye', '再见']:
+                    return END
     
-    return END
-
-
-def handle_conversation_input(state: OverallState, config: RunnableConfig) -> OverallState:
-    """Handle user input in conversation mode and route back to classification."""
-    messages = state.get("messages", [])
-    if not messages:
-        return {"continue_conversation": False}
-    
-    last_message = messages[-1]
-    if hasattr(last_message, 'content'):
-        content = last_message.content.strip().lower()
-        # Check for exit commands
-        if content in ['结束', '退出', 'exit', 'quit', 'bye', '再见']:
-            return {"continue_conversation": False}
-    
-    # Reset conversation flags and re-classify the new input
-    return {
+        # If not an exit command, continue conversation by re-classifying
+        # Reset conversation flags for fresh classification
+        state.update({
         "continue_conversation": False,
         "chat_mode": False,
         "clarification_count": 0,
         "intent_clarified": False,
-    }
+        })
+        return "classify_intent"
+    
+    return END
+
+
+# PHASE 3: 注释掉冗余的handle_conversation_input节点（功能已合并到route_after_simple_fact）
+# def handle_conversation_input(state: OverallState, config: RunnableConfig) -> OverallState:
+#     """Handle user input in conversation mode and route back to classification."""
+#     messages = state.get("messages", [])
+#     if not messages:
+#         return {"continue_conversation": False}
+#     
+#     last_message = messages[-1]
+#     if hasattr(last_message, 'content'):
+#         content = last_message.content.strip().lower()
+#         # Check for exit commands
+#         if content in ['结束', '退出', 'exit', 'quit', 'bye', '再见']:
+#             return {"continue_conversation": False}
+#     
+#     # Reset conversation flags and re-classify the new input
+#     return {
+#         "continue_conversation": False,
+#         "chat_mode": False,
+#         "clarification_count": 0,
+#         "intent_clarified": False,
+#     }
 
 
 # 重点方法 反思 Gemini 2.5 Flash 0.2
@@ -2431,30 +2463,40 @@ def detect_follow_up(state: OverallState, config: RunnableConfig) -> OverallStat
 
 
 def route_follow_up_detection(state: OverallState) -> str:
-    """Route based on follow-up detection."""
-    # 检查最后一条消息是否为直接查询请求
-    messages = state.get("messages", [])
-    if messages:
-        last_message = messages[-1]
-        if hasattr(last_message, 'type') and last_message.type == "human":
-            try:
-                content = last_message.content if hasattr(last_message, 'content') else ""
-                if isinstance(content, str) and content.startswith("{") and content.endswith("}"):
-                    import json
-                    data = json.loads(content)
-                    if data.get("action") in ("quick_lookup", "direct_lookup"):
-                        return "find_official_site"
-            except (json.JSONDecodeError, AttributeError):
-                pass
+    """Route based on follow-up detection. 
+    PHASE 3: 完全统一路由 - 所有情况都通过classify_intent处理
+    """
+    # PHASE 3: 注释特殊情况处理，统一到classify_intent
+    # 原来的特殊情况处理（已注释，保留代码）：
     
-    # 如果检测到批准消息，直接跳转到思考阶段
-    if state.get("plan_approved", False):
-        return "thinking_startup_stage"
+    # # 检查最后一条消息是否为直接查询请求
+    # messages = state.get("messages", [])
+    # if messages:
+    #     last_message = messages[-1]
+    #     if hasattr(last_message, 'type') and last_message.type == "human":
+    #         try:
+    #             content = last_message.content if hasattr(last_message, 'content') else ""
+    #             if isinstance(content, str) and content.startswith("{") and content.endswith("}"):
+    #                 import json
+    #                 data = json.loads(content)
+    #                 if data.get("action") in ("quick_lookup", "direct_lookup"):
+    #                     return "find_official_site"
+    #         except (json.JSONDecodeError, AttributeError):
+    #             pass
+    # 
+    # # 如果检测到批准消息，直接跳转到思考阶段
+    # if state.get("plan_approved", False):
+    #     return "thinking_startup_stage"
     
-    if state.get("is_follow_up", False):
-        return "handle_follow_up"
-    else:
-        return "classify_intent"
+    # PHASE 2: 统一路由到classify_intent，让它处理追问和新对话
+    # 旧的双路径设计（已注释）：
+    # if state.get("is_follow_up", False):
+    #     return "handle_follow_up"
+    # else:
+    #     return "classify_intent"
+    
+    # PHASE 3: 完全统一的路径设计 - 所有情况都经过意图分类
+    return "classify_intent"
 
 
 # Routing functions for new HITL flow
@@ -2497,24 +2539,23 @@ def route_thinking_stage(state: OverallState):
         return "generate_query"
 
 
-def route_after_handle_follow_up(state: OverallState):
-    """Route after handling a follow-up.
-
-    - If follow-up requires further research (queries present or stage is middle),
-      continue to the middle thinking stage.
-    - Otherwise, assume answered directly and end the flow.
-    """
-    # Continue research when explicit flag or queries/stage indicate it
-    if (
-        state.get("needs_research", False)
-        or state.get("search_query")
-        or state.get("current_queries")
-        or state.get("thinking_stage") == "middle"
-    ):
-        # Delegate to unified thinking stage router
-        return route_thinking_stage(state)
-    # Direct answer path ends the conversation
-    return END
+# def route_after_handle_follow_up(state: OverallState):
+#     """Route after handling a follow-up.
+#     - If follow-up requires further research (queries present or stage is middle),
+#       continue to the middle thinking stage.
+#     - Otherwise, assume answered directly and end the flow.
+#     """
+#     # Continue research when explicit flag or queries/stage indicate it
+#     if (
+#         state.get("needs_research", False)
+#         or state.get("search_query")
+#         or state.get("current_queries")
+#         or state.get("thinking_stage") == "middle"
+#     ):
+#         # Delegate to unified thinking stage router
+#         return route_thinking_stage(state)
+#     # Direct answer path ends the conversation
+#     return END
 
 # 重点方法 在反思之后，路径决策 日志 [router][after_reflection] | [route_after_reflection] 
 # 早终止条件合取为任一成立即触发（见 1607-1613）：
@@ -2601,7 +2642,8 @@ builder.add_node("clarify_intent", clarify_intent)
 builder.add_node("find_official_site", find_official_site)
 builder.add_node("direct_lookup", direct_lookup)
 builder.add_node("answer_simple_fact", answer_simple_fact)
-builder.add_node("handle_conversation_input", handle_conversation_input)
+# PHASE 3: 注释掉冗余的handle_conversation_input节点
+# builder.add_node("handle_conversation_input", handle_conversation_input)
 builder.add_node("generate_research_plan", generate_research_plan)
 builder.add_node("wait_for_human_approval", wait_for_human_approval)
 builder.add_node("thinking_startup_stage", thinking_startup_stage)
@@ -2616,12 +2658,14 @@ builder.add_node("finalize_answer", finalize_answer)
 
 # Enhanced routing with HITL and structured thinking
 builder.add_edge(START, "detect_follow_up")
+# PHASE 3: 完全统一图构建 - 只路由到classify_intent
 builder.add_conditional_edges(
-    "detect_follow_up", route_follow_up_detection, ["handle_follow_up", "classify_intent", "thinking_startup_stage", "find_official_site"]
+    "detect_follow_up", route_follow_up_detection, ["classify_intent"]
 )
-builder.add_conditional_edges(
-    "handle_follow_up", route_after_handle_follow_up, ["generate_query", "thinking_middle_stage", "thinking_finalization_stage", END]
-)
+# PHASE 2: 注释旧的handle_follow_up路由（高风险区域，保留代码）
+# builder.add_conditional_edges(
+#     "handle_follow_up", route_after_handle_follow_up, ["generate_query", "thinking_middle_stage", "thinking_finalization_stage", END]
+# )
 builder.add_conditional_edges(
     "classify_intent", route_after_classify, ["answer_simple_fact", "find_official_site", "clarify_intent", "generate_research_plan"]
 )
@@ -2641,9 +2685,10 @@ builder.add_conditional_edges(
 )
 
 # Structured thinking flow
-builder.add_conditional_edges(
-    "thinking_startup_stage", route_thinking_stage, ["generate_query", "thinking_middle_stage", "thinking_finalization_stage"]
-)
+builder.add_edge("thinking_startup_stage", "generate_query")
+# builder.add_conditional_edges(
+#     "thinking_startup_stage", route_thinking_stage, ["generate_query", "thinking_middle_stage", "thinking_finalization_stage"]
+# )
 builder.add_conditional_edges(
     "generate_query", continue_to_web_research, ["web_research", "rag_search", "thinking_finalization_stage"]
 )
@@ -2665,12 +2710,13 @@ builder.add_edge("direct_lookup", "finalize_answer")
 # Both report paths end the flow
 builder.add_edge("generate_enhanced_report", END)
 builder.add_edge("finalize_answer", END)
-# Conversation flow for answer_simple_fact
+# PHASE 3: 简化对话流程 - 移除handle_conversation_input中间节点
 builder.add_conditional_edges(
-    "answer_simple_fact", route_after_simple_fact, ["handle_conversation_input", END]
+    "answer_simple_fact", route_after_simple_fact, ["classify_intent", END]
 )
-builder.add_conditional_edges(
-    "handle_conversation_input", lambda state: "classify_intent" if state.get("continue_conversation", True) else END, ["classify_intent", END]
-)
+# PHASE 3: 注释掉旧的handle_conversation_input路由（功能已合并）
+# builder.add_conditional_edges(
+#     "handle_conversation_input", lambda state: "classify_intent" if state.get("continue_conversation", True) else END, ["classify_intent", END]
+# )
 
 graph = builder.compile(name="enhanced-deepresearch-agent")
