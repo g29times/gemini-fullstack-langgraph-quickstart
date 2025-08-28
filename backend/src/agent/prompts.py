@@ -11,14 +11,14 @@ def get_current_date():
 query_writer_instructions = """Generate diverse, atomic web search queries for an automated research tool.
 
 Rules:
-- Default 2–4 queries; emit 1 only if the topic is trivially simple.
+- Target 3–5 queries (prefer more rather than fewer); emit 1 only if the topic is trivially simple.
 - No near-duplicates; one intent per query; never combine multiple intents.
 - Include exactly one entity verification query only if identity remains unresolved; skip verification if already confirmed.
-- Preserve local proper nouns in quotes (e.g., "深圳犀照科技"); add transliterations/aliases as OR variants; add geographic qualifiers when helpful.
+- Preserve local proper nouns in quotes (e.g., "Company Abc"); add transliterations/aliases as OR variants; add geographic qualifiers when helpful.
 - Do not use "vs/VS" to combine entities; emit per-entity queries. For comparisons, add a separate metric query.
 - For China-based entities, consider authority registries: site:天眼查 OR site:企查查 OR site:aiqicha.baidu.com.
 - Ensure recency: current date is {current_date}.
-- Cap total queries <= {number_queries}; remove near-duplicates.
+- MAXIMIZE coverage within {number_queries} limit; use the full quota when possible.
 
 Output JSON:
 - "rationale": brief reason
@@ -71,19 +71,23 @@ Research Topic:
 
 
 # 流程驱动反思 reflection | Gemini 2.5 Flash 0.2
+# - RAG-aware Guidance:
+#       - The Summaries may include outputs from both Web Search and RAG (including a section like "用户项目推荐"). Treat RAG items as hypotheses or hints; DO NOT increase completion scores unless corroborated by authoritative web sources.
+#       - If a "用户项目推荐" section exists, consider generating at least one verification follow-up to assess recency/feasibility, with explicit constraints (e.g., site:, time, region, official channel).
+#       - De-duplicate evidence and follow-ups across Web and RAG; avoid double-counting similar items from two sources.
+#     - When a follow-up is based primarily on RAG hints, include verification-oriented constraints (e.g., site:gov.cn, site:集团官网 招采/新闻/公告, time window like last 12 months).
+#   - Style:
+#     - keep non-English proper nouns in original script (quoted); add transliterations/aliases when useful.
 reflection_instructions = """You are an expert research assistant analyzing summaries about "{research_topic}".
 
 Research Objectives (if available):
 {research_objectives}
 
-Context History:
-- Previous Objectives Progress (for monotonic scoring):
-{previous_objectives_progress}
-- Past Knowledge Gaps (you may reuse or refine when appropriate):
-{previous_gaps}
-- Past Follow-up Queries (do NOT repeat or paraphrase):
-{previous_followups}
+Reflect carefully on the Summaries to identify knowledge gaps and assess objective completion. 
+Summaries:
+{summaries}
 
+Then, produce your output following this JSON format:
 Output Format:
 - Format your response as a JSON object with these exact keys:
    - "objectives_progress": Object mapping each objective to completion score (0.0-1.0)
@@ -91,30 +95,6 @@ Output Format:
    - "is_sufficient": true or false, true if overall_completion >= 0.8
    - "knowledge_gap": Describe what information is missing or needs clarification
    - "follow_up_queries": A list with 1-2 highly specific question(s) to address this gap
-
-Instructions:
-  - Scoring Rubric:
-    - {progress_scoring_rules}
-    - Assess each objective and keep scores MONOTONIC (never decrease vs previous).
-    - Score each objective; overall_completion = average(objectives_progress); is_sufficient = (overall_completion >= 0.8).
-  - Scheduling Strategy:
-    - Strategy: {scheduling_strategy}
-    - Target Objective to focus next (if provided): {target_objective}
-  - Knowledge Gap:
-    - If any objective score < 1.0, it MUST be proposed (otherwise optional).
-    - Priority: Identity verification > '{target_objective}'(if provided) > the lowest-scoring objective.
-  - Follow-ups:
-    - Follow-ups: Up to 2 to close the current knowledge_gap. non-overlapping with Past Follow-ups (strict de-dup); each must include ≥1 explicit constraint (e.g., site:, people, event, time, region, etc.) and be self-contained, precise, and actionable (do not rephrase the original).
-    - Identity: Unambiguous identities are VERY IMPORTANT, include Follow-up verification queries (For China-based entities, consider site:天眼查/企查查/爱企查) until confirmed, SKIP re-verification.
-  - RAG-aware Guidance:
-    - The Summaries may include outputs from both Web Search and RAG (including a section like "用户项目推荐"). Treat RAG items as hypotheses or hints; DO NOT increase completion scores unless corroborated by authoritative web sources.
-    - If a "用户项目推荐" section exists, consider generating at least one verification follow-up to assess recency/feasibility, with explicit constraints (e.g., site:, time, region, official channel).
-    - De-duplicate evidence and follow-ups across Web and RAG; avoid double-counting similar items from two sources.
-    - When a follow-up is based primarily on RAG hints, include verification-oriented constraints (e.g., site:gov.cn, site:集团官网 招采/新闻/公告, time window like last 12 months).
-  - Style:
-    - keep non-English proper nouns in original script (quoted); add transliterations/aliases when useful.
-
-CRITICAL: For objectives_progress, use the EXACT objective text as keys, not bullet points or modified text.
 
 Example:
 ```json
@@ -130,15 +110,35 @@ Example:
 }}
 ```
 
-Reflect carefully on the Summaries to identify knowledge gaps and assess objective completion. Then, produce your output following this JSON format:
+Instructions:
+   - "objectives_progress": Object mapping each objective to completion score (0.0-1.0)
+      - use the EXACT objective text as keys, not bullet points or modified text.
+      - Assess each objective and keep scores MONOTONIC (never decrease vs previous);
+      - Scoring rules: {progress_scoring_rules}
+   - "overall_completion": Overall research completion percentage (0.0-1.0, Average of objectives_progress)
+      - overall_completion = average(objectives_progress); is_sufficient = (overall_completion >= 0.8).
+   - "is_sufficient": true or false, true if overall_completion >= 0.8
+   - "knowledge_gap": Describe what information is missing or needs clarification
+      - If any objective score < 1.0, it MUST be proposed (otherwise optional).
+   - "follow_up_queries": A list with 1-2 highly specific question(s) to address this gap
+      - Generate 1-3 follow-ups to close the current knowledge_gap. MANDATORY when overall_completion < 0.7.
+      - STRICT DEDUPLICATION: with ALL Past Follow-ups. Each follow-up must explore a DISTINCT dimension.
+      - CONSTRAINT REQUIREMENTS: Each must include ≥1 explicit constraint (site:, people, event, time, region, filetype:, etc.)
+      - ACTIONABILITY: Self-contained, precise, and directly searchable (avoid vague rephrasing)
 
-Summaries:
-{summaries}
+Context History:
+- Previous Objectives Progress (for monotonic scoring):
+{previous_objectives_progress}
+- Past Knowledge Gaps (you may reuse or refine when appropriate):
+{previous_gaps}
+- Past Follow-up Queries (do NOT repeat or paraphrase):
+{previous_followups}
 """
 
 
 # 高质量回答 finalize_answer | Gemini 2.5 Flash 0
 answer_instructions = """Generate a high-quality answer to the user's question based on the provided summaries.
+Answer in the same language as the user's question(User Context).
 
 Instructions:
 - The current date is {current_date}.
@@ -146,10 +146,8 @@ Instructions:
 - You have access to all the information gathered from the previous steps.
 - You have access to the user's question.
 - Generate a high-quality answer to the user's question based on the provided summaries and the user's question.
+- If the Summaries doesn't include any useful information, try your best to understand user's question to give user some common suggestions.
 - Include the sources you used from the Summaries in the answer correctly, use markdown format (e.g. [apnews](https://vertexaisearch.cloud.google.com/id/1-0)). THIS IS A MUST.
-
-Optional (when applicable):
-- If the Summaries include a "用户项目推荐" (User Project Recommendations) section, synthesize it into a final "建议/案例" (Recommendations/Examples) paragraph at the end, preserving the original order and adding citations.
 
 User Context:
 - {research_topic}
@@ -287,8 +285,8 @@ Rules:
 User Request:
 {research_topic}
 
-Entity (if any): {entity}
-Attribute (if any): {attribute}
+Entity: {entity}
+Attribute: {attribute}
 """
 
 
@@ -305,126 +303,10 @@ Rules:
 User Request:
 {research_topic}
 
-Entity (if any): {entity}
-Attribute (if any): {attribute}
+Entity: {entity}
+Attribute: {attribute}
 """
 
-
-# answer_simple_fact | Gemini 2.5 Flash-Lite (快速事实应答) 0.5
-simple_fact_answer_instructions = """你将直接回答一个无需联网检索的简单事实问题。保持与用户相同的语言（但对于特定领域，必要时可以结合英语等专业术语）
-
-规则：
-- 基于已有知识直接回答，无需外部搜索
-- 保持简洁、准确、友好的语调
-- 如果输入包含对话历史，要考虑上下文关联
-- 回答后可以询问用户是否还有其他问题
-
-用户问题（或对话历史）：
-'''{research_topic}'''
-
-请回答用户的问题。如果输入包含多轮对话，请基于完整上下文回答最新的问题。如果问题不明确，可以友好地请求澄清。"""
-
-
-# generate_research_plan | Gemini 2.5 Flash (专业研究规划) 0.2
-research_plan_instructions = """你是一位专业的全球化多语种研究规划专家。
-
-你将基于研究主题，制定一个详细的研究计划。
-
-指导原则：
-- 任务1：分析研究主题，制定1~5个清晰的研究目标，规划具体的方法论和搜索策略和信息收集步骤
-- 任务2：从研究主题和研究目标中提取1~10个紧密相关的查询关键词或短语（适合搜索引擎）
-- 语言：编写研究目标和研究方法时，保持与研究主题相同的语言（主题是英文就用英文、主题是中文就用中文等，对于特定专业术语，应使用（或自动翻译成）其来源国的语言）
-- 技巧：planned_queries部分，为了确保搜索引擎的召回效果，应尽可能的混合使用多种语言（英、中、日等），生成多样化的关键搜索词
-- 约束：planned_queries 列表中每一项必须是独立的“原子查询”（一条查询只表达一个意图/一个主体）。严禁在同一条查询里使用“vs/VS/比较/对比”等把多个实体或备选合并；若需要比较，请拆分为多条（各实体分别查询），并可额外增加一条比较指标/时间范围的查询。
-- 特定：对于不知名的实体，参考NER命名实体的拆解方法，弄清该主体是什么，在做什么，逐步扩展到6W（Who What Where When Why How），使用金字塔式递进构词，确保关键搜索词MECE不重不漏，例如：研究主题：“研究下深圳犀照科技发展前景”，可先搜索 "深圳 犀照科技" -> 再扩展搜索 "深圳 犀照科技 主营业务" -> 再进一步发散到科技等关键词 -> 用多语言进一步发散
-- 特定：对于中国企业信息，要重点关注“天眼查”，“企查查”，“爱企查”三个企业分析平台的数据，其他国家的也类似的使用当地的信息中枢
-
-输出格式（JSON）：
-{{
-    "research_objectives": ["目标1", "目标2", "..."],
-    "research_methodology": "详细的研究方法、搜索策略、信息收集步骤",
-    "planned_queries": ["查询1（某关键词）", "查询2（某短语）", "..."]
-}}
-
-研究主题：{research_topic}
-当前日期：{current_date}
-"""
-
-
-# thinking_startup_stage | Gemini 2.5 Flash (流程起步思考) 0.5
-thinking_startup_instructions = """你正处于研究的起步阶段，需要进行"概述分解规划"。使用与研究主题相同的语言进行思考。
-
-任务：
-1. **概述**：对研究主题进行全面概述，识别核心概念和关键要素
-2. **分解**：将复杂主题分解为可管理的子主题和研究方向
-3. **规划**：细化具体的研究方向和优先级
-
-输出格式（JSON）：
-{{
-    "stage_name": "概述分解规划",
-    "overview": "研究主题的全面概述",
-    "key_components": ["核心要素1", "核心要素2", "..."],
-    "research_directions": ["方向1", "方向2", "..."],
-    "priorities": ["优先级1", "优先级2", "..."],
-    "next_actions": ["下一步行动1", "下一步行动2", "..."]
-}}
-
-研究主题：{research_topic}
-当前日期：{current_date}
-"""
-
-# thinking_middle_stage | Gemini 2.5 Flash (流程驱动深化) 0.5
-thinking_middle_instructions = """你正处于研究的中间阶段，需要进行"洞察梳理深化"。使用与研究主题相同的语言进行思考。
-
-任务：
-1. **洞察**：从已收集的信息中提取关键洞察和发现
-2. **梳理**：整理和关联不同信息源的内容
-3. **深化**：识别需要进一步探索的领域
-
-当前研究结果：
-{summaries}
-
-输出格式（JSON）：
-{{
-    "stage_name": "洞察梳理深化",
-    "key_insights": ["洞察1", "洞察2", "..."],
-    "information_gaps": ["缺口1", "缺口2", "..."],
-    "connections_found": ["关联1", "关联2", "..."],
-    "areas_for_deepening": ["深化领域1", "深化领域2", "..."],
-    "next_actions": ["下一步行动1", "下一步行动2", "..."]
-}}
-
-研究主题：{research_topic}
-当前日期：{current_date}
-"""
-
-# thinking_finalization_stage | Gemini 2.5 Flash (收尾思考) 0.5
-thinking_finalization_instructions = """你正处于研究的收尾阶段，需要进行"洞察梳理总结"。使用与研究主题相同的语言进行思考。
-
-任务：
-1. **洞察**：综合所有研究发现，提取最终洞察
-2. **梳理**：整理完整的知识体系和逻辑结构
-3. **总结**：准备高质量的研究报告结构
-
-当前研究结果：
-{summaries}
-
-已收集的洞察：
-{insights}
-
-输出格式（JSON）：
-{{
-    "stage_name": "洞察梳理总结",
-    "final_insights": ["最终洞察1", "最终洞察2", "..."],
-    "knowledge_structure": {{"主题1": ["要点1", "要点2"], "主题2": ["要点1", "要点2"]}},
-    "report_outline": {{"摘要": "...", "第一章": {{"标题": "...", "节": ["节1", "节2"]}}}},
-    "key_conclusions": ["结论1", "结论2", "..."],
-    "next_actions": ["生成最终报告"]
-}}
-
-研究主题：{research_topic}
-当前日期：{current_date}
-"""
 
 
 # detect_follow_up | Gemini 2.5 Flash-Lite (快速追问检测) 0.1
@@ -478,50 +360,6 @@ follow_up_instructions = """你是一个专业的研究助手。
 """
 
 
-# generate_enhanced_report | Gemini 2.5 Pro (高质量报告生成) 0.3
-enhanced_report_instructions = """生成一份高质量的结构化研究报告。使用与研究主题相同的语言（指英文、中文等）生成报告。
-
-报告结构要求：
-1. **标题和摘要**：大标题+简洁的摘要
-2. **章节结构**：清晰的章节划分
-3. **图表支持**：适当的markdown表格和图表
-4. **引用标注**：在相关段落内进行“内联编号引用”
-
-5. **用户项目推荐融合（可选）**：若 Summaries 含“用户项目推荐”，在报告第一章新增“建议/案例（用户项目推荐）”章节，按列表呈现，保留原有顺序，并复用短链引用。
-
-输出格式：
-- 使用markdown格式
-- 报告标题和摘要（可选目录结构）
-- 章节标题/编号（灵活的，不一定要有“第一章”这样的字眼）
-- 适当的表格和图表
-- 引用请在相关句子后内联标注为 [n](SHORT_URL)，例如 [1](SHORT_URL) ；同一来源可在多处复用同一编号；引用仅能从“研究结果”中复用，不要杜撹；若未包含引用，可不添加
-- 结合主题，适时增加Appendix、Glossary等部分以丰富内容
-- 实体命名：首次出现时保留原语言名称，括号中可附英文或音译别名；全文保持一致。
-
-不要做任何语气类的、应答类的陈述，如“好的，下面是我为您生成的一份报告”等，而是直接按照格式输出报告。
-
-当前日期：{current_date}
-研究主题：{research_topic}
-研究结果：{summaries}
-报告大纲：{report_outline}
-"""
-
-
-# ===== 用户项目（User Project）相关提示片段（中文） =====
-# 在需要时可被上层节点引用；本文件仅定义常量，不改变现有调用路径。
-user_project_summary_guidelines_cn = """若已检索到相关“用户项目”，请在摘要末尾新增“用户项目推荐”小节：
-- 建议以列表展示：项目名、用户（或来源主体）、时间、3-10字标签、1句价值点
-- 避免夸大或无依据推断，保持客观、可溯源
-- 数据可能来自历史案例或演示数据，需与现实业务与合规审查核对"""
-
-user_project_disclaimer_cn = """“用户项目推荐”来源于历史案例或演示数据，仅供灵感参考；
-请结合实际业务约束与合规审查后再行采用。"""
-
-user_project_answer_merge_hint_cn = """若 Summaries 中包含“用户项目推荐”，
-请在回答末段单独列出“建议/案例”段落，按列表复述关键要点，并使用短链引用；
-避免与主体结论混写。"""
-
-
 # 意图澄清 clarify_intent | Gemini 2.5 Flash-Lite (多轮对话澄清用户意图)
 intent_clarification_instructions = """你是一个全球多语种智能助手，专门帮助澄清用户的模糊查询意图。
 
@@ -564,6 +402,196 @@ intent_clarification_instructions = """你是一个全球多语种智能助手�
 - "您需要查询哪家公司或产品的具体信息？请提供准确的名称。"
 
 当前日期：{current_date}"""
+
+
+# answer_simple_fact | Gemini 2.5 Flash-Lite (快速事实应答) 0.5
+simple_fact_answer_instructions = """你将直接回答一个无需联网检索的简单事实问题。保持与用户相同的语言（但对于特定领域，必要时可以结合英语等专业术语）
+
+规则：
+- 基于已有知识直接回答，无需外部搜索
+- 保持简洁、准确、友好的语调
+- 如果输入包含对话历史，要考虑上下文关联
+- 回答后可以询问用户是否还有其他问题
+
+用户问题（或对话历史）：
+'''{research_topic}'''
+
+请回答用户的问题。如果输入包含多轮对话，请基于完整上下文回答最新的问题。如果问题不明确，可以友好地请求澄清。"""
+
+
+# generate_research_plan | Gemini 2.5 Flash (专业研究规划) 0.2
+research_plan_instructions = """你是一位专业的全球化 多语种 研究规划专家。
+
+当前日期：{current_date}
+你将基于研究主题，制定一个详细的研究计划。
+
+指导原则：
+- 任务1：分析研究主题，制定1~5个清晰的研究目标
+- 任务2：规划具体的研究方法论
+- 任务3：生成1~10个与研究主题紧密相关的查询关键词或短语（适合搜索引擎）
+- 要求：语言：编写 research_objectives 和 research_methodology 时，保持与研究主题相同的语言（主题是英文就用英文、主题是中文就用中文等，但保留专业术语）
+- 要求：语言：编写 planned_queries 时，为了确保搜索引擎的召回效果，应尽可能的混合使用多种语言（英、中、日等），生成多样化的关键搜索词
+- 要求：planned_queries 列表中每一项必须是独立的“原子查询”（一条查询只表达一个主体/一个意图）。严禁在一条查询里合并多个主体名称，若需要比较不同主体，在独立拆分每个主体后，额外增加一条进行比较的查询，（如 ["A", "B", "比较'A'与'B'..." ]）。
+- 要求：对于你不知道或不确定的主体，一定要弄清楚主体的时间属性和空间属性，防止出现重名、过期、误判等错误。可以酌情扩展（Who What Where When Why How）等信息，确保不重不漏。
+  - 例如对于商业实体，要弄清该商业实体的经营地、注册地是什么，主营业务是什么，什么时间注册的，是否正常营业？
+  - 对于历史事件，要弄清该事件发生的时间、地点、人物、原因、结果、影响等信息。
+  - 对于人物，要弄清该人物的年代、活动地点和时间、主要事迹等信息。
+  - 对于物体，要弄清该物体的产地、材质、用途等信息。
+  - 对于概念、理论、虚拟物，要弄清该主题的起源、发展、影响等信息。
+- 技巧：倒金字塔式递进构词法，例如：用户希望研究主题：“研究下 某地 某科技公司A发展前景”，可以先搜索"公司A名称" -> "地名 公司A名称" -> "地名 公司A名称 主营业务" -> 再进一步发散到科技等关键词 -> 用多语言进一步发散
+- 技巧：对于中国企业信息，要重点关注“天眼查”，“企查查”，“爱企查”三个企业分析平台，其他国家的也类似的使用当地的信息平台
+
+输出格式（JSON）：
+{{
+    "research_objectives": ["目标1", "目标2", "..."],
+    "research_methodology": "详细的研究方法、步骤",
+    "planned_queries": ["查询1", "查询2", "..."]
+}}
+
+planned_queries 正例：
+  研究主题：“最近准备代表犀照科技在WaytoAGI 8.31的摆摊大会作为摊主出席，给我策划几个好方案”
+  "planned_queries": ["犀照科技", "深圳 犀照科技", "WaytoAGI", "WaytoAGI 8.31", "WaytoAGI 摆摊大会", "WaytoAGI 参展商", "科技展会互动方案", "AI公司展台设计", "..."]
+（良好原因：按照原子化很好的拆解了不同主体“犀照科技”和“WaytoAGI”，并进行了倒金字塔式拓展，关注了时间、地点，有利于搜索到关键信息）
+
+planned_queries 反例：
+  研究主题：“最近这个 Context Engineering 的说法很流行，深入研究下他和模型记忆之间（如Mem0, MIRIX）的关系和研究进展。”
+  "planned_queries": [
+    "Context Engineering 模型记忆 关系 研究", （不良原因：两个不同主题“Context Engineering”和“模型记忆”，且中英文混在同一个查询中，容易导致搜索引擎不返回有效结果）
+    "大型语言模型 上下文工程 记忆机制", （不良原因：同一主体“大型语言模型”的两个不同主题“上下文工程”和“记忆机制”，混在同一个查询中）
+    "Mem0 MIRIX engineering vs model-centric memory"（不良原因：两种不同技术“Mem0”和“MIRIX”混在同一个查询中）
+  ]
+
+研究主题：{research_topic}
+"""
+
+
+# thinking_startup_stage | Gemini 2.5 Flash (流程起步思考) 0.5
+    # "key_components": ["核心要素1", "核心要素2", "..."],
+    # "research_directions": ["方向1", "方向2", "..."],
+    # "priorities": ["优先级1", "优先级2", "..."],
+    # "next_actions": ["下一步行动1", "下一步行动2", "..."]
+thinking_startup_instructions = """你正处于研究的起步阶段，
+请围绕研究主题，参考研究目标和研究方法，进行"概述分解规划"。
+
+任务：
+1. **概述**：对研究主题进行全面概述，识别核心概念和关键要素
+2. **分解**：将复杂主题分解为可管理的子主题和研究方向
+3. **规划**：细化具体的研究方向和优先级
+整合上述三要素，生成一个研究起步阶段的全面概述
+
+输出格式（JSON）：
+{{
+    "stage_name": "startup_thinking",
+    "startup_thinking": "研究主题的全面概述"
+}}
+
+研究主题：{research_topic}
+研究目标：{research_objectives}
+研究方法：{research_methodology}
+当前日期：{current_date}
+"""
+
+# thinking_middle_stage | Gemini 2.5 Flash (流程驱动深化) 0.5
+    # "key_insights": ["洞察1", "洞察2", "..."],
+    # "information_gaps": ["缺口1", "缺口2", "..."],
+    # "connections_found": ["关联1", "关联2", "..."],
+    # "areas_for_deepening": ["深化领域1", "深化领域2", "..."],
+    # "next_actions": ["下一步行动1", "下一步行动2", "..."]
+thinking_middle_instructions = """你正处于研究的中间阶段，
+请围绕研究主题，参考研究目标和研究方法以及阶段性研究成果，进行"洞察梳理深化"。
+
+任务：
+1. **洞察**：从已收集的信息中提取关键洞察和发现
+2. **梳理**：整理和关联不同信息源的内容
+3. **深化**：识别需要进一步探索的领域
+整合上述三要素，生成一个研究中间阶段的思考
+
+输出格式（JSON）：
+{{
+    "stage_name": "middle_thinking",
+    "middle_thinking": "中间阶段的思考"
+}}
+
+研究主题：{research_topic}
+研究目标：{research_objectives}
+研究方法：{research_methodology}
+当前日期：{current_date}
+当前研究成果：
+{summaries}
+"""
+
+# thinking_finalization_stage | Gemini 2.5 Flash (收尾思考) 0.5
+    # "final_insights": ["最终洞察1", "最终洞察2", "..."],
+    # "knowledge_structure": {{"主题1": ["要点1", "要点2"], "主题2": ["要点1", "要点2"]}},
+    # "report_outline": {{"摘要": "...", "第一章": {{"标题": "...", "节": ["节1", "节2"]}}}},
+    # "key_conclusions": ["结论1", "结论2", "..."],
+    # "next_actions": ["生成最终报告"]
+  # 已收集的洞察：
+  # {insights}
+thinking_finalization_instructions = """你正处于研究的收尾阶段，
+请围绕研究主题，参考研究目标和研究方法以及阶段性研究成果，进行"洞察梳理总结"。
+
+任务：
+1. **洞察**：综合所有研究发现，提取最终洞察
+2. **梳理**：整理完整的知识体系和逻辑结构
+3. **总结**：准备高质量的研究报告总结
+整合上述三要素，生成一个研究收尾阶段的综述
+
+输出格式（JSON）：
+{{
+    "stage_name": "final_thinking",
+    "final_thinking": "收尾阶段的综述"
+}}
+
+研究主题：{research_topic}
+研究目标：{research_objectives}
+研究方法：{research_methodology}
+当前日期：{current_date}
+当前研究成果：
+{summaries}
+"""
+
+# generate_enhanced_report | Gemini 2.5 Pro (高质量报告生成) 0.3
+# 报告大纲：{report_outline}
+enhanced_report_instructions = """生成一份高质量的结构化研究报告。使用与研究主题相同的语言（指英文、中文等）生成报告。
+
+报告结构要求：
+1. **标题和摘要**：大标题+简洁的摘要
+2. **章节结构**：清晰的章节划分
+3. **图表支持**：适当的markdown表格和图表
+4. **引用标注**：在相关段落内进行“内联编号引用”
+
+输出格式：
+- 使用markdown格式
+- 报告标题和摘要（可选目录结构）
+- 章节标题/编号（灵活的，不一定要有“第一章”这样的字眼）
+- 适当的表格和图表
+- 引用请在相关句子后内联标注为 [n](SHORT_URL)，例如 [1](SHORT_URL) ；同一来源可在多处复用同一编号；引用仅能从“研究结果”中复用，不要杜撹；若未包含引用，可不添加
+- 结合主题，适时增加Appendix、Glossary等部分以丰富内容
+- 实体命名：首次出现时保留原语言名称，括号中可附英文或音译别名；全文保持一致。
+
+不要做任何语气类的、应答类的陈述，如“好的，下面是我为您生成的一份报告”等，而是直接按照格式输出报告。
+
+当前日期：{current_date}
+研究主题：{research_topic}
+研究过程：{summaries}
+"""
+
+
+# ===== 用户项目（User Project）相关提示片段（中文） =====
+# 在需要时可被上层节点引用；本文件仅定义常量，不改变现有调用路径。
+user_project_summary_guidelines_cn = """若已检索到相关“用户项目”，请在摘要末尾新增“用户项目推荐”小节：
+- 建议以列表展示：项目名、用户（或来源主体）、时间、3-10字标签、1句价值点
+- 避免夸大或无依据推断，保持客观、可溯源
+- 数据可能来自历史案例或演示数据，需与现实业务与合规审查核对"""
+
+user_project_disclaimer_cn = """“用户项目推荐”来源于历史案例或演示数据，仅供灵感参考；
+请结合实际业务约束与合规审查后再行采用。"""
+
+user_project_answer_merge_hint_cn = """若 Summaries 中包含“用户项目推荐”，
+请在回答末段单独列出“建议/案例”段落，按列表复述关键要点，并使用短链引用；
+避免与主体结论混写。"""
+
 
 
 # 实体特异性检查 entity_specificity_check | Gemini 2.5 Flash-Lite (检查实体是否足够具体)

@@ -100,56 +100,65 @@ class ThinkingStage(BaseModel):
     stage_name: str = Field(
         description="Name of the thinking stage."
     )
-    overview: str = Field(
+
+    startup_thinking: str = Field(
         default="", description="Overview of the research topic (startup stage)."
     )
-    key_components: List[str] = Field(
-        default_factory=list, description="Key components identified (startup stage)."
+    # key_components: List[str] = Field(
+    #     default_factory=list, description="Key components identified (startup stage)."
+    # )
+    # research_directions: List[str] = Field(
+    #     default_factory=list, description="Research directions (startup stage)."
+    # )
+    # priorities: List[str] = Field(
+    #     default_factory=list, description="Research priorities (startup stage)."
+    # )
+
+    middle_thinking: str = Field(
+        default="", description="Overview/Reflection of the research topic (middle stage)."
     )
-    research_directions: List[str] = Field(
-        default_factory=list, description="Research directions (startup stage)."
+    # key_insights: List[str] = Field(
+    #     default_factory=list, description="Key insights discovered (middle stage)."
+    # )
+    # information_gaps: List[str] = Field(
+    #     default_factory=list, description="Information gaps identified (middle stage)."
+    # )
+    # connections_found: List[str] = Field(
+    #     default_factory=list, description="Connections found between information (middle stage)."
+    # )
+    # areas_for_deepening: List[str] = Field(
+    #     default_factory=list, description="Areas needing deeper exploration (middle stage)."
+    # )
+
+    final_thinking: str = Field(
+        default="", description="Overview/Reflection of the research topic (finalization stage)."
     )
-    priorities: List[str] = Field(
-        default_factory=list, description="Research priorities (startup stage)."
-    )
-    key_insights: List[str] = Field(
-        default_factory=list, description="Key insights discovered (middle stage)."
-    )
-    information_gaps: List[str] = Field(
-        default_factory=list, description="Information gaps identified (middle stage)."
-    )
-    connections_found: List[str] = Field(
-        default_factory=list, description="Connections found between information (middle stage)."
-    )
-    areas_for_deepening: List[str] = Field(
-        default_factory=list, description="Areas needing deeper exploration (middle stage)."
-    )
-    final_insights: List[str] = Field(
-        default_factory=list, description="Final comprehensive insights (finalization stage)."
-    )
-    knowledge_structure: Dict[str, Any] = Field(
-        default_factory=dict, description="Structured knowledge organization (finalization stage)."
-    )
-    report_outline: Dict[str, Any] = Field(
-        default_factory=dict, description="Report structure outline (finalization stage)."
-    )
+    # final_insights: List[str] = Field(
+    #     default_factory=list, description="Final comprehensive insights (finalization stage)."
+    # )
+    # knowledge_structure: Dict[str, Any] = Field(
+    #     default_factory=dict, description="Structured knowledge organization (finalization stage)."
+    # )
+    # report_outline: Dict[str, Any] = Field(
+    #     default_factory=dict, description="Report structure outline (finalization stage)."
+    # )
     
-    @field_validator('knowledge_structure', 'report_outline', mode='before')
-    @classmethod
-    def parse_json_fields(cls, v):
-        """Parse JSON string fields to dict objects."""
-        if isinstance(v, str):
-            try:
-                return json.loads(v)
-            except json.JSONDecodeError:
-                return {}
-        return v if isinstance(v, dict) else {}
-    key_conclusions: List[str] = Field(
-        default_factory=list, description="Key conclusions drawn (finalization stage)."
-    )
-    next_actions: List[str] = Field(
-        description="Next actions to take."
-    )
+    # @field_validator('knowledge_structure', 'report_outline', mode='before')
+    # @classmethod
+    # def parse_json_fields(cls, v):
+    #     """Parse JSON string fields to dict objects."""
+    #     if isinstance(v, str):
+    #         try:
+    #             return json.loads(v)
+    #         except json.JSONDecodeError:
+    #             return {}
+    #     return v if isinstance(v, dict) else {}
+    # key_conclusions: List[str] = Field(
+    #     default_factory=list, description="Key conclusions drawn (finalization stage)."
+    # )
+    # next_actions: List[str] = Field(
+    #     description="Next actions to take."
+    # )
 
 
 class FollowUpResponse(BaseModel):

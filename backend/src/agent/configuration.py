@@ -232,6 +232,60 @@ class Configuration(BaseModel):
         },
     )
 
+    # 魔法数字配置 - 限制各种操作的最大数量
+    max_grounding_chunks: int = Field(
+        default=20,
+        metadata={
+            "description": "Maximum number of grounding chunks to process for URL resolution and citations.",
+        },
+    )
+    max_urls_per_query: int = Field(
+        default=20,
+        metadata={
+            "description": "Maximum number of URLs to process per query to respect tool limits.",
+        },
+    )
+    max_parallel_dispatches: int = Field(
+        default=20,
+        metadata={
+            "description": "Maximum number of parallel query dispatches to prevent resource exhaustion.",
+        },
+    )
+
+    # 查询生成配置
+    min_followup_queries: int = Field(
+        default=1,
+        metadata={
+            "description": "Minimum number of follow-up queries to generate.",
+        },
+    )
+    max_followup_queries: int = Field(
+        default=5,
+        metadata={
+            "description": "Maximum number of follow-up queries to generate.",
+        },
+    )
+    middle_stage_query_multiplier: float = Field(
+        default=1.0,
+        metadata={
+            "description": "Query count multiplier for middle stage follow-up processing.",
+        },
+    )
+    
+    # 查询调度配置
+    enable_domain_dedup: bool = Field(
+        default=True,
+        metadata={
+            "description": "Enable domain-based query deduplication (one query per domain).",
+        },
+    )
+    small_parallel_limit: int = Field(
+        default=2,
+        metadata={
+            "description": "Maximum parallel queries for small batch processing in later loops.",
+        },
+    )
+
     @classmethod
     def from_runnable_config(
         cls, config: Optional[RunnableConfig] = None

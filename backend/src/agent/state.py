@@ -40,7 +40,7 @@ class OverallState(TypedDict):
     insights_gathered: Annotated[list, operator.add]  # Insights from each stage
     # Enhanced report structure
     report_sections: dict | None  # Structured report with chapters and sections
-    thinking_process: Annotated[list, operator.add]  # Detailed thinking steps
+    thinking_process: dict | None  # Detailed thinking steps (single accumulated record)
     # Follow-up conversation support
     is_follow_up: bool  # Whether this is a follow-up question
     previous_report: str | None  # Previous research report for context
@@ -99,8 +99,11 @@ class WebSearchState(TypedDict):
 
 class ResearchPlanState(TypedDict):
     """State for research plan generation and HITL approval"""
+    # 研究目标
     research_objectives: list[str]
+    # 计划搜索查询
     planned_queries: list[str]
+    # 研究方法
     research_methodology: str
 
 

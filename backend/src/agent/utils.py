@@ -75,6 +75,27 @@ def insert_citation_markers(text, citations_list):
     return modified_text
 
 
+def normalize_query(query: str) -> str:
+    """
+    Normalize a query string for comparison and deduplication.
+    
+    Converts the query to lowercase, removes extra whitespace, and joins with single spaces.
+    Used for comparing queries across the research pipeline to avoid duplicates.
+    
+    Args:
+        query: The query string to normalize
+        
+    Returns:
+        str: The normalized query string, or the original string if normalization fails
+    """
+    try:
+        if not query:
+            return ""
+        return " ".join(query.strip().lower().split())
+    except Exception:
+        return str(query) if query is not None else ""
+
+
 def get_citations(response, resolved_urls_map):
     """
     Extracts and formats citation information from a Gemini model's response.
