@@ -1,0 +1,1039 @@
+diff --git a/backend/.env.example b/backend/.env.example
+index b385ec9..c4372ba 100644
+--- a/backend/.env.example
++++ b/backend/.env.example
+@@ -20,26 +20,6 @@ MAX_PARALLEL_QUERIES=3
+ NUMBER_OF_INITIAL_QUERIES=3
+ MAX_RESEARCH_LOOPS=3
+ 
+-# Mock RAG (local TF-IDF over markdown corpus)
+-# Enable internal RAG to run in parallel with web research
+-ENABLE_RAG=false
+-# Comma- or space-separated glob patterns for corpus files
+-# Default is WIKI/**/*.md at repo root
+-RAG_CORPUS_GLOBS=WIKI/**/*.md
+-# Top-K chunks to retrieve per query
+-RAG_TOP_K=5
+-
+-# RAG via external REST (mock-friendly)
+-# If enabled, rag_search will call REST client; when endpoint is empty, it will read local JSON mock.
+-ENABLE_RAG_REST=false
+-# Example: http://localhost:9000/rag/search (POST {"query": "...", "top_k": 5})
+-RAG_REST_ENDPOINT=
+-RAG_REST_API_KEY=
+-# HTTP timeout seconds
+-RAG_REST_TIMEOUT=8
+-# Local mock JSON (relative to repo root is okay)
+-RAG_REST_LOCAL_JSON=backend/examples/vendor_projects.json
+-
+ # Intent router and follow-up detection
+ ENABLE_INTENT_ROUTER=true
+ INTENT_CONFIDENCE_THRESHOLD=0.70
+diff --git a/backend/examples/cli_research.py b/backend/examples/cli_research.py
+index d277550..a086496 100644
+--- a/backend/examples/cli_research.py
++++ b/backend/examples/cli_research.py
+@@ -1,7 +1,5 @@
+ import argparse
+-import json
+ from langchain_core.messages import HumanMessage
+-from langgraph.errors import NodeInterrupt
+ from agent.graph import graph
+ 
+ 
+@@ -26,21 +24,6 @@ def main() -> None:
+         default="gemini-2.5-pro-preview-05-06",
+         help="Model for the final answer",
+     )
+-    parser.add_argument(
+-        "--quick-lookup",
+-        action="store_true",
+-        help="Prefer quick/direct lookup route by injecting {\"action\":\"quick_lookup\"} at HITL",
+-    )
+-    parser.add_argument(
+-        "--direct-lookup",
+-        action="store_true",
+-        help="Force direct lookup route by injecting {\"action\":\"direct_lookup\"} at HITL",
+-    )
+-    parser.add_argument(
+-        "--auto-approve",
+-        action="store_true",
+-        help="Automatically approve the research plan at the HITL stage for testing",
+-    )
+     args = parser.parse_args()
+ 
+     state = {
+@@ -50,35 +33,7 @@ def main() -> None:
+         "reasoning_model": args.reasoning_model,
+     }
+ 
+-    # Run graph, handling HITL NodeInterrupt by optionally auto-approving
+-    while True:
+-        try:
+-            result = graph.invoke(state)
+-            break
+-        except NodeInterrupt as interrupt:
+-            print("[CLI] Caught NodeInterrupt (HITL)")
+-            # Priorities: quick_lookup/direct_lookup > auto_approve > prompt user
+-            if args.quick_lookup or args.direct_lookup:
+-                action = "quick_lookup" if args.quick_lookup else "direct_lookup"
+-                payload = {"action": action}
+-                state.setdefault("messages", []).append(
+-                    HumanMessage(content=json.dumps(payload))
+-                )
+-                print(f"[CLI] Injected HITL action: {action}")
+-                continue
+-            if args.auto_approve:
+-                # Auto-approve: simulate a human message approving the plan
+-                approval_payload = {"action": "approve_plan", "plan_approved": True}
+-                state.setdefault("messages", []).append(
+-                    HumanMessage(content=json.dumps(approval_payload))
+-                )
+-                print("[CLI] Injected HITL action: approve_plan")
+-                continue
+-            # Otherwise, show the plan summary and exit with guidance
+-            print(str(interrupt))
+-            print("\n[HITL] 需要人工批准。可使用 --quick-lookup / --direct-lookup / --auto-approve 以自动注入指令继续执行。")
+-            return
+-
++    result = graph.invoke(state)
+     messages = result.get("messages", [])
+     if messages:
+         print(messages[-1].content)
+diff --git a/backend/src/agent/app.py b/backend/src/agent/app.py
+index 7dec332..f20f6ed 100644
+--- a/backend/src/agent/app.py
++++ b/backend/src/agent/app.py
+@@ -1,10 +1,7 @@
+ # mypy: disable - error - code = "no-untyped-def,misc"
+-import os
+ import pathlib
+-from fastapi import FastAPI, Response, HTTPException
++from fastapi import FastAPI, Response
+ from fastapi.staticfiles import StaticFiles
+-from agent.configuration import Configuration
+-from agent.rag_rest import query_user_projects, query_vendor_projects, query_rag_rest
+ 
+ # Define the FastAPI app
+ app = FastAPI()
+@@ -46,121 +43,3 @@ app.mount(
+     create_frontend_router(),
+     name="frontend",
+ )
+-
+-
+-# Simple REST endpoint to fetch vendor projects from local mock/REST-backed RAG (backward compatible)
+-@app.get("/api/vendor-projects")
+-async def get_vendor_projects(vendor: str, top_k: int = 3):
+-    """Return top-K recent projects for a given vendor username. Backward compatible alias.
+-
+-    Query params:
+-    - vendor: 供应商/用户名称（必填，支持部分匹配）
+-    - top_k: 返回项目数量（默认3）
+-    """
+-    if not vendor or not vendor.strip():
+-        raise HTTPException(status_code=400, detail="Query parameter 'vendor' is required")
+-
+-    configurable = Configuration.from_runnable_config()
+-    local_json = getattr(configurable, "rag_rest_local_json", "backend/examples/vendor_projects.json")
+-    # call new API under the hood for consistency
+-    items = query_user_projects(user_name=vendor, local_json=local_json, top_k=top_k)
+-    return items
+-
+-
+-# New canonical endpoint for user projects
+-@app.get("/api/user-projects")
+-async def get_user_projects(user: str | None = None, top_k: int = 3, name: str | None = None, vendor: str | None = None):
+-    """Return top-K recent projects for a given user name.
+-
+-    Query params (兼容旧字段):
+-    - user/name/vendor: 用户/供应商名称（至少提供一个）
+-    - top_k: 返回项目数量（默认3）
+-    """
+-    q = (user or name or vendor or "").strip()
+-    if not q:
+-        raise HTTPException(status_code=400, detail="One of 'user', 'name', or 'vendor' query params is required")
+-
+-    configurable = Configuration.from_runnable_config()
+-    local_json = getattr(configurable, "rag_rest_local_json", "backend/examples/vendor_projects.json")
+-    items = query_user_projects(user_name=q, local_json=local_json, top_k=top_k)
+-    return items
+-
+-
+-# --- Quick lookup: combine (REST/local) RAG hits with a lightweight Gemini synthesis ---
+-def _gemini_quick_answer(question: str, hits: list[dict], model_name: str) -> str:
+-    """Generate a brief answer using Gemini with provided local/REST RAG hits as context.
+-
+-    Returns empty string if GEMINI_API_KEY is missing or generation fails (best-effort, non-blocking).
+-    """
+-    try:
+-        api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+-        if not api_key:
+-            return ""
+-        # Normalize model name for the google-genai SDK
+-        model = model_name or "models/gemini-2.5-flash-lite"
+-        if not model.startswith("models/"):
+-            model = f"models/{model}"
+-
+-        try:
+-            from google import genai  # lazy import to avoid import-time errors if package missing
+-        except Exception:
+-            return ""
+-
+-        client = genai.Client(api_key=api_key)
+-        ctx_lines = []
+-        for h in hits[:5]:
+-            # keep context concise
+-            ctx_lines.append(f"- {h.get('text','')}")
+-        context = "\n".join(ctx_lines)
+-        user_prompt = (
+-            "你是一个快速直查助手。请基于以下内部RAG线索，结合常识，用简洁要点回答用户问题；"
+-            "若信息不足请如实说明，不要虚构来源。\n\n"
+-            f"[问题]\n{question}\n\n[内部线索]\n{context}\n"
+-        )
+-        resp = client.models.generate_content(
+-            model=model,
+-            contents=[{"role": "user", "parts": [{"text": user_prompt}]}],
+-        )
+-        text = getattr(resp, "text", None)
+-        return text or ""
+-    except Exception:
+-        return ""
+-
+-
+-@app.get("/api/quick-lookup")
+-async def quick_lookup(q: str, top_k: int = 3):
+-    """Direct lookup endpoint that bypasses research/HITL.
+-
+-    - Retrieves top-K hits via RAG REST if configured, otherwise falls back to local JSON mock.
+-    - Optionally synthesizes a concise answer with Gemini using the hits as context.
+-    """
+-    if not q or not q.strip():
+-        raise HTTPException(status_code=400, detail="Query parameter 'q' is required")
+-
+-    cfg = Configuration.from_runnable_config()
+-    endpoint = getattr(cfg, "rag_rest_endpoint", None)
+-    api_key = getattr(cfg, "rag_rest_api_key", None)
+-    timeout = int(getattr(cfg, "rag_rest_timeout", 8) or 8)
+-    local_json = getattr(cfg, "rag_rest_local_json", "backend/examples/vendor_projects.json")
+-
+-    # Always use query_rag_rest: it will fallback to local JSON if endpoint is missing or fails
+-    hits = query_rag_rest(
+-        query=q,
+-        endpoint=endpoint,
+-        api_key=api_key,
+-        timeout=timeout,
+-        local_json=local_json,
+-        top_k=top_k,
+-    )
+-
+-    # Best-effort LLM synthesis (non-blocking if missing)
+-    model_for_answer = getattr(cfg, "answer_model", "models/gemini-2.5-flash-lite")
+-    answer = _gemini_quick_answer(q, hits, model_for_answer)
+-
+-    return {
+-        "question": q,
+-        "hits": hits,
+-        "answer": answer,
+-        "model": (f"models/{model_for_answer}" if not str(model_for_answer).startswith("models/") else model_for_answer),
+-        "source": {"rest": endpoint or None, "local_json": local_json},
+-    }
+diff --git a/backend/src/agent/configuration.py b/backend/src/agent/configuration.py
+index 9ebdff9..6d2c142 100644
+--- a/backend/src/agent/configuration.py
++++ b/backend/src/agent/configuration.py
+@@ -1,5 +1,4 @@
+ import os
+-import re
+ from pydantic import BaseModel, Field
+ from typing import Any, Optional
+ 
+@@ -180,58 +179,6 @@ class Configuration(BaseModel):
+         },
+     )
+ 
+-    # RAG controls
+-    enable_rag: bool = Field(
+-        default=False,
+-        metadata={
+-            "description": "Enable parallel Mock RAG retrieval as an internal knowledge source.",
+-        },
+-    )
+-    rag_corpus_globs: list[str] = Field(
+-        default=["WIKI/**/*.md"],
+-        metadata={
+-            "description": "Glob patterns for local markdown corpus used by Mock RAG (recursive supported).",
+-        },
+-    )
+-    rag_top_k: int = Field(
+-        default=5,
+-        metadata={
+-            "description": "Top-K chunks to retrieve from Mock RAG per query.",
+-        },
+-    )
+-
+-    # RAG REST integration (mock-friendly)
+-    enable_rag_rest: bool = Field(
+-        default=False,
+-        metadata={
+-            "description": "Enable RAG via external REST API. If true, rag_search will call REST client instead of local TF-IDF.",
+-        },
+-    )
+-    rag_rest_endpoint: str | None = Field(
+-        default=None,
+-        metadata={
+-            "description": "RAG REST endpoint URL. If empty, client will use local JSON mock.",
+-        },
+-    )
+-    rag_rest_api_key: str | None = Field(
+-        default=None,
+-        metadata={
+-            "description": "Optional API key for RAG REST endpoint (Authorization: Bearer).",
+-        },
+-    )
+-    rag_rest_timeout: int = Field(
+-        default=8,
+-        metadata={
+-            "description": "HTTP timeout (seconds) for RAG REST calls.",
+-        },
+-    )
+-    rag_rest_local_json: str = Field(
+-        default="backend/examples/vendor_projects.json",
+-        metadata={
+-            "description": "Local JSON file path for mock vendor projects when no REST endpoint is configured.",
+-        },
+-    )
+-
+     @classmethod
+     def from_runnable_config(
+         cls, config: Optional[RunnableConfig] = None
+@@ -250,23 +197,4 @@ class Configuration(BaseModel):
+         # Filter out None values
+         values = {k: v for k, v in raw_values.items() if v is not None}
+ 
+-        # Light coercion for RAG fields from env/configurable strings
+-        try:
+-            if isinstance(values.get("rag_corpus_globs"), str):
+-                s = values["rag_corpus_globs"]
+-                # split by comma or whitespace
+-                parts = [p.strip() for p in re.split(r"[\s,]+", s) if p.strip()]
+-                if parts:
+-                    values["rag_corpus_globs"] = parts
+-            if isinstance(values.get("rag_top_k"), str) and values["rag_top_k"].strip():
+-                values["rag_top_k"] = int(values["rag_top_k"])  # pydantic also handles
+-            if isinstance(values.get("enable_rag"), str) and values["enable_rag"].strip():
+-                values["enable_rag"] = values["enable_rag"].strip().lower() in ("1", "true", "yes", "y", "on")
+-            if isinstance(values.get("enable_rag_rest"), str) and values["enable_rag_rest"].strip():
+-                values["enable_rag_rest"] = values["enable_rag_rest"].strip().lower() in ("1", "true", "yes", "y", "on")
+-            if isinstance(values.get("rag_rest_timeout"), str) and values["rag_rest_timeout"].strip():
+-                values["rag_rest_timeout"] = int(values["rag_rest_timeout"])
+-        except Exception:
+-            pass
+-
+         return cls(**values)
+diff --git a/backend/src/agent/graph.py b/backend/src/agent/graph.py
+index 1d73a09..b7ef7e6 100644
+--- a/backend/src/agent/graph.py
++++ b/backend/src/agent/graph.py
+@@ -23,7 +23,6 @@ from langgraph.graph.message import add_messages
+ from langgraph.prebuilt import ToolNode
+ from langgraph.errors import NodeInterrupt
+ from google.genai import Client
+-from langchain_google_genai import ChatGoogleGenerativeAI
+ 
+ from agent.state import OverallState, ReflectionState, QueryGenerationState, WebSearchState, FollowUpDetection
+ from agent.prompts import (
+@@ -45,6 +44,7 @@ from agent.prompts import (
+     follow_up_instructions,
+     simple_fact_answer_instructions,
+ )
++from langchain_google_genai import ChatGoogleGenerativeAI
+ from agent.utils import (
+     get_citations,
+     get_research_topic,
+@@ -52,8 +52,6 @@ from agent.utils import (
+     resolve_urls,
+ )
+ from agent.prompts import get_current_date
+-# from agent.rag import query_rag  # 已弃用，使用 rag_rest 替代
+-from agent.rag_rest import query_rag_rest, query_user_projects
+ 
+ load_dotenv()
+ 
+@@ -666,18 +664,13 @@ def continue_to_web_research(state: QueryGenerationState, config: RunnableConfig
+                 logger.info("[dispatch first] loop=%d effort=%s progress=%.2f thr=%.2f k=%d (base=%d)", loop_count, effort, progress, thr, k, base_k)
+             except Exception:
+                 pass
+-            sends = []
+-            for i, q in enumerate(batch):
+-                sends.append(Send("web_research", {"search_query": q, "id": int(i)}))
+-                if getattr(configurable, "enable_rag", False):
+-                    sends.append(Send("rag_search", {"search_query": q, "id": int(i)}))
+-            return sends
++            return [
++                Send("web_research", {"search_query": q, "id": int(i)})
++                for i, q in enumerate(batch)
++            ]
+         else:
+             first_query = filtered[0]
+-            sends = [Send("web_research", {"search_query": first_query, "id": 0})]
+-            if getattr(configurable, "enable_rag", False):
+-                sends.append(Send("rag_search", {"search_query": first_query, "id": 0}))
+-            return sends
++            return [Send("web_research", {"search_query": first_query, "id": 0})]
+     else:
+         # 后续轮：默认顺序；若完成度较低，允许小并发加速收敛
+         low_progress_gate = min(
+@@ -691,19 +684,14 @@ def continue_to_web_research(state: QueryGenerationState, config: RunnableConfig
+                 logger.info("[dispatch later] loop=%d (later) effort=%s progress=%.2f (<%.2f) -> small parallel k=%d", loop_count, effort, progress, low_progress_gate, k)
+             except Exception:
+                 pass
+-            sends = []
+-            for i, q in enumerate(batch):
+-                sends.append(Send("web_research", {"search_query": q, "id": int(i)}))
+-                if getattr(configurable, "enable_rag", False):
+-                    sends.append(Send("rag_search", {"search_query": q, "id": int(i)}))
+-            return sends
++            return [
++                Send("web_research", {"search_query": q, "id": int(i)})
++                for i, q in enumerate(batch)
++            ]
+         else:
+             # 强制顺序，仅派发一个查询
+             first_query = filtered[0]
+-            sends = [Send("web_research", {"search_query": first_query, "id": 0})]
+-            if getattr(configurable, "enable_rag", False):
+-                sends.append(Send("rag_search", {"search_query": first_query, "id": 0}))
+-            return sends
++            return [Send("web_research", {"search_query": first_query, "id": 0})]
+ 
+ # 重点方法 搜索 Google API Gemini 2.5 Flash-Lite 0.0
+ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
+@@ -874,118 +862,6 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
+     }
+ 
+ 
+-def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
+-    """Mock RAG node: retrieve local markdown knowledge and produce web-compatible outputs.
+-
+-    Returns fields compatible with downstream consumers:
+-    - sources_gathered: list of segments with label/short_url/value
+-    - web_research_result: list with a single synthesized summary string
+-    - search_query: echo back dispatched query for traceability
+-    - dispatched_queries: record the query to dedup in dispatcher
+-    """
+-    configurable = Configuration.from_runnable_config(config)
+-    original_query = state.get("search_query", "")
+-
+-    try:
+-        top_k = int(getattr(configurable, "rag_top_k", 5) or 5)
+-    except Exception:
+-        top_k = 5
+-
+-    # Decide which RAG backend to use: REST (if enabled) or local TF-IDF
+-    hits = []
+-    user_hits = []
+-    err = ""
+-    try:
+-        if getattr(configurable, "enable_rag_rest", False):
+-            hits = query_rag_rest(
+-                original_query,
+-                endpoint=getattr(configurable, "rag_rest_endpoint", None),
+-                api_key=getattr(configurable, "rag_rest_api_key", None),
+-                timeout=int(getattr(configurable, "rag_rest_timeout", 8) or 8),
+-                local_json=getattr(configurable, "rag_rest_local_json", "backend/examples/vendor_projects.json"),
+-                top_k=top_k,
+-            )
+-        else:
+-            hits = query_rag(
+-                original_query,
+-                getattr(configurable, "rag_corpus_globs", ["WIKI/**/*.md"]) or [],
+-                top_k=top_k,
+-            )
+-    except Exception as e:
+-        try:
+-            logger.exception("[rag_search] RAG backend failed")
+-        except Exception:
+-            pass
+-        hits = []
+-        err = str(e)
+-
+-    # Optionally fetch user project recommendations when we can infer a user/vendor name
+-    try:
+-        candidate_name = None
+-        if state.get("intent") and isinstance(state["intent"], dict):
+-            candidate_name = state["intent"].get("entity")
+-        # Only call when RAG REST integration is enabled (internal gate, no new flag)
+-        if candidate_name and getattr(configurable, "enable_rag_rest", False):
+-            user_hits = query_user_projects(
+-                user_name=candidate_name,
+-                local_json=getattr(configurable, "rag_rest_local_json", "backend/examples/vendor_projects.json"),
+-                top_k=min(3, max(1, int(top_k))),
+-            )
+-    except Exception:
+-        # Do not fail overall RAG on user project issues
+-        user_hits = []
+-
+-    combined_hits = (hits or []) + (user_hits or [])
+-
+-    # Map hits to segments used downstream (label/short_url/value)
+-    segments = []
+-    for h in combined_hits:
+-        try:
+-            url = h.get("url") or ""
+-            label = h.get("label") or "RAG"
+-            segments.append({
+-                "label": label,
+-                "short_url": url,
+-                "value": url,
+-            })
+-        except Exception:
+-            continue
+-
+-    # Build a compact synthesized text
+-    if hits:
+-        bullets = []
+-        for i, h in enumerate(hits[:top_k], 1):
+-            label = h.get("label") or f"RAG{i}"
+-            snippet = (h.get("text") or "").strip().replace("\n", " ")
+-            if len(snippet) > 400:
+-                snippet = snippet[:400] + "..."
+-            bullets.append(f"[{label}] {snippet}")
+-        modified_text = _prepare_summaries(bullets, max_items=top_k, max_chars=8000)
+-    else:
+-        modified_text = "[RAG] No relevant knowledge found." + (f" Error: {err}" if err else "")
+-
+-    # Append user project recommendations into the synthesized text for compatibility
+-    if user_hits:
+-        up_bullets = []
+-        for i, uh in enumerate(user_hits[: min(3, top_k)], 1):
+-            label = uh.get("label") or f"用户项目{i}"
+-            snippet = (uh.get("text") or "").strip().replace("\n", " ")
+-            if len(snippet) > 400:
+-                snippet = snippet[:400] + "..."
+-            up_bullets.append(f"[{label}] {snippet}")
+-        up_text = _prepare_summaries(["用户项目推荐："] + up_bullets, max_items=min(1 + len(up_bullets), top_k + 1), max_chars=4000)
+-        modified_text = (modified_text + SUMMARY_SEPARATOR + up_text) if modified_text else up_text
+-
+-
+-    dispatched_out = [original_query] if original_query else []
+-    return {
+-        "sources_gathered": segments,
+-        "search_query": [state["search_query"]],
+-        "web_research_result": [modified_text],
+-        "dispatched_queries": dispatched_out,
+-    }
+-
+-
+ def classify_intent(state: OverallState, config: RunnableConfig) -> OverallState:
+     """Classify whether the user's request is a simple direct lookup or requires research.
+ 
+@@ -1196,7 +1072,6 @@ def direct_lookup(state: OverallState, config: RunnableConfig) -> OverallState:
+     except Exception:
+         chunks = []
+ 
+-
+     if chunks:
+         # Resolve URLs and construct citations from grounding chunks
+         # Truncate grounding chunks to at most 20 to respect URL context limit
+@@ -1576,30 +1451,16 @@ def evaluate_research(
+         # If no follow-ups, finalize (aligned with wiki major termination conditions)
+         if not state.get("follow_up_queries"):
+             return "finalize_answer"
+-        sends = []
+-        base_id = int(state["number_of_ran_queries"])
+-        for idx, follow_up_query in enumerate(state["follow_up_queries"]):
+-            qid = base_id + int(idx)
+-            sends.append(
+-                Send(
+-                    "web_research",
+-                    {
+-                        "search_query": follow_up_query,
+-                        "id": qid,
+-                    },
+-                )
++        return [
++            Send(
++                "web_research",
++                {
++                    "search_query": follow_up_query,
++                    "id": state["number_of_ran_queries"] + int(idx),
++                },
+             )
+-            if getattr(configurable, "enable_rag", False):
+-                sends.append(
+-                    Send(
+-                        "rag_search",
+-                        {
+-                            "search_query": follow_up_query,
+-                            "id": qid,
+-                        },
+-                    )
+-                )
+-        return sends
++            for idx, follow_up_query in enumerate(state["follow_up_queries"])
++        ]
+ 
+ 
+ def finalize_answer(state: OverallState, config: RunnableConfig):
+@@ -2315,7 +2176,6 @@ builder.add_node("wait_for_human_approval", wait_for_human_approval)
+ builder.add_node("thinking_startup_stage", thinking_startup_stage)
+ builder.add_node("generate_query", generate_query)
+ builder.add_node("web_research", web_research)
+-builder.add_node("rag_search", rag_search)
+ builder.add_node("thinking_middle_stage", thinking_middle_stage)
+ builder.add_node("reflection", reflection)
+ builder.add_node("thinking_finalization_stage", thinking_finalization_stage)
+@@ -2348,10 +2208,9 @@ builder.add_conditional_edges(
+     "thinking_startup_stage", route_thinking_stage, ["generate_query", "thinking_middle_stage", "thinking_finalization_stage"]
+ )
+ builder.add_conditional_edges(
+-    "generate_query", continue_to_web_research, ["web_research", "rag_search", "thinking_finalization_stage"]
++    "generate_query", continue_to_web_research, ["web_research", "thinking_finalization_stage"]
+ )
+ builder.add_edge("web_research", "reflection")
+-builder.add_edge("rag_search", "reflection")
+ builder.add_conditional_edges(
+     "reflection", route_after_reflection, ["thinking_middle_stage", "thinking_finalization_stage"]
+ )
+diff --git a/backend/src/agent/prompts.py b/backend/src/agent/prompts.py
+index ee697fb..281ff23 100644
+--- a/backend/src/agent/prompts.py
++++ b/backend/src/agent/prompts.py
+@@ -5,19 +5,6 @@ from datetime import datetime
+ def get_current_date():
+     return datetime.now().strftime("%B %d, %Y")
+ 
+-# ===== 用户项目（User Project）相关提示片段（中文） =====
+-# 在需要时可被上层节点引用；本文件仅定义常量，不改变现有调用路径。
+-user_project_summary_guidelines_cn = """若已检索到相关“用户项目”，请在摘要末尾新增“用户项目推荐”小节：
+-- 建议以列表展示：项目名、用户（或来源主体）、时间、3-10字标签、1句价值点
+-- 避免夸大或无依据推断，保持客观、可溯源
+-- 数据可能来自历史案例或演示数据，需与现实业务与合规审查核对"""
+-
+-user_project_disclaimer_cn = """“用户项目推荐”来源于历史案例或演示数据，仅供灵感参考；
+-请结合实际业务约束与合规审查后再行采用。"""
+-
+-user_project_answer_merge_hint_cn = """若 Summaries 中包含“用户项目推荐”，
+-请在回答末段单独列出“建议/案例”段落，按列表复述关键要点，并使用短链引用；
+-避免与主体结论混写。"""
+ 
+ # 生成问题 generate_query | Gemini 2.5 Flash-Lite (快速查询生成) 0.2
+ query_writer_instructions = """Generate diverse, atomic web search queries for an automated research tool.
+@@ -118,11 +105,6 @@ Instructions:
+   - Follow-ups:
+     - Follow-ups: Up to 2 to close the current knowledge_gap. non-overlapping with Past Follow-ups (strict de-dup); each must include ≥1 explicit constraint (e.g., site:, people, event, time, region, etc.) and be self-contained, precise, and actionable (do not rephrase the original).
+     - Identity: Unambiguous identities are VERY IMPORTANT, include Follow-up verification queries (For China-based entities, consider site:天眼查/企查查/爱企查) until confirmed, SKIP re-verification.
+-  - RAG-aware Guidance:
+-    - The Summaries may include outputs from both Web Search and RAG (including a section like "用户项目推荐"). Treat RAG items as hypotheses or hints; DO NOT increase completion scores unless corroborated by authoritative web sources.
+-    - If a "用户项目推荐" section exists, consider generating at least one verification follow-up to assess recency/feasibility, with explicit constraints (e.g., site:, time, region, official channel).
+-    - De-duplicate evidence and follow-ups across Web and RAG; avoid double-counting similar items from two sources.
+-    - When a follow-up is based primarily on RAG hints, include verification-oriented constraints (e.g., site:gov.cn, site:集团官网 招采/新闻/公告, time window like last 12 months).
+   - Style:
+     - keep non-English proper nouns in original script (quoted); add transliterations/aliases when useful.
+ 
+@@ -160,9 +142,6 @@ Instructions:
+ - Generate a high-quality answer to the user's question based on the provided summaries and the user's question.
+ - Include the sources you used from the Summaries in the answer correctly, use markdown format (e.g. [apnews](https://vertexaisearch.cloud.google.com/id/1-0)). THIS IS A MUST.
+ 
+-Optional (when applicable):
+-- If the Summaries include a "用户项目推荐" (User Project Recommendations) section, synthesize it into a final "建议/案例" (Recommendations/Examples) paragraph at the end, preserving the original order and adding citations.
+-
+ User Context:
+ - {research_topic}
+ 
+@@ -432,14 +411,12 @@ enhanced_report_instructions = """生成一份高质量的结构化研究报告
+ 3. **图表支持**：适当的markdown表格和图表
+ 4. **引用标注**：在相关段落内进行“内联编号引用”
+ 
+-5. **用户项目推荐融合（可选）**：若 Summaries 含“用户项目推荐”，在报告第一章新增“建议/案例（用户项目推荐）”章节，按列表呈现，保留原有顺序，并复用短链引用。
+-
+ 输出格式：
+ - 使用markdown格式
+ - 报告标题和摘要（可选目录结构）
+ - 章节标题/编号（灵活的，不一定要有“第一章”这样的字眼）
+ - 适当的表格和图表
+-- 引用请在相关句子后内联标注为 [n](SHORT_URL)，例如 [1](SHORT_URL) ；同一来源可在多处复用同一编号；引用仅能从“研究结果”中复用，不要杜撹；若未包含引用，可不添加
++- 引用请在相关句子后内联标注为 [n](SHORT_URL)，例如 [1](SHORT_URL) ；同一来源可在多处复用同一编号；引用仅能从“研究结果”中复用，不要杜撰；若未包含引用，可不添加
+ - 结合主题，适时增加Appendix、Glossary等部分以丰富内容
+ - 实体命名：首次出现时保留原语言名称，括号中可附英文或音译别名；全文保持一致。
+ 
+diff --git a/backend/src/agent/rag.py b/backend/src/agent/rag.py
+deleted file mode 100644
+index 4cc45cf..0000000
+--- a/backend/src/agent/rag.py
++++ /dev/null
+@@ -1,153 +0,0 @@
+-# import os
+-# import glob
+-# import re
+-# import math
+-# from typing import List, Dict, Tuple
+-# from collections import Counter, defaultdict
+-
+-# # Simple TF-IDF over local markdown knowledge base for mocking RAG
+-# # Corpus default: WIKI/**/*.md at repository root (configurable via caller)
+-
+-# try:
+-#     import regex as _rx
+-#     _TOKEN_RE = _rx.compile(r"[\p{L}\p{N}_]+")
+-# except Exception:
+-#     # Fallback: ASCII word tokens using Python's 're'
+-#     _TOKEN_RE = re.compile(r"[A-Za-z0-9_]+")
+-
+-
+-# def _read_text(path: str) -> str:
+-#     try:
+-#         with open(path, "r", encoding="utf-8", errors="ignore") as f:
+-#             return f.read()
+-#     except Exception:
+-#         return ""
+-
+-
+-# def _tokenize(text: str) -> List[str]:
+-#     if not text:
+-#         return []
+-#     return [t.lower() for t in _TOKEN_RE.findall(text)]
+-
+-
+-# def _split_into_chunks(text: str, chunk_size: int = 600, overlap: int = 120) -> List[Tuple[int, str]]:
+-#     # naive sentence-ish split to maintain readability
+-#     parts = re.split(r"(?<=[。！？.!?])\s+|\n{2,}", text)
+-#     chunks: List[Tuple[int, str]] = []
+-#     buf: List[str] = []
+-#     current = 0
+-#     for p in parts:
+-#         if not p:
+-#             continue
+-#         if sum(len(x) for x in buf) + len(p) + (len(buf) - 1) > chunk_size:
+-#             if buf:
+-#                 chunks.append((current, "\n".join(buf)))
+-#                 # add overlap by keeping tail
+-#                 tail = "\n".join(buf)[-overlap:]
+-#                 buf = [tail]
+-#                 current += 1
+-#         buf.append(p)
+-#     if buf:
+-#         chunks.append((current, "\n".join(buf)))
+-#     return chunks
+-
+-
+-# def _tfidf_rank(query: str, docs: List[Dict]) -> List[Tuple[float, Dict]]:
+-#     q_toks = _tokenize(query)
+-#     if not q_toks:
+-#         return []
+-#     q_tf = Counter(q_toks)
+-#     # build idf
+-#     df = defaultdict(int)
+-#     for d in docs:
+-#         toks = set(d.get("_tokens", []))
+-#         for t in toks:
+-#             df[t] += 1
+-#     N = max(1, len(docs))
+-#     idf = {t: math.log((N + 1) / (df_t + 1)) + 1.0 for t, df_t in df.items()}
+-
+-#     # query vector
+-#     q_vec = {t: (q_tf[t] * idf.get(t, 1.0)) for t in q_tf}
+-
+-#     # score
+-#     scored: List[Tuple[float, Dict]] = []
+-#     for d in docs:
+-#         dv = d.get("_tfidf", {})
+-#         # cosine similarity
+-#         dot = sum(q_vec.get(t, 0.0) * dv.get(t, 0.0) for t in set(q_vec) | set(dv))
+-#         q_norm = math.sqrt(sum(v * v for v in q_vec.values())) or 1.0
+-#         d_norm = d.get("_norm", 1.0)
+-#         sim = dot / (q_norm * d_norm)
+-#         scored.append((sim, d))
+-#     scored.sort(key=lambda x: x[0], reverse=True)
+-#     return scored
+-
+-
+-# def _prepare_docs(corpus_files: List[str]) -> List[Dict]:
+-#     docs: List[Dict] = []
+-#     for f in corpus_files:
+-#         text = _read_text(f)
+-#         if not text:
+-#             continue
+-#         for idx, chunk in _split_into_chunks(text):
+-#             toks = _tokenize(chunk)
+-#             if not toks:
+-#                 continue
+-#             tf = Counter(toks)
+-#             docs.append({
+-#                 "path": f,
+-#                 "chunk_index": idx,
+-#                 "text": chunk,
+-#                 "_tokens": list(tf.keys()),
+-#                 "_tf": tf,
+-#             })
+-#     # compute global idf and per-doc tf-idf
+-#     df = defaultdict(int)
+-#     for d in docs:
+-#         for t in d["_tokens"]:
+-#             df[t] += 1
+-#     N = max(1, len(docs))
+-#     idf = {t: math.log((N + 1) / (df_t + 1)) + 1.0 for t, df_t in df.items()}
+-#     for d in docs:
+-#         tfidf = {t: (d["_tf"][t] * idf.get(t, 1.0)) for t in d["_tokens"]}
+-#         norm = math.sqrt(sum(v * v for v in tfidf.values())) or 1.0
+-#         d["_tfidf"] = tfidf
+-#         d["_norm"] = norm
+-#     return docs
+-
+-
+-# def query_rag(query: str, corpus_globs: List[str], top_k: int = 5) -> List[Dict]:
+-#     """
+-#     Mock RAG interface: accept query string and return a list of hits in a format
+-#     suitable for downstream synthesis.
+-
+-#     Each hit dict contains:
+-#     - label: short label for citation (file name or stem)
+-#     - url: a rag-scheme URL identifying the source (rag://<stem>#<chunk_index>)
+-#     - path: absolute or repo-relative file path
+-#     - chunk_index: chunk serial number
+-#     - text: content snippet
+-#     """
+-#     # Expand corpus files
+-#     files: List[str] = []
+-#     for pattern in corpus_globs or []:
+-#         files.extend(glob.glob(pattern, recursive=True))
+-#     files = [f for f in files if os.path.isfile(f)]
+-#     if not files:
+-#         return []
+-#     docs = _prepare_docs(files)
+-#     ranked = _tfidf_rank(query, docs)
+-#     hits: List[Dict] = []
+-#     for score, d in ranked[: max(1, top_k)]:
+-#         path = d["path"]
+-#         stem = os.path.splitext(os.path.basename(path))[0]
+-#         url = f"rag://{stem}#{d['chunk_index']}"
+-#         hits.append({
+-#             "label": stem,
+-#             "url": url,
+-#             "path": path,
+-#             "chunk_index": d["chunk_index"],
+-#             "text": d["text"],
+-#             "score": float(score),
+-#         })
+-#     return hits
+diff --git a/backend/src/agent/rag_rest.py b/backend/src/agent/rag_rest.py
+deleted file mode 100644
+index 57bd85f..0000000
+--- a/backend/src/agent/rag_rest.py
++++ /dev/null
+@@ -1,214 +0,0 @@
+-import json
+-import os
+-import time
+-import re
+-from typing import Any, Dict, List, Optional
+-from urllib import request, parse, error
+-
+-DEFAULT_LOCAL_JSON = "backend/examples/vendor_projects.json"
+-
+-
+-def _http_post_json(url: str, payload: dict, headers: dict | None, timeout: int) -> dict | list | None:
+-    data = json.dumps(payload).encode("utf-8")
+-    req = request.Request(url, data=data, headers=headers or {}, method="POST")
+-    try:
+-        with request.urlopen(req, timeout=timeout) as resp:
+-            raw = resp.read().decode("utf-8", errors="ignore")
+-            if not raw:
+-                return None
+-            try:
+-                return json.loads(raw)
+-            except json.JSONDecodeError:
+-                return None
+-    except Exception:
+-        return None
+-
+-
+-def _load_local_projects(local_json: str) -> List[Dict[str, Any]]:
+-    """Load local mock projects with robust relative path resolution.
+-
+-    Tries a list of candidate paths so it works when running from repo root,
+-    backend/, or backend/src/ as CWD.
+-    """
+-    raw = local_json or DEFAULT_LOCAL_JSON
+-    candidates: list[str] = []
+-    # 1) As provided (relative to CWD if not absolute)
+-    candidates.append(os.path.normpath(raw))
+-    # 2) Relative to this file (agent/ directory)
+-    here = os.path.dirname(__file__)
+-    candidates.append(os.path.normpath(os.path.join(here, raw)))
+-    # 3) Relative to backend/ (parent of src)
+-    backend_dir = os.path.normpath(os.path.join(here, os.pardir, os.pardir))
+-    candidates.append(os.path.normpath(os.path.join(backend_dir, os.path.relpath(raw, start="backend") if raw.startswith("backend" + os.sep) or raw.startswith("backend/") else raw)))
+-    # 4) Direct known default under backend/examples
+-    candidates.append(os.path.normpath(os.path.join(backend_dir, "examples", "vendor_projects.json")))
+-
+-    path = None
+-    for c in candidates:
+-        try:
+-            if os.path.exists(c):
+-                path = c
+-                break
+-        except Exception:
+-            continue
+-    if not path:
+-        return []
+-    try:
+-        with open(path, "r", encoding="utf-8") as f:
+-            data = json.load(f)
+-            if isinstance(data, list):
+-                return data
+-            return []
+-    except Exception:
+-        return []
+-
+-
+-def _score_project(query: str, item: Dict[str, Any]) -> float:
+-    # very simple heuristic score based on substring hits across fields
+-    q = (query or "").strip().lower()
+-    if not q:
+-        return 0.0
+-    fields = [
+-        str(item.get("project_name", "")),
+-        str(item.get("user_name", "") or item.get("vendor_name", "")),
+-        str(item.get("date", "")),
+-        str(item.get("tags", "")),
+-        str(item.get("description", "")),
+-    ]
+-    text = " \n ".join(fields).lower()
+-    score = 0.0
+-    # exact substring weight
+-    if q in text:
+-        score += 2.0
+-    # token hits
+-    toks = [t for t in q.replace("，", ",").replace(" ", ",").split(",") if t]
+-    for t in toks:
+-        if t and t in text:
+-            score += 1.0
+-    return score
+-
+-
+-def _normalize_item(item: Dict[str, Any], idx: int, path_hint: str | None, score: float) -> Dict[str, Any]:
+-    pname = str(item.get("project_name") or f"Project-{idx+1}")
+-    uname = str(item.get("user_name") or item.get("vendor_name") or "UnknownUser")
+-    date = str(item.get("date") or "")
+-    label = pname
+-    snippet = f"项目：{pname}；用户：{uname}；日期：{date}"
+-    return {
+-        "label": label,
+-        "url": f"rag://user_project/{idx}",
+-        "path": path_hint or "",
+-        "chunk_index": idx,
+-        "text": snippet,
+-        "score": float(score),
+-    }
+-
+-
+-def query_rag_rest(
+-    query: str,
+-    endpoint: Optional[str] = None,
+-    api_key: Optional[str] = None,
+-    timeout: int = 8,
+-    local_json: str = DEFAULT_LOCAL_JSON,
+-    top_k: int = 5,
+-) -> List[Dict[str, Any]]:
+-    """
+-    Query RAG via REST endpoint. If endpoint not provided or call fails,
+-    fallback to local JSON mock of user projects.
+-
+-    Expected REST response (flexible): a list of items with fields like
+-    { project_name, user_name, vendor_name, date, url?, score? }. Unknown fields are ignored.
+-    """
+-    # 1) Try REST if endpoint is configured
+-    hits: List[Dict[str, Any]] = []
+-    if endpoint:
+-        headers = {"Content-Type": "application/json"}
+-        if api_key:
+-            headers["Authorization"] = f"Bearer {api_key}"
+-        payload = {"query": query, "top_k": int(top_k)}
+-        resp = _http_post_json(endpoint, payload, headers, timeout)
+-        if isinstance(resp, list):
+-            # normalize top_k first N items
+-            for i, it in enumerate(resp[: max(1, top_k)]):
+-                try:
+-                    pname = it.get("project_name") or it.get("title") or f"Project-{i+1}"
+-                    vname = it.get("user_name") or it.get("vendor_name") or it.get("vendor") or "User"
+-                    date = it.get("date") or it.get("time") or ""
+-                    label = str(pname)
+-                    url = it.get("url") or f"rag://user_project/rest/{i}"
+-                    score = float(it.get("score") or 0.0)
+-                    snippet = f"项目：{pname}；用户：{vname}；日期：{date}"
+-                    hits.append(
+-                        {
+-                            "label": label,
+-                            "url": url,
+-                            "path": endpoint,
+-                            "chunk_index": i,
+-                            "text": snippet,
+-                            "score": score,
+-                        }
+-                    )
+-                except Exception:
+-                    continue
+-        # If REST enabled but empty/failed, continue to fallback below
+-
+-    # 2) Fallback to local JSON
+-    if not hits:
+-        items = _load_local_projects(local_json)
+-        scored = [(it, _score_project(query, it)) for it in items]
+-        scored = [pair for pair in scored if pair[1] > 0.0] or scored  # if no matches, allow zero-scores
+-        scored.sort(key=lambda x: x[1], reverse=True)
+-        top = scored[: max(1, top_k)]
+-        for idx, (it, sc) in enumerate(top):
+-            hits.append(_normalize_item(it, idx, local_json, sc))
+-
+-    return hits
+-
+-
+-def query_user_projects(
+-    user_name: str,
+-    local_json: str = DEFAULT_LOCAL_JSON,
+-    top_k: int = 3,
+-) -> List[Dict[str, Any]]:
+-    """Get top-K projects by user from local mock JSON.
+-
+-    - user_name: 用户名（支持部分匹配，大小写不敏感），兼容旧字段 vendor_name
+-    - 返回字段与 query_rag/query_rag_rest 归一：label/url/text/score/path/chunk_index
+-    - 排序规则：优先按日期降序（YYYY-MM-DD），缺失日期的排在后面
+-    """
+-    items = _load_local_projects(local_json)
+-    v = (user_name or "").strip().lower()
+-    if not items:
+-        return []
+-
+-    # filter by user name contains (fallback vendor_name)
+-    matched = []
+-    for it in items:
+-        un = str(it.get("user_name", "") or it.get("vendor_name", "")).lower()
+-        if v and v in un:
+-            matched.append(it)
+-    if not matched and v:
+-        # fallback: Levenshtein-free simple heuristic; token contains by whitespace split
+-        tokens = [t for t in re.split(r"[\s,，]+", v) if t]
+-        for it in items:
+-            un = str(it.get("user_name", "") or it.get("vendor_name", "")).lower()
+-            if any(t in un for t in tokens):
+-                matched.append(it)
+-
+-    def _date_key(it: Dict[str, Any]):
+-        d = str(it.get("date") or "")
+-        # YYYY-MM-DD 字符串按字典序即可正确降序
+-        return d
+-
+-    matched.sort(key=_date_key, reverse=True)
+-    top = matched[: max(1, top_k)] if matched else items[: max(1, top_k)]
+-
+-    hits: List[Dict[str, Any]] = []
+-    for i, it in enumerate(top):
+-        # score: 优先匹配用户则给较高分，否则为0
+-        base = 1.0 if it in matched else 0.0
+-        hits.append(_normalize_item(it, i, local_json, base))
+-    return hits
+-
+-# Backward compatibility alias
+-query_vendor_projects = query_user_projects

@@ -1,41 +1,91 @@
-# 测试用例
-直接对话：今天几号，天气如何
-官网查询：Python最新稳定版本号是多少？
-研究转直接查询：特朗普今天发言对乌克兰有何影响？
-研究：
-  low 研究下深圳犀照科技和Material Bank的业务相似性和商业潜力
-  mid Research Macaron AI founder team, business and tech
-  研究这个网站 https://decoris.ch/
-  研读这篇论文 https://arxiv.org/html/2508.14971v1
+# 代码检查
+深度研究分支代码检查报告
+经过全面检查，我发现了以下几个问题和潜在错误：
+
+🔴 严重问题
+1. 函数重复定义（已解决）
+位置: L1638-1642 和 L1562-1566
+问题: 
+_norm()
+ 函数在同一个 
+route_after_generate_query
+ 函数内被定义了两次，完全相同的实现
+影响: 第二个定义会覆盖第一个，可能导致逻辑混乱
+2. thinking过程数据结构不一致（跳过）
+位置: L2781-2796 (generate_enhanced_report)
+问题: 代码试图访问 content.get("overview"), content.get("middle_thinking"), content.get("final_thinking")，但这些字段在简化后的thinking结构中可能不存在
+影响: 可能导致thinking过程无法正确显示在最终报告中
+🟡 中等问题
+3. 状态字段访问不安全（已完成）
+位置: L1531
+问题: 直接访问 state["initial_search_query_count"] 而不是使用 .get() 方法
+影响: 如果字段不存在会抛出 KeyError
+4. 异常处理过于宽泛
+位置: 多处使用 except Exception:
+问题: 捕获所有异常可能掩盖真正的错误，难以调试
+影响: 降低代码可维护性
+5. 日志输出冗余（已完成）
+位置: L1447-1448, L1467-1468
+问题: 在循环中输出每个查询的详细日志，可能产生大量日志噪音
+影响: 影响日志可读性和性能
+🟢 轻微问题
+6. 代码重复
+位置: L1452-1455, L1478-1481, L1540-1543
+问题: 相同的 count 计算逻辑重复出现多次
+建议: 可以提取为辅助函数
+7. 魔法数字（已完成）
+位置: L1696 (限制20个查询), L1861 (限制20个chunks)
+问题: 硬编码的数字应该作为配置参数
+建议: 移到配置文件中
+
+📋 逻辑流程分析
+主干流程正确性: ✅ 整体流程逻辑清晰
+
+generate_query
+ → 
+route_after_generate_query
+ → 
+web_research
+/
+rag_search
+ → 
+reflection
+ → 
+route_after_reflection
+状态管理: ⚠️ 部分状态字段访问不够安全
+
+错误处理: ⚠️ 异常处理策略需要优化
+
+🎯 优先修复建议
+立即修复: 删除重复的 
+_norm()
+ 函数定义
+高优先级: 修复thinking过程的数据结构访问问题
+中优先级: 改善状态字段的安全访问
+低优先级: 优化日志输出和代码重复问题
+
 
 # TODO
     web_research_result 全链路测试
     核心：
+      0. 全链路上下文感知 而不是割裂的 每节点独立提示词
       1. 搜索、汇总能力提升
       2. 记忆算法研究
     BUG
-      手动解决两次HITL问题
-      LLM给出预估时间过长 （天）
-      web_research 确认是否固定翻译（不要总是翻译）
+      final 过程重复
       500 中断恢复
-      handle_follow_up
     开发类
       thinking_startup_stage 之后 支持直接阅读网址或文件内容
-      目标TODO
+      目标 TODO
       查询词拆分
       Error友好
-      日志缩减
       系统提示词暴露到前端给用户
       全部提示词增加：“以用户相同的语言回答用户的问题”
       发布上线 域名
       整合supbase登录和数据库
       数据接口 + 其他工具接口（秘塔） + 搜索接口
     研究优化类（优先级：低）
-      意图识别可循环HITL确认
-      Effort不要限定查询伦次，而是结果导向，如打分60 70 80
-      直查/深度查 配比
-      提示词微调(数据信源地域优化 如中文问题优先中文网站)
-      搜索词使用的语言
+      群体智能 embedding热力图
       Agent自己决定节点，甚至运行时动态生成节点
 
 ## 下一步（今天）
@@ -48,6 +98,9 @@
 - __Agent路由/提示词__：在 [backend/src/agent/prompts.py](cci:7://file:///e:/WorkSpace/gemini-fullstack-langgraph-quickstart/backend/src/agent/prompts.py:0:0-0:0) 与 [backend/src/agent/graph.py](cci:7://file:///e:/WorkSpace/gemini-fullstack-langgraph-quickstart/backend/src/agent/graph.py:0:0-0:0) 增强“权威源/主页优先/证据溯源”；输出摘要与告警解释模板。
 - __数据API__：新增抓取与聚类/情感服务接口，供前端仪表盘与告警流水线调用。
 - __日志与监控__：沿用现有 `logger.info` 路径，补充告警/聚类/情感观测项。
+
+
+
 
 
 # 项目背景

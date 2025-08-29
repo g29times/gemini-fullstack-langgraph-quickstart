@@ -1,75 +1,89 @@
 # 注册的图 ID
 agent 名字可以改一下
 
-# Effort 配置对系统指标的影响分析
-DEFAULT_EFFORT 配置会影响以下关键指标：
+# Effort 配置系统 - 简化设计
 
-核心影响指标
-1. 搜索查询数量 (initial_search_query_count)
-Low: 1个初始查询
-Medium: 3个初始查询
-High: 5个初始查询
-2. 研究循环次数 (max_research_loops)
-Low: 最多1轮研究循环
-Medium: 最多3轮研究循环
-High: 最多10轮研究循环
+## 核心里念
 
-# Effort 最新 “主阈值 + 缓冲” 设计
+Effort系统控制研究的深度和完成度要求：
+- **Low**: 快速研究，30%完成度即可结束
+- **Medium**: 平衡研究，60%完成度要求  
+- **High**: 深度研究，85%完成度要求
 
-本节说明早终止与动态并发的核心门槛如何由 Effort 主阈值与缓冲（buffer）共同决定，便于统一调参与 A/B 测试。
+## 配置参数
 
-### 名词
-- **主阈值 thr(effort)**: `effort_low/medium/high_completion_threshold`，由 Effort 决定的“高完成度”判定阈值。
-- **缓冲 buffer**: 在接近主阈值时，允许“尚可完成度（decent）”提前收敛的容差。
-- **地板/上限系数**: 用于动态并发的固定底线与相对阈值比率。
+### 主要参数
+```python
+# Effort级别（前端传入或配置指定）
+effort: Optional[str] = None  # "low" | "medium" | "high"
 
-### 早终止（Finalize）规则
-- 高完成度：`completion >= thr(effort)` 立即可终止。
-- 尚可完成度：`completion >= decent_gate` 且 `research_loop_count >= 1` 可终止。
-- `decent_gate = max(FINALIZE_DECENT_MIN_FLOOR, thr(effort) - FINALIZE_DECENT_BUFFER)`
+# 完成度阈值
+effort_low_completion_threshold: float = 0.3     # 30%
+effort_medium_completion_threshold: float = 0.6  # 60%  
+effort_high_completion_threshold: float = 0.85   # 85%
 
-默认值（可改）：
-- `FINALIZE_DECENT_BUFFER=0.10`
-- `FINALIZE_DECENT_MIN_FLOOR=0.70`
+# 并发控制（可选）
+effort_low_max_parallel_queries: Optional[int] = None
+effort_medium_max_parallel_queries: Optional[int] = None
+effort_high_max_parallel_queries: Optional[int] = None
+```
 
-### 动态并发（Dispatch）规则
-- 记 `base_k = effort_max_parallel`（可由 Effort 覆盖全局并发上限）。
-- 首轮（loop=0）：
-  - 若 `progress >= thr`：顺序（`k=1`）。
-  - 否则若 `progress >= max(PARALLEL_LOW_PROGRESS_FLOOR, thr - PARALLEL_REDUCE_BUFFER)`：小并发（`k=min(2, base_k)`）。
-  - 否则：`k=base_k`。
-- 后续轮（loop>0）：
-  - 计算 `low_progress_gate = min(PARALLEL_LOW_PROGRESS_FLOOR, thr * PARALLEL_LOW_PROGRESS_RATIO)`。
-  - 若 `progress < low_progress_gate`：小并发（`k=min(2, base_k)`），否则顺序。
+### 环境变量
+- `EFFORT_LOW_COMPLETION_THRESHOLD`
+- `EFFORT_MEDIUM_COMPLETION_THRESHOLD`  
+- `EFFORT_HIGH_COMPLETION_THRESHOLD`
+- `EFFORT_*_MAX_PARALLEL_QUERIES`
 
-默认值（可改）：
-- `PARALLEL_REDUCE_BUFFER=0.20`
-- `PARALLEL_LOW_PROGRESS_FLOOR=0.40`
-- `PARALLEL_LOW_PROGRESS_RATIO=0.60`
+## 工作原理
 
-### 配置项与环境变量
-- 早终止：
-  - `finalize_decent_buffer` ⇔ `FINALIZE_DECENT_BUFFER`
-  - `finalize_decent_min_floor` ⇔ `FINALIZE_DECENT_MIN_FLOOR`
-- 动态并行：
-  - `parallel_reduce_buffer` ⇔ `PARALLEL_REDUCE_BUFFER`
-  - `parallel_low_progress_floor` ⇔ `PARALLEL_LOW_PROGRESS_FLOOR`
-  - `parallel_low_progress_ratio` ⇔ `PARALLEL_LOW_PROGRESS_RATIO`
-- Effort 主阈值与并发：
-  - `effort_low/medium/high_completion_threshold` ⇔ `EFFORT_*_COMPLETION_THRESHOLD`
-  - `effort_*_max_parallel_queries` ⇔ `EFFORT_*_MAX_PARALLEL_QUERIES`
-  - 全局 `enable_parallel_research`、`max_parallel_queries`
+### Effort推断优先级
+1. **配置effort**: `configurable.effort` (前端传入)
+2. **状态effort**: `state['effort']` (运行时覆盖)
+3. **自动推断**: 根据`initial_search_query_count`
+   - `>= 5` → "high"
+   - `>= 3` → "medium"  
+   - `< 3` → "low"
 
-### 调优建议
-- 低 Effort：更激进早停与更小并发（较低 thr，较大 buffer）。
-- 中 Effort：折中，建议保持默认。
-- 高 Effort：更保守早停与更大并发（较高 thr，较小 buffer），确保覆盖更多证据后再收敛。
+### 早停逻辑
+```python
+# 简单判断：达到effort阈值即可结束
+if completion >= effort_threshold:
+    return "thinking_finalization_stage"
+```
+
+### 并发控制
+```python
+# effort决定并发数，无复杂动态调整
+max_parallel = effort_max_parallel or default_parallel
+batch = queries[:max_parallel]
+```
+
+## 简化移除的复杂参数
+
+以下参数已移除，简化系统设计：
+- ❌ `finalize_decent_buffer`
+- ❌ `finalize_decent_min_floor`  
+- ❌ `parallel_reduce_buffer`
+- ❌ `parallel_low_progress_floor`
+- ❌ `parallel_low_progress_ratio`
+
+## 使用示例
+
+```python
+# 前端快速研究
+config = Configuration(effort="low")  # 30%完成即停
+
+# 平衡研究  
+config = Configuration(effort="medium")  # 60%完成
+
+# 深度研究
+config = Configuration(effort="high")  # 85%完成
+```
 
 ### 验证与日志
 - 查看 `backend/.env.example`，按需复制为 `.env` 并设置上述参数。
 - 运行后在日志中观察：
   - `dispatch` 日志包含 `thr`、`progress`、`k` 与分支路径（首轮/后续轮、小并发）。
-  - `route_after_reflection` 日志包含 `completion`、`decent_gate`、`high_completion` 与 `decent_completion` 判定。
 - 回归对比：固定输入下，分别在低/中/高 Effort、不同 buffer/ratio 组合下比较：
   - 总并发量（每轮的 k）与循环次数
   - 早停位置与最终答案质量
