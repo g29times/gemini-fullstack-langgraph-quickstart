@@ -92,15 +92,23 @@ class Configuration(BaseModel):
         },
     )
 
+    # Effort level configuration (from frontend or explicit setting)
+    effort: Optional[str] = Field(
+        default=None,
+        metadata={
+            "description": "Explicit effort level: 'low', 'medium', 'high'.",
+        },
+    )
+
     # Effort-level completion thresholds (used for early finalization decisions)
     # These can be overridden via env vars:
     #   EFFORT_LOW_COMPLETION_THRESHOLD, EFFORT_MEDIUM_COMPLETION_THRESHOLD, EFFORT_HIGH_COMPLETION_THRESHOLD
     effort_low_completion_threshold: float = Field(
-        default=0.6,
+        default=0.3,
         metadata={"description": "Early finalization completion threshold for low effort (0-1)."},
     )
     effort_medium_completion_threshold: float = Field(
-        default=0.75,
+        default=0.6,
         metadata={"description": "Early finalization completion threshold for medium effort (0-1)."},
     )
     effort_high_completion_threshold: float = Field(
@@ -111,54 +119,23 @@ class Configuration(BaseModel):
     # Effort-level max parallel queries override. If set, overrides max_parallel_queries per effort.
     # Env vars: EFFORT_LOW_MAX_PARALLEL_QUERIES, EFFORT_MEDIUM_MAX_PARALLEL_QUERIES, EFFORT_HIGH_MAX_PARALLEL_QUERIES
     effort_low_max_parallel_queries: Optional[int] = Field(
-        default=None,
+        default=2,
         metadata={"description": "Override for max parallel queries when effort=low."},
     )
     effort_medium_max_parallel_queries: Optional[int] = Field(
-        default=None,
+        default=3,
         metadata={"description": "Override for max parallel queries when effort=medium."},
     )
     effort_high_max_parallel_queries: Optional[int] = Field(
-        default=None,
+        default=5,
         metadata={"description": "Override for max parallel queries when effort=high."},
     )
 
-    # Effort "主阈值 + 缓冲" 控制项（用于早终止与动态并发降档）
-    # Finalization decent gate = max(FINALIZE_DECENT_MIN_FLOOR, effort_thr - FINALIZE_DECENT_BUFFER)
-    finalize_decent_buffer: float = Field(
-        default=0.10,
-        metadata={
-            "description": "Buffer subtracted from effort completion threshold to allow decent completion finalize after >=1 loop.",
-        },
-    )
-    finalize_decent_min_floor: float = Field(
-        default=0.70,
-        metadata={
-            "description": "Minimum floor for the decent completion gate (0-1).",
-        },
-    )
+    # 简化设计：移除复杂的buffer和floor参数
+    # 保持简单：effort阈值直接决定早停，无需额外缓冲逻辑
 
-    # Dynamic parallelism gating
-    # If progress >= effort_thr -> k=1; elif progress >= max(?, effort_thr - PARALLEL_REDUCE_BUFFER) -> k=min(2, base_k); else k=base_k
-    parallel_reduce_buffer: float = Field(
-        default=0.20,
-        metadata={
-            "description": "Buffer below effort threshold where we start to reduce parallelism from base_k to small k.",
-        },
-    )
-    # For later loops: enable small parallel when progress < min(PARALLEL_LOW_PROGRESS_FLOOR, effort_thr * PARALLEL_LOW_PROGRESS_RATIO)
-    parallel_low_progress_floor: float = Field(
-        default=0.90,
-        metadata={
-            "description": "Absolute floor for low-progress gate to allow small parallelism on later loops.",
-        },
-    )
-    parallel_low_progress_ratio: float = Field(
-        default=1.0,
-        metadata={
-            "description": "Relative ratio of effort threshold for low-progress gate (combined with floor via min).",
-        },
-    )
+
+
 
     # Scheduling & history-aware controls
     scheduling_strategy: str = Field(
@@ -181,10 +158,18 @@ class Configuration(BaseModel):
     )
 
     # RAG controls
+    # LOCAL RAG Mock
     enable_rag: bool = Field(
         default=False,
         metadata={
             "description": "Enable parallel Mock RAG retrieval as an internal knowledge source.",
+        },
+    )
+    # RAG REST integration (mock-friendly)
+    enable_rag_rest: bool = Field(
+        default=True,
+        metadata={
+            "description": "Enable RAG via external REST API. If true, rag_search will call REST client instead of local TF-IDF.",
         },
     )
     rag_corpus_globs: list[str] = Field(
@@ -200,11 +185,11 @@ class Configuration(BaseModel):
         },
     )
 
-    # RAG REST integration (mock-friendly)
-    enable_rag_rest: bool = Field(
+    # HITL bypass for testing
+    enable_hitl_bypass: bool = Field(
         default=False,
         metadata={
-            "description": "Enable RAG via external REST API. If true, rag_search will call REST client instead of local TF-IDF.",
+            "description": "Enable HITL bypass for automated testing. When true, automatically approve research plans and skip clarifications.",
         },
     )
     rag_rest_endpoint: str | None = Field(
@@ -314,8 +299,8 @@ class Configuration(BaseModel):
                     values["rag_corpus_globs"] = parts
             if isinstance(values.get("rag_top_k"), str) and values["rag_top_k"].strip():
                 values["rag_top_k"] = int(values["rag_top_k"])  # pydantic also handles
-            if isinstance(values.get("enable_rag"), str) and values["enable_rag"].strip():
-                values["enable_rag"] = values["enable_rag"].strip().lower() in ("1", "true", "yes", "y", "on")
+            # if isinstance(values.get("enable_rag"), str) and values["enable_rag"].strip():
+            #     values["enable_rag"] = values["enable_rag"].strip().lower() in ("1", "true", "yes", "y", "on")
             if isinstance(values.get("enable_rag_rest"), str) and values["enable_rag_rest"].strip():
                 values["enable_rag_rest"] = values["enable_rag_rest"].strip().lower() in ("1", "true", "yes", "y", "on")
             if isinstance(values.get("rag_rest_timeout"), str) and values["rag_rest_timeout"].strip():

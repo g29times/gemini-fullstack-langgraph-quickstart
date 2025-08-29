@@ -70,10 +70,9 @@ def _score_project(query: str, item: Dict[str, Any]) -> float:
         return 0.0
     fields = [
         str(item.get("project_name", "")),
-        str(item.get("user_name", "") or item.get("vendor_name", "")),
+        str(item.get("user_name", "")),
         str(item.get("date", "")),
         str(item.get("tags", "")),
-        str(item.get("description", "")),
     ]
     text = " \n ".join(fields).lower()
     score = 0.0
@@ -90,10 +89,12 @@ def _score_project(query: str, item: Dict[str, Any]) -> float:
 
 def _normalize_item(item: Dict[str, Any], idx: int, path_hint: str | None, score: float) -> Dict[str, Any]:
     pname = str(item.get("project_name") or f"Project-{idx+1}")
-    uname = str(item.get("user_name") or item.get("vendor_name") or "UnknownUser")
+    uname = str(item.get("user_name") or "UnknownUser")
+    aname = str(item.get("party_a_name") or "")
+    summary = str(item.get("project_summary") or "")
     date = str(item.get("date") or "")
     label = pname
-    snippet = f"项目：{pname}；用户：{uname}；日期：{date}"
+    snippet = f"项目：{pname}；概要：{summary}；日期：{date}；用户：{uname}；甲方：{aname}"
     return {
         "label": label,
         "url": f"rag://user_project/{idx}",
@@ -117,7 +118,8 @@ def query_rag_rest(
     fallback to local JSON mock of user projects.
 
     Expected REST response (flexible): a list of items with fields like
-    { project_name, user_name, vendor_name, date, url?, score? }. Unknown fields are ignored.
+    { project_name, project_summary, date, url?, score?, user_name, party_a_name }.
+    Unknown fields are ignored.
     """
     # 1) Try REST if endpoint is configured
     hits: List[Dict[str, Any]] = []
@@ -132,13 +134,16 @@ def query_rag_rest(
             for i, it in enumerate(resp[: max(1, top_k)]):
                 try:
                     pname = it.get("project_name") or it.get("title") or f"Project-{i+1}"
-                    vname = it.get("user_name") or it.get("vendor_name") or it.get("vendor") or "User"
+                    uname = it.get("user_name") or "User"
+                    aname = it.get("party_a_name") or "甲方"
                     date = it.get("date") or it.get("time") or ""
                     label = str(pname)
                     url = it.get("url") or f"rag://user_project/rest/{i}"
                     score = float(it.get("score") or 0.0)
-                    snippet = f"项目：{pname}；用户：{vname}；日期：{date}"
+                    summary = str(it.get("project_summary") or "")
+                    snippet = f"项目：{pname}；概要：{summary}；日期：{date}；用户：{uname}；甲方：{aname}"
                     hits.append(
+                        # _normalize_item(it, i, endpoint, score)
                         {
                             "label": label,
                             "url": url,
@@ -172,7 +177,7 @@ def query_user_projects(
 ) -> List[Dict[str, Any]]:
     """Get top-K projects by user from local mock JSON.
 
-    - user_name: 用户名（支持部分匹配，大小写不敏感），兼容旧字段 vendor_name
+    - user_name: 用户名（支持部分匹配，大小写不敏感）
     - 返回字段与 query_rag/query_rag_rest 归一：label/url/text/score/path/chunk_index
     - 排序规则：优先按日期降序（YYYY-MM-DD），缺失日期的排在后面
     """
@@ -181,17 +186,17 @@ def query_user_projects(
     if not items:
         return []
 
-    # filter by user name contains (fallback vendor_name)
+    # filter by user name contains
     matched = []
     for it in items:
-        un = str(it.get("user_name", "") or it.get("vendor_name", "")).lower()
+        un = str(it.get("user_name", "")).lower()
         if v and v in un:
             matched.append(it)
     if not matched and v:
         # fallback: Levenshtein-free simple heuristic; token contains by whitespace split
         tokens = [t for t in re.split(r"[\s,，]+", v) if t]
         for it in items:
-            un = str(it.get("user_name", "") or it.get("vendor_name", "")).lower()
+            un = str(it.get("user_name", "")).lower()
             if any(t in un for t in tokens):
                 matched.append(it)
 

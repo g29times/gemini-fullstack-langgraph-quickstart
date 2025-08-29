@@ -302,14 +302,21 @@ def _repair_json_format(raw_content: str, prev_objectives_progress: dict = None)
 
 # 重点方法 Effort utilities
 def _infer_effort(state: OverallState, configurable: Configuration) -> str:
-    """Infer effort level from state; prefer explicit state['effort'] if provided.
+    """Infer effort level from state; prefer explicit configuration or state['effort'].
 
-    Decoupled from max_research_loops. Fallback mapping based only on
-    initial_search_query_count:
-      - high: initial >= 5
-      - medium: initial >= 3
-      - low: otherwise
+    Priority order:
+    1. configurable.effort (from frontend/config)
+    2. state['effort'] (from runtime state)
+    3. Fallback based on initial_search_query_count
     """
+    # Priority 1: Configuration effort (from frontend)
+    try:
+        if configurable.effort and configurable.effort.lower() in {"low", "medium", "high"}:
+            return configurable.effort.lower()
+    except Exception:
+        pass
+
+    # Priority 2: State effort (runtime override)
     try:
         explicit = (state.get("effort") or "").lower()
         if explicit in {"low", "medium", "high"}:
@@ -317,16 +324,8 @@ def _infer_effort(state: OverallState, configurable: Configuration) -> str:
     except Exception:
         pass
 
-    try:
-        initial = int(state.get("initial_search_query_count") or configurable.number_of_initial_queries)
-    except Exception:
-        initial = configurable.number_of_initial_queries
-
-    if initial >= 5:
-        return "high"
-    if initial >= 3:
-        return "medium"
-    return "low"
+    # Priority 3: Default fallback (since effort now controls query count directly)
+    return "medium"
 
 def _effort_completion_threshold(configurable: Configuration, effort: str) -> float:
     if effort == "high":
@@ -338,11 +337,11 @@ def _effort_completion_threshold(configurable: Configuration, effort: str) -> fl
 def _effort_max_parallel(configurable: Configuration, effort: str) -> int:
     base = int(configurable.max_parallel_queries)
     try:
-        if effort == "high" and configurable.effort_high_max_parallel_queries is not None:
+        if effort == "high":
             return int(configurable.effort_high_max_parallel_queries)
-        if effort == "medium" and configurable.effort_medium_max_parallel_queries is not None:
+        if effort == "medium":
             return int(configurable.effort_medium_max_parallel_queries)
-        if effort == "low" and configurable.effort_low_max_parallel_queries is not None:
+        if effort == "low":
             return int(configurable.effort_low_max_parallel_queries)
     except Exception:
         pass
@@ -503,17 +502,18 @@ def classify_intent(state: OverallState, config: RunnableConfig) -> OverallState
     is_follow_up = state.get("is_follow_up", False)
     previous_report = state.get("previous_report", "")
     
-    logger.debug("[NEO_LOG] [classify_intent] topic => %s, is_follow_up => %s", topic, is_follow_up)
+    logger.debug("[NEO_LOG] [classify_intent] topic = %s, is_follow_up = %s", topic, is_follow_up)
     
     # Enhanced prompt with follow-up context
     if is_follow_up and previous_report:
         prompt = enhanced_intent_classifier_instructions.format(
             research_topic=topic,
-            previous_report=previous_report[:1000],  # Limit context size
+            previous_report=previous_report[:1000], # Limit context size
             is_follow_up=is_follow_up
         )
     else:
         prompt = intent_classifier_instructions.format(research_topic=topic)
+    
     # logger.debug("[NEO_LOG] [classify_intent] prompt => %s", prompt)
 
     try:
@@ -529,10 +529,10 @@ def classify_intent(state: OverallState, config: RunnableConfig) -> OverallState
         payload.setdefault("confidence", 0.0)
         payload.setdefault("entity", None)
         payload.setdefault("attribute", None)
-        logger.info("[NEO_LOG] [classify_intent] structured payload => %s", payload)
+        logger.info("[NEO_LOG] [classify_intent] structured payload ===> %s", payload)
         return {"intent": payload}
     except Exception as e:
-        logger.error("[NEO_LOG] [classify_intent] classification failed reason => %s", e)
+        logger.error("[NEO_LOG] [classify_intent] classification failed reason: %s", e)
         return {
             "intent": {
                 "is_simple_lookup": False,
@@ -648,7 +648,19 @@ def clarify_intent(state: OverallState, config: RunnableConfig) -> OverallState:
             updated_state["intent_clarified"] = True
         
         return updated_state
-        
+    
+    except NodeInterrupt:
+        # 检查是否启用HITL bypass
+        configurable = Configuration.from_runnable_config(config)
+        if configurable.enable_hitl_bypass:
+            logger.info("[NEO_LOG] [clarify_intent] HITL bypass enabled, skipping clarification")
+            return {
+                "clarification_count": clarification_count + 1,
+                "intent_clarified": True
+            }
+        else:
+            # 正常情况下让NodeInterrupt抛出
+            raise
     except Exception as e:
         logger.error("[NEO_LOG] [clarify_intent] clarification failed: %s", e)
         # Fallback: mark as clarified to continue with research
@@ -822,10 +834,10 @@ def answer_simple_fact(state: OverallState, config: RunnableConfig) -> OverallSt
     
     if is_fallback:
         # For fallback cases, provide more conversational response
-        print("===> fallback")
+        print("=> fallback")
         prompt = fallback_chat_mode_instructions.format(research_topic=topic)
     else:
-        print("===> simple_fact")
+        print("=> simple_fact")
         prompt = simple_fact_answer_instructions.format(research_topic=topic)
     print(f"[NEO_LOG] [answer_simple_fact] prompt => {prompt}")
     try:
@@ -1237,14 +1249,14 @@ def generate_research_plan(state: OverallState, config: RunnableConfig) -> Overa
         research_topic=get_research_topic(state.get("messages", [])),
     )
     
-    logger.debug("[NEO_LOG] [generate_research_plan] prompt => %s", formatted_prompt)
+    # logger.debug("[NEO_LOG] [generate_research_plan] prompt => %s", formatted_prompt)
     # 优先使用结构化输出；失败则回退到非结构化并解析；最终提供安全默认
     plan_dict = None
     try:
         result = structured_llm.invoke(formatted_prompt)
     except Exception as e:
         try:
-            logger.warning("[NEO_LOG] [generate_research_plan] structured invoke failed reason => %s", str(e))
+            logger.warning("[NEO_LOG] [generate_research_plan] structured invoke failed reason: %s", str(e))
         except Exception:
             pass
         result = None
@@ -1292,6 +1304,17 @@ def generate_research_plan(state: OverallState, config: RunnableConfig) -> Overa
 # 重点方法 人类审核 New HITL and Enhanced Thinking Nodes
 def wait_for_human_approval(state: OverallState, config: RunnableConfig) -> OverallState:
     """Wait for human approval of the research plan."""
+    configurable = Configuration.from_runnable_config(config)
+    
+    # 检查是否启用HITL bypass
+    if configurable.enable_hitl_bypass:
+        logger.info("[NEO_LOG] [wait_for_human_approval] HITL bypass enabled, auto-approving research plan")
+        return {
+            "plan_approved": True,
+            "human_modifications": "",
+            "thinking_stage": "startup"
+        }
+    
     # Check if the last message contains approval/modification
     messages = state.get("messages", [])
     if messages:
@@ -1401,11 +1424,9 @@ class QueryManager:
         self.query_count = self._get_query_count()
     
     def _get_query_count(self) -> int:
-        """统一的查询数量获取逻辑"""
-        try:
-            return int(self.state.get("initial_search_query_count") or self.config.number_of_initial_queries)
-        except Exception:
-            return self.config.number_of_initial_queries
+        """基于effort的查询数量控制"""
+        effort = _infer_effort(self.state, self.config)
+        return _effort_max_parallel(self.config, effort)
     
     def _is_middle_stage_followup(self, follow_ups: list) -> bool:
         """判断是否为middle阶段的follow-up处理"""
@@ -1610,7 +1631,7 @@ class QueryManager:
             return host
         except Exception:
             return None
-    
+    # round_robin等调度策略
     def _apply_scheduling_strategy(self, queries: list) -> list:
         """应用调度策略：目标选择和查询排序"""
         try:
@@ -1667,67 +1688,55 @@ class QueryManager:
         return queries
     
     def _apply_parallelism_control(self, queries: list) -> list:
-        """应用并行度控制和派发逻辑"""
+        """简化的并行度控制逻辑"""
         if not queries:
             return "thinking_finalization_stage"
         
-        loop_count = int(self.state.get("research_loop_count", 0) or 0)
         progress = 0.0
         try:
             progress = float(self.state.get("overall_completion") or 0.0)
         except Exception:
             progress = 0.0
         
-        # Effort-aware controls
+        # 简化的effort控制
         effort = _infer_effort(self.state, self.config)
-        thr = _effort_completion_threshold(self.config, effort)
-        base_k = _effort_max_parallel(self.config, effort)
+        threshold = _effort_completion_threshold(self.config, effort)
         
-        if loop_count <= 0:
-            # 首轮：按配置决定是否并行和并行度
-            if self.config.enable_parallel_research:
-                # 动态并行度：完成度越高，并发越低
-                if progress >= thr:
-                    k = 1
-                elif progress >= max(
-                    float(self.config.parallel_low_progress_floor),
-                    float(thr) - float(self.config.parallel_reduce_buffer),
-                ):
-                    k = min(3, base_k)
-                else:
-                    k = base_k
-                
-                batch = list(queries[:k])
-                logger.info("[QueryManager] First loop=%d effort=%s progress=%.2f thr=%.2f k=%d (base=%d)", 
-                           loop_count, effort, progress, thr, k, base_k)
-                
-                return self._create_sends(batch)
-            else:
-                return self._create_sends([queries[0]])
+        # 简单判断：达到阈值就结束
+        if progress >= threshold:
+            logger.info("[QueryManager] Completion threshold reached: effort=%s progress=%.2f >= %.2f -> finalize", 
+                       effort, progress, threshold)
+            return "thinking_finalization_stage"
+        
+        # 简化的并发控制：effort决定并发数
+        if self.config.enable_parallel_research:
+            batch = queries  # 执行所有生成的查询
+            logger.info("[QueryManager] Parallel dispatch: effort=%s progress=%.2f k=%d", 
+                       effort, progress, len(batch))
         else:
-            # 后续轮：默认顺序；若完成度较低，允许小并发加速收敛
-            low_progress_gate = min(
-                float(self.config.parallel_low_progress_floor),
-                float(thr) * float(self.config.parallel_low_progress_ratio),
-            )
-            
-            if self.config.enable_parallel_research and progress < low_progress_gate:
-                k = min(len(queries), max(1, min(self.config.small_parallel_limit, base_k)))
-                batch = list(queries[:k])
-                logger.info("[QueryManager] Later loop=%d effort=%s progress=%.2f (<%.2f) -> small parallel k=%d", 
-                           loop_count, effort, progress, low_progress_gate, k)
-                return self._create_sends(batch)
-            else:
-                # 强制顺序，仅派发一个查询
-                return self._create_sends([queries[0]])
+            batch = [queries[0]]  # 顺序模式只执行第一个
+            logger.info("[QueryManager] Sequential dispatch: effort=%s progress=%.2f k=1", 
+                       effort, progress)
+        
+        return self._create_sends(batch)
     
     def _create_sends(self, queries: list) -> list:
         """创建Send对象列表"""
         sends = []
+        enable_rag = getattr(self.config, "enable_rag_rest", False)
+        logger.info("[NEO_LOG] [QueryManager] _create_sends: %d queries, enable_rag_rest=%s", len(queries), enable_rag)
+        
         for i, q in enumerate(queries):
+            logger.info("[NEO_LOG] [QueryManager] Query %d: '%s'", i, q)
             sends.append(Send("web_research", {"search_query": q, "id": int(i)}))
-            if getattr(self.config, "enable_rag", False):
+            if enable_rag:
+                logger.info("[NEO_LOG] [QueryManager] Adding RAG search for query %d", i)
                 sends.append(Send("rag_search", {"search_query": q, "id": int(i)}))
+            else:
+                logger.info("[NEO_LOG] [QueryManager] Skipping RAG search (disabled) for query %d", i)
+        
+        logger.info("[NEO_LOG] [QueryManager] Total sends created: %d (web=%d, rag=%d)", 
+                   len(sends), len(queries), len(queries) if enable_rag else 0)
         return sends
 
 # 三种查询生成路径
@@ -1779,6 +1788,13 @@ def generate_query(state: OverallState, config: RunnableConfig) -> OverallState:
     if result.backlog:
         response["planned_backlog"] = result.backlog
     
+    # 保留关键状态字段，防止丢失
+    critical_keys = ["overall_completion", "objectives_progress", "research_loop_count", 
+                     "is_sufficient", "knowledge_gap", "follow_up_queries"]
+    for key in critical_keys:
+        if state.get(key) is not None:
+            response[key] = state[key]
+    
     # 记录运行时参数
     try:
         logger.info("[generate_query] Runtime params: initial_search_query_count=%d, max_research_loops=%d", 
@@ -1813,7 +1829,8 @@ def route_after_generate_query(state: QueryGenerationState, config: RunnableConf
 def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
     """LangGraph node that performs web research using the native Google Search API tool.
 
-    Executes a web search using the native Google Search API tool in combination with Gemini 2.5 Flash-Lite.
+    Uses the Google Search grounding feature to retrieve and cite web sources.
+    Includes retry logic and error handling for robust operation.
 
     Args:
         state: Current graph state containing the search query and research loop count
@@ -1825,6 +1842,11 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
     # Configure
     configurable = Configuration.from_runnable_config(config)
     original_query = state.get("search_query", "")
+    
+    logger.info("[NEO_LOG] [web_research] Entry: query='%s', id=%s", original_query, state.get("id", "N/A"))
+    logger.info("[NEO_LOG] [web_research] Config: enable_web_search=%s, web_search_top_k=%s", 
+                getattr(configurable, "enable_web_search", True), 
+                getattr(configurable, "web_search_top_k", 3))
     # Translate Chinese queries to English for better coverage
     translated_query = _translate_to_english(original_query, configurable.query_generator_model) if _contains_cjk(original_query) else ""
     primary_query = translated_query or original_query
@@ -1900,7 +1922,7 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
             src = [item for citation in cits for item in citation["segments"]]
             try:
                 grounded_list = [seg.get("value") for citation in cits for seg in citation["segments"]]
-                # logger.info("[NEO_LOG] grounding urls => %s", grounded_list)
+                # logger.info("[NEO_LOG] grounding urls ---> %s", grounded_list)
             except Exception:
                 pass
             return src, mod
@@ -1919,7 +1941,7 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
                 urls = [u for u in urls if u]
             except Exception:
                 urls = []
-            logger.info("[NEO_LOG] [web_searcher] url_context retrieved URLs => %s", urls)
+            logger.info("[NEO_LOG] [web_searcher] url_context retrieved URLs ---> %s", urls)
 
             # Truncate URLs to respect tool limits
             if len(urls) > configurable.max_urls_per_query:
@@ -1945,31 +1967,42 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
 
     # First attempt with primary (possibly translated) query
     try:
+        logger.info("[NEO_LOG] [web_research] Attempting primary query: '%s'", primary_query)
         sources_gathered, modified_text = _run_and_extract(primary_query)
+        logger.info("[NEO_LOG] [web_research] Primary query result: %d sources, %d chars", 
+                   len(sources_gathered), len(modified_text))
     except Exception as e:
         # 兜底：任何未预期异常都不应中断流程
         try:
-            logger.exception("[web_searcher] unexpected error (primary)")
+            logger.exception("[NEO_LOG] [web_research] Primary query unexpected error: %s", str(e))
         except Exception:
             pass
         sources_gathered, modified_text = [], "[web_search error suppressed] " + str(e)
     # Retry with secondary (original) if no sources gathered
     if not sources_gathered and secondary_query:
         try:
-            logger.info("[retry] zero sources with primary; retrying with original query")
+            logger.info("[NEO_LOG] [web_research] Retrying with secondary query: '%s'", secondary_query)
         except Exception:
             pass
         try:
             sources_gathered, modified_text = _run_and_extract(secondary_query)
+            logger.info("[NEO_LOG] [web_research] Secondary query result: %d sources, %d chars", 
+                       len(sources_gathered), len(modified_text))
         except Exception as e:
             try:
-                logger.exception("[web_searcher] unexpected error (secondary)")
+                logger.exception("[NEO_LOG] [web_research] Secondary query unexpected error: %s", str(e))
             except Exception:
                 pass
             sources_gathered, modified_text = [], "[web_search error suppressed] " + str(e)
 
     # 记录已派发查询，避免重复
     dispatched_out = [original_query] if original_query else []
+    
+    logger.info("[NEO_LOG] [web_research] Final result: %d sources_gathered, %d chars modified_text", 
+                len(sources_gathered), len(modified_text))
+    logger.info("[NEO_LOG] [web_research] Modified text preview: %s", 
+                modified_text[:200] + "..." if len(modified_text) > 200 else modified_text)
+    
     return {
         "sources_gathered": sources_gathered,
         "search_query": [state.get("search_query", "")],
@@ -1988,6 +2021,11 @@ def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
     """
     configurable = Configuration.from_runnable_config(config)
     original_query = state.get("search_query", "")
+    
+    logger.info("[NEO_LOG] [rag_search] Entry: query='%s', id=%s", original_query, state.get("id", "N/A"))
+    logger.info("[NEO_LOG] [rag_search] Config: enable_rag_rest=%s, rag_top_k=%s", 
+                getattr(configurable, "enable_rag_rest", False), 
+                getattr(configurable, "rag_top_k", 5))
 
     try:
         top_k = int(getattr(configurable, "rag_top_k", 5) or 5)
@@ -2001,6 +2039,7 @@ def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
     # 调用 REST API 或本地方法 获取RAG搜索结果
     try:
         if getattr(configurable, "enable_rag_rest", False):
+            logger.info("[NEO_LOG] [rag_search] Using REST backend, calling query_rag_rest...")
             hits = query_rag_rest(
                 original_query,
                 endpoint=getattr(configurable, "rag_rest_endpoint", None),
@@ -2009,7 +2048,9 @@ def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
                 local_json=getattr(configurable, "rag_rest_local_json", "backend/examples/vendor_projects.json"),
                 top_k=top_k,
             )
+            logger.info("[NEO_LOG] [rag_search] REST query returned %d hits", len(hits))
         else:
+            logger.info("[NEO_LOG] [rag_search] RAG REST disabled, using empty results (local TF-IDF commented out)")
             # hits = query_rag(
             #     original_query,
             #     getattr(configurable, "rag_corpus_globs", ["WIKI/**/*.md"]) or [],
@@ -2019,7 +2060,7 @@ def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
             hits = []
     except Exception as e:
         try:
-            logger.exception("[rag_search] RAG backend failed")
+            logger.exception("[NEO_LOG] [rag_search] RAG backend failed: %s", str(e))
         except Exception:
             pass
         hits = []
@@ -2032,13 +2073,19 @@ def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
             candidate_name = state.get("intent", {}).get("entity")
         # Only call when RAG REST integration is enabled (internal gate, no new flag)
         if candidate_name and getattr(configurable, "enable_rag_rest", False):
+            logger.info("[NEO_LOG] [rag_search] Fetching user projects for candidate: '%s'", candidate_name)
             user_hits = query_user_projects(
                 user_name=candidate_name,
                 local_json=getattr(configurable, "rag_rest_local_json", "backend/examples/vendor_projects.json"),
                 top_k=min(3, max(1, int(top_k))),
             )
-    except Exception:
+            logger.info("[NEO_LOG] [rag_search] User projects query returned %d hits", len(user_hits))
+        else:
+            logger.info("[NEO_LOG] [rag_search] No user project query (candidate='%s', rag_rest=%s)", 
+                       candidate_name or "None", getattr(configurable, "enable_rag_rest", False))
+    except Exception as e:
         # Do not fail overall RAG on user project issues
+        logger.warning("[NEO_LOG] [rag_search] User projects query failed: %s", str(e))
         user_hits = []
 
     combined_hits = (hits or []) + (user_hits or [])
@@ -2083,6 +2130,12 @@ def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
         modified_text = (modified_text + SUMMARY_SEPARATOR + up_text) if modified_text else up_text
 
     dispatched_out = [original_query] if original_query else []
+    
+    logger.info("[NEO_LOG] [rag_search] Result: %d sources_gathered, %d chars modified_text", 
+                len(segments), len(modified_text))
+    logger.info("[NEO_LOG] [rag_search] Modified text preview: %s", 
+                modified_text[:200] + "..." if len(modified_text) > 200 else modified_text)
+    
     return {
         "sources_gathered": segments,
         "search_query": [state.get("search_query", "")],
@@ -2716,24 +2769,17 @@ def route_after_reflection(state: OverallState, config: RunnableConfig):
     except Exception:
         pass
 
-    # Early stop if no actionable follow-ups or high completion (effort-aware)
-    # should_finalize = bool(is_sufficient or research_loop_count >= max_research_loops or len(followups) == 0)
+    # 简化的早停逻辑：直接使用effort阈值
     effort = _infer_effort(state, configurable)
-    completion_finalize_threshold = _effort_completion_threshold(configurable, effort)
-    # If completion is very high, or decent completion after at least one loop, allow early finalize
-    high_completion = completion >= completion_finalize_threshold
-    decent_gate = max(
-        float(configurable.finalize_decent_min_floor),
-        float(completion_finalize_threshold) - float(configurable.finalize_decent_buffer),
-    )
-    decent_completion = completion >= decent_gate and research_loop_count >= 1
-    # 研究结束条件：确保planned_queries和follow_up_queries都被充分处理
+    completion_threshold = _effort_completion_threshold(configurable, effort)
+    # 简单判断：达到effort阈值即可结束
+    high_completion = completion >= completion_threshold
+    # 简化的研究结束条件
     should_finalize = bool(
         is_sufficient
         or research_loop_count >= max_research_loops
-        or queries_fully_processed  # 替换原来的 len(followups) == 0
-        or high_completion
-        or decent_completion
+        or queries_fully_processed  # 所有查询已处理完毕
+        or high_completion  # 达到effort阈值
     )
 
     # Final routing decision
@@ -2741,8 +2787,8 @@ def route_after_reflection(state: OverallState, config: RunnableConfig):
     
     try:
         logger.info(
-            "[NEO_LOG] [route_after_reflection] Decision: %s (effort=%s completion=%.2f/%.2f sufficient=%s queries_processed=%s)",
-            next_stage, effort, completion, completion_finalize_threshold, is_sufficient, queries_fully_processed
+            "[NEO_LOG] [route_after_reflection] Decision: => %s (effort=%s completion=%.2f/%.2f sufficient=%s queries_processed=%s)",
+            next_stage, effort, completion, completion_threshold, is_sufficient, queries_fully_processed
         )
     except Exception:
         pass
@@ -2904,7 +2950,7 @@ def evaluate_research(
                     },
                 )
             )
-            if getattr(configurable, "enable_rag", False):
+            if getattr(configurable, "enable_rag_rest", False):
                 sends.append(
                     Send(
                         "rag_search",

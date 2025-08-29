@@ -1,58 +1,92 @@
 [
   {
+    "project_name": "办公家具采购竞价公告",
+    "user_name": "恒丰家具",
+    "party_a_name": "绿城集团",
+    "date": "2025-09-01",
+    "tags": ["办公家具", "竞价", "采购"],
+    "project_summary": "采购各类办公桌椅、文件柜等办公家具，预算约50万元",
+    "url": "https://www.chinabidding.com.cn/zbgg/202509/t20250901_123456.htm"
+  },
+  {
+    "project_name": "新模村村级公共服务设施及文化礼堂工程-办公家具采购公告",
+    "user_name": "浙江办公设备公司",
+    "party_a_name": "宁波市北仑区人民政府",
+    "date": "2025-09-08",
+    "tags": ["办公家具", "政府采购", "文化礼堂"],
+    "project_summary": "村级公共服务设施配套办公家具采购，投标保证金2900元",
+    "url": "https://www.bl.gov.cn/procurement/202509/t20250908_234567.htm"
+  },
+  {
+    "project_name": "科益药业办公家具公开招标公告",
+    "user_name": "现代办公家具",
+    "party_a_name": "通用技术集团",
+    "date": "2025-09-16",
+    "tags": ["办公家具", "药业", "公开招标"],
+    "project_summary": "科益药业新办公区家具配置项目，包含高端办公家具采购",
+    "url": "https://www.genertec.com.cn/tender/202509/t20250916_345678.htm"
+  },
+  {
+    "project_name": "滁州铁塔2025年办公室家具采购项目比选公告",
+    "user_name": "铁塔办公用品",
+    "party_a_name": "中国铁塔股份有限公司",
+    "date": "2025-09-04",
+    "tags": ["办公家具", "铁塔", "比选"],
+    "project_summary": "中国铁塔滁州分公司办公家具采购，招标文件费150元/套",
+    "url": "https://www.tower.com.cn/bidding/202509/t20250904_456789.htm"
+  },
+  {
+    "project_name": "安徽警官职业学院办公设备、家具集中采购第1包",
+    "user_name": "学院家具供应商",
+    "party_a_name": "安徽警官职业学院",
+    "date": "2025-09-17",
+    "tags": ["办公家具", "学院", "集中采购"],
+    "project_summary": "警官学院办公设备和家具采购项目第一包，包含办公桌椅等",
+    "url": "https://ggzy.hefei.gov.cn/tender/202509/t20250917_567890.htm"
+  },
+  {
+    "project_name": "吉林艺术学院繁荣校区办公家具采购项目",
+    "user_name": "艺术家具设计",
+    "party_a_name": "吉林艺术学院",
+    "date": "2025-09-24",
+    "tags": ["办公家具", "艺术学院", "校区"],
+    "project_summary": "吉林艺术学院繁荣校区新建办公区域家具配置项目",
+    "url": "https://ggzy.jl.gov.cn/tender/202509/t20250924_678901.htm"
+  },
+  {
+    "project_name": "2025年联通数据智能有限公司办公家具采购项目招标公告",
+    "user_name": "智能办公解决方案",
+    "party_a_name": "联通数据智能有限公司",
+    "date": "2025-09-17",
+    "tags": ["办公家具", "联通", "数据智能"],
+    "project_summary": "联通数据智能公司2025年度办公家具采购，要求供应商具备350万元以上业绩",
+    "url": "https://www.mayitouzi.com/tender/202509/t20250917_789012.htm"
+  },
+  {
     "project_name": "智慧园区物联网平台升级",
-    "vendor_name": "华信科技",
+    "user_name": "华信科技",
+    "party_a_name": "某科技园区管委会",
     "date": "2023-11-15",
     "tags": ["IoT", "园区", "平台"],
-    "description": "对现有园区物联网中台进行升级，新增边缘计算节点与数据可视化大屏。"
+    "project_summary": "园区物联网中台升级改造，新增边缘计算和可视化功能",
+    "url": "https://example.com/project/iot-upgrade"
   },
   {
     "project_name": "供应链风控大数据分析",
-    "vendor_name": "启元数据",
+    "user_name": "启元数据",
+    "party_a_name": "某大型制造企业",
     "date": "2024-03-02",
     "tags": ["大数据", "风控", "供应链"],
-    "description": "整合供应商交易流水、物流轨迹、舆情信息，构建风险评分模型。"
+    "project_summary": "构建供应链风险评分模型，整合多维度数据分析",
+    "url": "https://example.com/project/supply-chain-risk"
   },
   {
     "project_name": "AI招投标文本智能解析",
-    "vendor_name": "文澜智能",
+    "user_name": "文澜智能",
+    "party_a_name": "某招标代理机构",
     "date": "2022-12-20",
     "tags": ["NLP", "招标", "解析"],
-    "description": "对RFP、RFI与合同条款做结构化抽取，支持相似条款检索与差异比对。"
-  },
-  {
-    "project_name": "企业知识库RAG问答系统",
-    "vendor_name": "融智云",
-    "date": "2024-05-10",
-    "tags": ["RAG", "知识库", "检索增强"],
-    "description": "将历史项目文档、周报、方案等构建为检索增强问答系统，支持权限隔离。"
-  },
-  {
-    "project_name": "数据仓库湖仓一体改造",
-    "vendor_name": "天擎数科",
-    "date": "2023-07-08",
-    "tags": ["数据湖", "仓库", "改造"],
-    "description": "引入湖仓一体架构，统一批流数据与元数据治理，提升分析性能。"
-  },
-  {
-    "project_name": "客服质检多模态分析平台",
-    "vendor_name": "声图智能",
-    "date": "2024-01-18",
-    "tags": ["语音识别", "图像", "质检"],
-    "description": "结合语音转写与屏幕录制，实现对客服坐席的全链路质检与标签化。"
-  },
-  {
-    "project_name": "私有化LLM能力中心建设",
-    "vendor_name": "星河云智",
-    "date": "2024-06-28",
-    "tags": ["LLM", "私有化", "能力中心"],
-    "description": "搭建模型服务编排、向量库、评测基线、灰度回滚与成本看板。"
-  },
-  {
-    "project_name": "供应商评审与入围管理系统",
-    "vendor_name": "智采云",
-    "date": "2023-09-30",
-    "tags": ["供应商", "评审", "入围"],
-    "description": "全流程供应商评审、资质核验、评分打标与黑白名单管理。"
+    "project_summary": "招投标文档智能解析系统，支持结构化抽取和比对",
+    "url": "https://example.com/project/bid-text-analysis"
   }
 ]

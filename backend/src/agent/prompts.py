@@ -75,9 +75,9 @@ Research Topic:
 #       - The Summaries may include outputs from both Web Search and RAG (including a section like "用户项目推荐"). Treat RAG items as hypotheses or hints; DO NOT increase completion scores unless corroborated by authoritative web sources.
 #       - If a "用户项目推荐" section exists, consider generating at least one verification follow-up to assess recency/feasibility, with explicit constraints (e.g., site:, time, region, official channel).
 #       - De-duplicate evidence and follow-ups across Web and RAG; avoid double-counting similar items from two sources.
-#     - When a follow-up is based primarily on RAG hints, include verification-oriented constraints (e.g., site:gov.cn, site:集团官网 招采/新闻/公告, time window like last 12 months).
-#   - Style:
-#     - keep non-English proper nouns in original script (quoted); add transliterations/aliases when useful.
+#       - When a follow-up is based primarily on RAG hints, include verification-oriented constraints (e.g., site:gov.cn, site:集团官网 招采/新闻/公告, time window like last 12 months).
+# - Style:
+#       - keep non-English proper nouns in original script (quoted); add transliterations/aliases when useful.
 reflection_instructions = """You are an expert research assistant analyzing summaries about "{research_topic}".
 
 Research Objectives (if available):
@@ -243,7 +243,7 @@ Output Format (JSON):
   "entity": string | null,
   "attribute": string | null,
   "needs_clarification": boolean,
-  "missing_elements": ["时间", "地点", "人物/主体", "事件"] | [],
+  "missing_elements": ["time", "location", "subject", "event"] | [],
   "clarification_reason": string | null
 }}
 """
