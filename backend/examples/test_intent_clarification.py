@@ -97,7 +97,7 @@ def test_intent_clarification():
                 "configurable": {
                     "enable_intent_router": True,
                     "intent_confidence_threshold": 0.7,
-                    "query_generator_model": "gemini-2.0-flash-exp",
+                    "query_generator_model": "gemini-2.0-flash-lite",
                     "enable_rag": True,
                     "enable_rag_rest": True,
                     "rag_rest_endpoint": None,
@@ -211,7 +211,7 @@ def test_clarification_loop():
         "configurable": {
             "enable_intent_router": True,
             "intent_confidence_threshold": 0.7,
-            "query_generator_model": "gemini-2.0-flash-exp",
+            "query_generator_model": "gemini-2.0-flash-lite",
             "enable_rag": True,
             "enable_rag_rest": True,
             "rag_rest_endpoint": None,
