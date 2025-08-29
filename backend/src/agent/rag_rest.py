@@ -62,7 +62,33 @@ def _load_local_projects(local_json: str) -> List[Dict[str, Any]]:
     except Exception:
         return []
 
+# 双重评分机制
+# 精确匹配：查询字符串完全包含在项目文本中 → +2.0分
+# 分词匹配：查询字符串的每个分词（以逗号或空格分隔）在项目文本中出现 → +1.0分
+# 实际匹配示例
+# 以查询"办公家具 投标 爱企查"为例：
 
+# 分词结果：
+# ["办公家具", "投标", "爱企查"]
+# 匹配过程：
+# python
+# # 项目数据
+# item = {
+#     "project_name": "办公家具采购竞价公告",
+#     "user_name": "恒丰家具", 
+#     "date": "2025-09-01",
+#     "tags": "办公家具,采购,招标"
+# }
+
+# # 合并文本
+# text = "办公家具采购竞价公告 \n 恒丰家具 \n 2025-09-01 \n 办公家具,采购,招标"
+
+# # 评分计算
+# score = 0.0
+# # "办公家具" in text → +1.0
+# # "投标" not in text → +0.0  
+# # "爱企查" not in text → +0.0
+# # 最终得分：1.0
 def _score_project(query: str, item: Dict[str, Any]) -> float:
     # very simple heuristic score based on substring hits across fields
     q = (query or "").strip().lower()
