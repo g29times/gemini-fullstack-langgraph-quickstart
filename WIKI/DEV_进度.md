@@ -72,8 +72,7 @@ _norm()
       1. 搜索、汇总能力提升
       2. 记忆算法研究
     BUG
-      final 过程重复
-      500 中断恢复
+      
     开发类
       thinking_startup_stage 之后 支持直接阅读网址或文件内容
       目标 TODO

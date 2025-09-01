@@ -67,7 +67,7 @@ export const CollapsedResearchPlan: React.FC<CollapsedResearchPlanProps> = ({
             </div>
 
             <div>
-              <h4 className="font-medium text-neutral-200 mb-1">计划查询</h4>
+              <h4 className="font-medium text-neutral-200 mb-1">搜索关键词</h4>
               <ul className="list-disc list-inside text-neutral-300 space-y-1">
                 {researchPlan.planned_queries?.map((query, idx) => (
                   <li key={idx}>{query}</li>

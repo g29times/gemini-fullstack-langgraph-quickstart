@@ -552,11 +552,26 @@ def clarify_intent(state: OverallState, config: RunnableConfig) -> OverallState:
     3. Maximum clarification rounds reached
     4. User explicitly opts out
     """
+    logger.debug("[NEO_LOG] [clarify_intent] ===== CLARIFY_INTENT NODE CALLED =====")
     configurable = Configuration.from_runnable_config(config)
     
     # Initialize clarification state if not present
     clarification_count = state.get("clarification_count", 0)
     max_rounds = state.get("max_clarification_rounds", 3)
+    
+    # Check if user wants to skip clarification
+    messages = state.get("messages", [])
+    if messages:
+        last_message = messages[-1]
+        if hasattr(last_message, 'type') and last_message.type == "human":
+            content = last_message.content if hasattr(last_message, 'content') else ""
+            if isinstance(content, str) and content.strip().lower() in ["跳过", "skip", "跳过。"]:
+                logger.info("[NEO_LOG] [clarify_intent] User chose to skip clarification, marking as clarified")
+                return {
+                    "clarification_count": clarification_count + 1,
+                    "intent_clarified": True,
+                    "clarification_skipped": True
+                }
     
     # Get current intent and conversation context
     intent = state.get("intent", {})
@@ -612,6 +627,7 @@ def clarify_intent(state: OverallState, config: RunnableConfig) -> OverallState:
         # If clarification is needed, prepare questions for user
         if clarification_result.get("needs_clarification", True) and clarification_count < max_rounds:
             questions = clarification_result.get("clarification_questions", [])
+            logger.info("[NEO_LOG] [clarify_intent] questions generated: %s", questions)
             if questions:
                 # Format questions as a user-friendly message
                 question_text = "为了更好地帮助您，我需要了解一些额外信息：\n\n"
@@ -619,13 +635,29 @@ def clarify_intent(state: OverallState, config: RunnableConfig) -> OverallState:
                     question_text += f"{i}. {question}\n"
                 question_text += "\n请回答上述问题，或者输入'跳过'直接进行研究。"
                 
-                # Add clarification message to conversation
+                # Add clarification message to conversation history
                 updated_state["conversation_history"] = [
                     {"role": "assistant", "content": question_text}
                 ]
                 
-                # Interrupt for user input
+                # CRITICAL: Add clarification message to main messages for frontend display
+                from langchain_core.messages import AIMessage
+                # Don't overwrite existing messages, append the clarification message
+                clarification_msg = AIMessage(content=question_text)
+                updated_state["messages"] = [clarification_msg]
+                
+                logger.info("[NEO_LOG] [clarify_intent] Added clarification message to state.messages: %s", question_text[:100])
+                
+                # Store the clarification question in state for later use
+                updated_state["pending_clarification"] = question_text
+                updated_state["clarification_needed"] = True
+                
+                logger.info("[NEO_LOG] [clarify_intent] Raising NodeInterrupt with question text")
+                
+                # Raise NodeInterrupt - the updated_state should be applied before the interrupt
                 raise NodeInterrupt(question_text)
+            else:
+                logger.info("[NEO_LOG] [clarify_intent] no questions generated, skipping clarification")
         
         # If intent is clarified or max rounds reached, update intent with gathered info
         if not clarification_result.get("needs_clarification", True) or clarification_count >= max_rounds:
@@ -1364,7 +1396,7 @@ def wait_for_human_approval(state: OverallState, config: RunnableConfig) -> Over
             **研究目标：**
             {chr(10).join(f"• {obj}" for obj in research_plan.get('research_objectives', []))}
 
-            **计划查询：**
+            **搜索关键词：**
             {chr(10).join(f"• {query}" for query in research_plan.get('planned_queries', []))}
 
             **研究方法：**
@@ -1500,7 +1532,7 @@ class QueryManager:
         return QueryResult(queries=queries)
     
     def _handle_planned_queries(self, planned_queries: list) -> QueryResult:
-        """处理研究计划查询"""
+        """搜索关键词"""
         logger.info("[QueryManager] Using %d planned queries from research plan", len(planned_queries))
         
         # 保留完整计划，设置backlog供后续分批使用
@@ -1747,7 +1779,7 @@ class QueryManager:
 # 增强策略：Middle阶段检测，保持查询数量连续性
 # 关键优化：is_middle_stage_followup判断，动态调整目标查询数量
 
-# 路径B：研究计划查询 (L1485-L1497)
+# 路径B：搜索关键词 (L1485-L1497)
 # 触发条件：存在planned_queries且首次执行
 # 核心逻辑：优先使用HITL批准的研究计划中的查询
 # 特点：保留完整计划，设置planned_backlog供后续分批使用
@@ -2795,15 +2827,15 @@ def route_after_reflection(state: OverallState, config: RunnableConfig):
 
     return next_stage
 
-# 重点方法 最终报告 Gemini 2.5 Pro 0.3
+# 重点方法 最终报告 Gemini 2.5 Pro 0.5
 def generate_enhanced_report(state: OverallState, config: RunnableConfig) -> OverallState:
     """Generate an enhanced structured report similar to Google DeepResearch."""
     configurable = Configuration.from_runnable_config(config)
-    reasoning_model = configurable.answer_model
+    reasoning_model = configurable.reflection_model # answer_model
     
     llm = ChatGoogleGenerativeAI(
         model=reasoning_model,
-        temperature=0.3,
+        temperature=0.5,
         max_retries=2,
         api_key=os.getenv("GEMINI_API_KEY"),
     )

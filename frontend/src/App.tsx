@@ -27,6 +27,8 @@ export default function App() {
   const [finalReport, setFinalReport] = useState<any>(null);
   const [thinkingProcess, setThinkingProcess] = useState<any[]>([]);
   const [sourcesGathered, setSourcesGathered] = useState<any[]>([]);
+  // Store clarification messages separately
+  const [pendingClarificationMessage, setPendingClarificationMessage] = useState<Message | null>(null);
   // Remember user's selected config to reuse during HITL (approve/modify/quick-lookup)
   const [currentEffort, setCurrentEffort] = useState<string>(DEFAULT_EFFORT);
   const [currentModel, setCurrentModel] = useState<string>(DEFAULT_REASONING_MODEL);
@@ -51,14 +53,56 @@ export default function App() {
       console.log("Event received:", event);
       
       // Handle interrupt events (HITL) - check for __interrupt__ property
-      // Only show HITL if we haven't already approved a plan and don't have a final report
-      if ((event.__interrupt__ || event.hasOwnProperty('__interrupt__')) && 
-          !finalReport && !showPlanCollapsed) {
-        setShowHitlApproval(true);
-        processedEvent = {
-          title: "等待人工确认",
-          data: "研究计划已生成，等待您的确认...",
-        };
+      if (event.__interrupt__ || event.hasOwnProperty('__interrupt__')) {
+        // Check if this is a clarify_intent interrupt by looking at the interrupt message content
+        const interruptData = event.__interrupt__;
+        
+        // Extract the actual message content from the interrupt data
+        let messageStr = "";
+        if (typeof interruptData === 'string') {
+          messageStr = interruptData;
+        } else if (interruptData && typeof interruptData === 'object') {
+          // Check if it's an array with value property (LangGraph interrupt format)
+          if (Array.isArray(interruptData) && interruptData.length > 0 && interruptData[0].value) {
+            messageStr = interruptData[0].value;
+          } else if (interruptData.value) {
+            messageStr = interruptData.value;
+          } else {
+            // Try other possible properties where the message might be stored
+            messageStr = interruptData.message || interruptData.content || interruptData.text || JSON.stringify(interruptData);
+          }
+        } else {
+          messageStr = String(interruptData);
+        }
+        
+        console.log("[DEBUG] Extracted message:", messageStr);
+        
+        if (messageStr.includes("为了更好地帮助您，我需要了解一些额外信息")) {
+          // This is a clarify_intent interrupt - manually add to messages
+          console.log("[DEBUG] This is a clarify_intent interrupt");
+          console.log("[DEBUG] Clarification message content:", messageStr);
+          
+          // Store the clarification message to display alongside thread.messages
+          const clarificationMessage: Message = {
+            type: "ai",
+            content: messageStr,
+            id: `clarification-${Date.now()}`,
+          };
+          
+          setPendingClarificationMessage(clarificationMessage);
+          console.log("[DEBUG] Stored clarification message in state");
+          return;
+        } else if (!finalReport && !showPlanCollapsed) {
+          // This is a research plan approval interrupt
+          console.log("[DEBUG] This is a research plan approval interrupt");
+          setShowHitlApproval(true);
+          processedEvent = {
+            title: "等待人工确认",
+            data: "研究计划已生成，等待您的确认...",
+          };
+        } else {
+          console.log("[DEBUG] Interrupt ignored due to conditions:", {finalReport, showPlanCollapsed});
+        }
       }
       // Enhanced DeepResearch flow events
       else if (event.detect_follow_up) {
@@ -72,12 +116,17 @@ export default function App() {
           title: "意图分类",
           data: `分类结果: ${intent?.intent_label || "未知"} (置信度: ${intent?.confidence || 0})`,
         };
+      } else if (event.clarify_intent) {
+        processedEvent = {
+          title: "意图澄清",
+          data: "分析用户意图并准备澄清问题...",
+        };
       } else if (event.generate_research_plan) {
         const plan = event.generate_research_plan?.research_plan;
         setResearchPlan(plan);
         processedEvent = {
           title: "生成研究计划",
-          data: `研究目标: ${plan?.research_objectives?.length || 0}个，计划查询: ${plan?.planned_queries?.length || 0}个`,
+          data: `研究目标: ${plan?.research_objectives?.length || 0}个，搜索关键词: ${plan?.planned_queries?.length || 0}个`,
         };
       } else if (event.thinking_startup_stage) {
         processedEvent = {
@@ -104,7 +153,7 @@ export default function App() {
           setSourcesGathered(report.sources_gathered);
         }
         processedEvent = {
-          title: "生成增强报告",
+          title: "生成报告",
           data: "生成结构化研究报告...",
         };
         hasFinalizeEventOccurredRef.current = true;
@@ -177,7 +226,9 @@ export default function App() {
         scrollViewport.scrollTop = scrollViewport.scrollHeight;
       }
     }
-  }, [thread.messages]);
+    
+    // Auto-scroll to bottom when new messages arrive
+  }, [thread.messages, pendingClarificationMessage]);
 
   useEffect(() => {
     if (
@@ -368,7 +419,47 @@ export default function App() {
                 </div>
               )}
               <ChatMessagesView
-                messages={thread.messages}
+                messages={(() => {
+                  // Filter out HITL JSON messages that shouldn't be displayed to users
+                  const filteredMessages = thread.messages.filter(msg => {
+                    if (msg.type === "human" && typeof msg.content === "string") {
+                      try {
+                        const parsed = JSON.parse(msg.content);
+                        // Hide HITL action messages
+                        if (parsed.action && ["approve_plan", "modify_plan", "quick_lookup"].includes(parsed.action)) {
+                          return false;
+                        }
+                      } catch {
+                        // Not JSON, keep the message
+                      }
+                    }
+                    return true;
+                  });
+                  
+                  // Insert pending clarification message at correct position if exists
+                  if (pendingClarificationMessage) {
+                    // Find the first user message (initial question) and insert clarification after it
+                    const messages = [...filteredMessages];
+                    let insertIndex = -1;
+                    
+                    for (let i = 0; i < messages.length; i++) {
+                      if (messages[i].type === "human") {
+                        insertIndex = i + 1;
+                        break;
+                      }
+                    }
+                    
+                    if (insertIndex >= 0) {
+                      messages.splice(insertIndex, 0, pendingClarificationMessage);
+                    } else {
+                      messages.push(pendingClarificationMessage);
+                    }
+                    
+                    return messages;
+                  }
+                  
+                  return filteredMessages;
+                })()}
                 isLoading={thread.isLoading}
                 scrollAreaRef={scrollAreaRef}
                 onSubmit={handleSubmit}

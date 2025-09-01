@@ -46,10 +46,79 @@ export const ResearchPlanApproval: React.FC<ResearchPlanApprovalProps> = ({
           <Clock className="w-6 h-6 text-blue-400" />
           研究方案预览
         </h2>
-        <p className="text-neutral-400">请审核以下研究计划，您可以直接批准或提出修改建议</p>
+        <p className="text-neutral-400">请查看以下研究计划，您可以提出修改建议</p>
       </div>
 
       <div className="grid gap-6">
+
+        {/* Action Buttons */}
+        <div className="flex flex-col sm:flex-row gap-4 justify-center">
+          <Button
+            onClick={onQuickLookup}
+            disabled={isLoading}
+            className="bg-blue-600 hover:bg-blue-700 text-white flex items-center gap-2"
+          >
+            <Search className="w-4 h-4" />
+            快速搜索关键词，跳过深度研究
+          </Button>
+
+          <Button
+            onClick={handleApprove}
+            disabled={isLoading}
+            className="bg-green-600 hover:bg-green-700 text-white flex items-center gap-2"
+          >
+            <CheckCircle className="w-4 h-4" />
+            {modifications.trim() ? '应用修改' : '开始深度研究'}
+            <ArrowRight className="w-4 h-4" />
+          </Button>
+
+          <Button
+            onClick={() => setShowModifications(!showModifications)}
+            variant="outline"
+            className="border-orange-600 text-orange-400 hover:bg-orange-600 hover:text-white flex items-center gap-2"
+          >
+            <Edit className="w-4 h-4" />
+            {showModifications ? '取消修改' : '提出修改'}
+          </Button>
+        </div>
+        {/* Modification Input */}
+        {showModifications && (
+          <Card className="bg-neutral-900 border-neutral-700">
+            <CardHeader>
+              <CardTitle className="text-neutral-100 flex items-center gap-2">
+                <Edit className="w-5 h-5 text-orange-400" />
+                修改建议
+              </CardTitle>
+              <CardDescription>请描述您希望如何调整研究计划</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <Textarea
+                placeholder="例如：请增加对竞争对手分析的内容，重点关注最新的市场趋势..."
+                value={modifications}
+                onChange={(e) => setModifications(e.target.value)}
+                className="min-h-[100px] bg-neutral-800 border-neutral-600 text-neutral-100"
+              />
+            </CardContent>
+          </Card>
+        )}
+
+        {/* Planned Queries */}
+        <Card className="bg-neutral-900 border-neutral-700">
+          <CardHeader>
+            <CardTitle className="text-neutral-100">搜索关键词</CardTitle>
+            <CardDescription>将搜索这些关键词来收集信息</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="flex flex-wrap gap-2">
+              {researchPlan.planned_queries.map((query, index) => (
+                <Badge key={index} variant="secondary" className="bg-blue-900 text-blue-100">
+                  {query}
+                </Badge>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+
         {/* Research Objectives */}
         <Card className="bg-neutral-900 border-neutral-700">
           <CardHeader>
@@ -80,74 +149,6 @@ export const ResearchPlanApproval: React.FC<ResearchPlanApprovalProps> = ({
           </CardContent>
         </Card>
 
-        {/* Planned Queries */}
-        <Card className="bg-neutral-900 border-neutral-700">
-          <CardHeader>
-            <CardTitle className="text-neutral-100">计划搜索查询</CardTitle>
-            <CardDescription>将执行以下搜索查询来收集信息</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div className="flex flex-wrap gap-2">
-              {researchPlan.planned_queries.map((query, index) => (
-                <Badge key={index} variant="secondary" className="bg-blue-900 text-blue-100">
-                  {query}
-                </Badge>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
-
-        {/* Modification Input */}
-        {showModifications && (
-          <Card className="bg-neutral-900 border-neutral-700">
-            <CardHeader>
-              <CardTitle className="text-neutral-100 flex items-center gap-2">
-                <Edit className="w-5 h-5 text-orange-400" />
-                修改建议
-              </CardTitle>
-              <CardDescription>请描述您希望如何调整研究计划</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <Textarea
-                placeholder="例如：请增加对竞争对手分析的内容，重点关注最新的市场趋势..."
-                value={modifications}
-                onChange={(e) => setModifications(e.target.value)}
-                className="min-h-[100px] bg-neutral-800 border-neutral-600 text-neutral-100"
-              />
-            </CardContent>
-          </Card>
-        )}
-
-        {/* Action Buttons */}
-        <div className="flex flex-col sm:flex-row gap-4 justify-center">
-          <Button
-            onClick={onQuickLookup}
-            disabled={isLoading}
-            className="bg-blue-600 hover:bg-blue-700 text-white flex items-center gap-2"
-          >
-            <Search className="w-4 h-4" />
-            直接查询
-          </Button>
-
-          <Button
-            onClick={handleApprove}
-            disabled={isLoading}
-            className="bg-green-600 hover:bg-green-700 text-white flex items-center gap-2"
-          >
-            <CheckCircle className="w-4 h-4" />
-            {modifications.trim() ? '批准并应用修改' : '批准研究计划'}
-            <ArrowRight className="w-4 h-4" />
-          </Button>
-
-          <Button
-            onClick={() => setShowModifications(!showModifications)}
-            variant="outline"
-            className="border-orange-600 text-orange-400 hover:bg-orange-600 hover:text-white flex items-center gap-2"
-          >
-            <Edit className="w-4 h-4" />
-            {showModifications ? '取消修改' : '提出修改'}
-          </Button>
-        </div>
       </div>
     </div>
   );
