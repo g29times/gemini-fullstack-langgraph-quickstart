@@ -1329,7 +1329,6 @@ def generate_research_plan(state: OverallState, config: RunnableConfig) -> Overa
         }
     return {
         "research_plan": plan_dict,
-        "thinking_stage": "startup",
         "plan_approved": False,
     }
 
@@ -1482,12 +1481,15 @@ class QueryManager:
         """主查询生成入口"""
         follow_ups = self.state.get("follow_up_queries") or []
         planned_queries = self.state.get("research_plan", {}).get("planned_queries", [])
-        
+        if len(planned_queries) > 10:
+            planned_queries = planned_queries[:10]
         if follow_ups:
             return self._handle_followup_queries(follow_ups)
         elif planned_queries and not self.state.get("search_query"):
+            logger.info("[QueryManager] Using planned queries")
             return self._handle_planned_queries(planned_queries)
         else:
+            logger.info("[QueryManager] Using initial queries")
             return self._handle_initial_queries()
     
     def _handle_followup_queries(self, follow_ups: list) -> QueryResult:
@@ -1876,9 +1878,9 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
     original_query = state.get("search_query", "")
     
     logger.info("[NEO_LOG] [web_research] Entry: query='%s', id=%s", original_query, state.get("id", "N/A"))
-    logger.info("[NEO_LOG] [web_research] Config: enable_web_search=%s, web_search_top_k=%s", 
-                getattr(configurable, "enable_web_search", True), 
-                getattr(configurable, "web_search_top_k", 3))
+    # logger.info("[NEO_LOG] [web_research] Config: enable_web_search=%s, web_search_top_k=%s", 
+    #             getattr(configurable, "enable_web_search", True), 
+    #             getattr(configurable, "web_search_top_k", 3))
     # Translate Chinese queries to English for better coverage
     translated_query = _translate_to_english(original_query, configurable.query_generator_model) if _contains_cjk(original_query) else ""
     primary_query = translated_query or original_query
@@ -1954,7 +1956,8 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
             mod = insert_citation_markers(base, cits)
             src = [item for citation in cits for item in citation["segments"]]
             try:
-                grounded_list = [seg.get("value") for citation in cits for seg in citation["segments"]]
+                1 == 1
+                # grounded_list = [seg.get("value") for citation in cits for seg in citation["segments"]]
                 # logger.info("[NEO_LOG] grounding urls ---> %s", grounded_list)
             except Exception:
                 pass
@@ -2059,9 +2062,9 @@ def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
     original_query = state.get("search_query", "")
     
     logger.info("[NEO_LOG] [rag_search] Entry: query='%s', id=%s", original_query, state.get("id", "N/A"))
-    logger.info("[NEO_LOG] [rag_search] Config: enable_rag_rest=%s, rag_top_k=%s", 
-                getattr(configurable, "enable_rag_rest", False), 
-                getattr(configurable, "rag_top_k", 5))
+    # logger.info("[NEO_LOG] [rag_search] Config: enable_rag_rest=%s, rag_top_k=%s", 
+    #             getattr(configurable, "enable_rag_rest", False), 
+    #             getattr(configurable, "rag_top_k", 5))
 
     try:
         top_k = int(getattr(configurable, "rag_top_k", 5) or 5)
@@ -2075,7 +2078,7 @@ def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
     # 调用 REST API 或本地方法 获取RAG搜索结果
     try:
         if getattr(configurable, "enable_rag_rest", False):
-            logger.info("[NEO_LOG] [rag_search] Using REST backend, calling query_rag_rest...")
+            # logger.info("[NEO_LOG] [rag_search] Using REST backend, calling query_rag_rest...")
             hits = query_rag_rest(
                 original_query,
                 endpoint=getattr(configurable, "rag_rest_endpoint", None),
@@ -2084,7 +2087,7 @@ def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
                 local_json=getattr(configurable, "rag_rest_local_json", "backend/examples/vendor_projects.json"),
                 top_k=top_k,
             )
-            logger.info("[NEO_LOG] [rag_search] REST query returned %d hits", len(hits))
+            # logger.info("[NEO_LOG] [rag_search] REST query returned %d hits", len(hits))
         else:
             logger.info("[NEO_LOG] [rag_search] RAG REST disabled, using empty results (local TF-IDF commented out)")
             # hits = query_rag(
@@ -2147,10 +2150,12 @@ def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
         bullets = []
         for i, h in enumerate(hits[:top_k], 1):
             label = h.get("label") or f"RAG{i}"
+            url = h.get("url") or ""
             snippet = (h.get("text") or "").strip().replace("\n", " ")
             if len(snippet) > 400:
                 snippet = snippet[:400] + "..."
-            bullets.append(f"[{label}] {snippet}")
+            bullets.append(f"[{label}] {url} {snippet}")
+        logger.info("[NEO_LOG] [rag_search] Bullets test: %s", bullets[0])
         modified_text = _prepare_summaries(bullets, max_items=top_k, max_chars=8000)
     else:
         modified_text = "[RAG] No relevant knowledge found." + (f" Error: {err}" if err else "")
@@ -2170,9 +2175,8 @@ def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
 
     dispatched_out = [original_query] if original_query else []
 
-    logger.info("[NEO_LOG] [rag_search] Result: %d sources_gathered, %d chars modified_text", 
-                len(segments), len(modified_text))
-    logger.info("[NEO_LOG] [rag_search] Modified text preview: %s", 
+    logger.info("[NEO_LOG] [rag_search] Result: %d sources, %d chars | Preview: %s", 
+                len(segments), len(modified_text),
                 modified_text[:200] + "..." if len(modified_text) > 200 else modified_text)
 
     return {
@@ -2213,11 +2217,11 @@ def thinking_startup_stage(state: OverallState, config: RunnableConfig) -> Overa
     # Extract research plan information
     research_plan = state.get("research_plan", {})
     research_objectives = research_plan.get("research_objectives", [])
-    research_methodology = research_plan.get("research_methodology", [])
+    research_methodology = research_plan.get("research_methodology", "")
     
     # Format objectives and methodology as text
     objectives_text = "\n".join(f"• {obj}" for obj in research_objectives) if research_objectives else "无明确目标"
-    methodology_text = "\n".join(f"• {method}" for method in research_methodology) if research_methodology else "无明确方法"
+    methodology_text = research_methodology if research_methodology else "无明确方法"
     
     formatted_prompt = thinking_startup_instructions.format(
         current_date=current_date,
@@ -2227,19 +2231,19 @@ def thinking_startup_stage(state: OverallState, config: RunnableConfig) -> Overa
     )
     logger.info("[NEO_LOG] [thinking_startup_stage] prompt: %s", formatted_prompt)
     
-    result = structured_llm.invoke(formatted_prompt)
+    # result = structured_llm.invoke(formatted_prompt)
     thinking_record = {
         "stage": "startup",
         "timestamp": current_date,
-        "content": result.model_dump(),
+        "content": methodology_text # result.model_dump(),
     }
-    logger.info("[NEO_LOG] [thinking_startup_stage] thinking: %s", thinking_record)
+    # logger.info("[NEO_LOG] [thinking_startup_stage] thinking: %s", thinking_record)
     
     # Create or update the single thinking record with startup content
     thinking_record_updated = {
         "timestamp": thinking_record["timestamp"],
         "stage_name": "研究思考过程",
-        "startup_thinking": thinking_record["content"].get("startup_thinking", ""),
+        "startup_thinking": thinking_record["content"], # .get("startup_thinking", ""),
         "middle_thinking": "",
         "final_thinking": ""
     }
@@ -2297,11 +2301,11 @@ def thinking_middle_stage(state: OverallState, config: RunnableConfig) -> Overal
     # Extract research plan information
     research_plan = state.get("research_plan", {})
     research_objectives = research_plan.get("research_objectives", [])
-    research_methodology = research_plan.get("research_methodology", [])
+    research_methodology = research_plan.get("research_methodology", "")
     
     # Format objectives and methodology as text
     objectives_text = "\n".join(f"• {obj}" for obj in research_objectives) if research_objectives else "无明确目标"
-    methodology_text = "\n".join(f"• {method}" for method in research_methodology) if research_methodology else "无明确方法"
+    methodology_text = research_methodology if research_methodology else "无明确方法"
     
     formatted_prompt = thinking_middle_instructions.format(
         current_date=current_date,
@@ -2376,11 +2380,11 @@ def thinking_finalization_stage(state: OverallState, config: RunnableConfig) -> 
     # Extract research plan information
     research_plan = state.get("research_plan", {})
     research_objectives = research_plan.get("research_objectives", [])
-    research_methodology = research_plan.get("research_methodology", [])
+    research_methodology = research_plan.get("research_methodology", "")
     
     # Format objectives and methodology as text
     objectives_text = "\n".join(f"• {obj}" for obj in research_objectives) if research_objectives else "无明确目标"
-    methodology_text = "\n".join(f"• {method}" for method in research_methodology) if research_methodology else "无明确方法"
+    methodology_text = research_methodology if research_methodology else "无明确方法"
     
     formatted_prompt = thinking_finalization_instructions.format(
         current_date=current_date,
@@ -2847,7 +2851,7 @@ def generate_enhanced_report(state: OverallState, config: RunnableConfig) -> Ove
     # Extract research plan information for comprehensive context
     research_plan = state.get("research_plan", {})
     research_objectives = research_plan.get("research_objectives", [])
-    research_methodology = research_plan.get("research_methodology", [])
+    research_methodology = research_plan.get("research_methodology", "")
     
     # Build comprehensive research process context
     process_context = ""
@@ -2862,9 +2866,7 @@ def generate_enhanced_report(state: OverallState, config: RunnableConfig) -> Ove
             process_context += "\n"
         if research_methodology:
             process_context += "**研究方法**:\n"
-            for method in research_methodology:
-                process_context += f"• {method}\n"
-            process_context += "\n"
+            process_context += f"{research_methodology}\n\n"
     
     # Extract thinking process information for richer report generation
     thinking_process = state.get("thinking_process", {})

@@ -182,11 +182,11 @@ def _normalize_item(item: Dict[str, Any], idx: int, path_hint: str | None, score
     label = pname
     snippet = f"项目：{pname}；概要：{summary}；日期：{date}；用户：{uname}；甲方：{aname}"
     return {
-        "label": label,
+        "label": label, # label含义：项目名称
         "url": f"rag://user_project/{idx}",
         "path": path_hint or "",
         "chunk_index": idx,
-        "text": snippet,
+        "text": snippet, # snippet含义：项目信息整合
         "score": float(score),
     }
 
@@ -278,7 +278,7 @@ def query_rag_rest(
                     logger.warning("[NEO_LOG] [query_rag_rest] 处理项目 %d 时出错: %s", i, str(e))
                     continue
     
-    logger.info("[NEO_LOG] [query_rag_rest] rest hits: %d", len(hits))
+    logger.info("[NEO_LOG] [query_rag_rest] rest hits: %d, 第一个项目数据: %s", len(hits), hits[0])
     # If REST enabled but empty/failed, continue to fallback below
 
     # 2) Fallback to local JSON
