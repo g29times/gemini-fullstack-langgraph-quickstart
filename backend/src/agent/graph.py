@@ -2103,26 +2103,28 @@ def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
         err = str(e)
 
     # 用户项目推荐 Optionally fetch user project recommendations when we can infer a user/vendor name
-    try:
-        candidate_name = None
-        if state.get("intent") and isinstance(state["intent"], dict):
-            candidate_name = state.get("intent", {}).get("entity")
-        # Only call when RAG REST integration is enabled (internal gate, no new flag)
-        if candidate_name and getattr(configurable, "enable_rag_rest", False):
-            logger.info("[NEO_LOG] [rag_search] Fetching user projects for candidate: '%s'", candidate_name)
-            user_hits = query_user_projects(
-                user_name=candidate_name,
-                local_json=getattr(configurable, "rag_rest_local_json", "backend/examples/vendor_projects.json"),
-                top_k=min(3, max(1, int(top_k))),
-            )
-            logger.info("[NEO_LOG] [rag_search] User projects query returned %d hits", len(user_hits))
-        else:
-            logger.info("[NEO_LOG] [rag_search] No user project query (candidate='%s', rag_rest=%s)", 
-                       candidate_name or "None", getattr(configurable, "enable_rag_rest", False))
-    except Exception as e:
-        # Do not fail overall RAG on user project issues
-        logger.warning("[NEO_LOG] [rag_search] User projects query failed: %s", str(e))
-        user_hits = []
+    # TODO: 暂时注释掉，因为远程REST API不返回用户项目推荐数据，只有local mock数据
+    # try:
+    #     candidate_name = None
+    #     if state.get("intent") and isinstance(state["intent"], dict):
+    #         candidate_name = state.get("intent", {}).get("entity")
+    #     # Only call when RAG REST integration is enabled (internal gate, no new flag)
+    #     if candidate_name and getattr(configurable, "enable_rag_rest", False):
+    #         logger.info("[NEO_LOG] [rag_search] Fetching user projects for candidate: '%s'", candidate_name)
+    #         user_hits = query_user_projects(
+    #             user_name=candidate_name,
+    #             local_json=getattr(configurable, "rag_rest_local_json", "backend/examples/mock_rag_response.json"),
+    #             top_k=min(3, max(1, int(top_k))),
+    #         )
+    #         logger.info("[NEO_LOG] [rag_search] User projects query returned %d hits", len(user_hits))
+    #     else:
+    #         logger.info("[NEO_LOG] [rag_search] No user project query (candidate='%s', rag_rest=%s)", 
+    #                    candidate_name or "None", getattr(configurable, "enable_rag_rest", False))
+    # except Exception as e:
+    #     # Do not fail overall RAG on user project issues
+    #     logger.warning("[NEO_LOG] [rag_search] User projects query failed: %s", str(e))
+    #     user_hits = []
+    user_hits = []  # 暂时设为空列表
 
     combined_hits = (hits or []) + (user_hits or [])
 
@@ -2154,24 +2156,25 @@ def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
         modified_text = "[RAG] No relevant knowledge found." + (f" Error: {err}" if err else "")
 
     # Append user project recommendations into the synthesized text for compatibility
-    if user_hits:
-        up_bullets = []
-        for i, uh in enumerate(user_hits[: min(3, top_k)], 1):
-            label = uh.get("label") or f"用户项目 {i}" # 保留此处两个特定业务中文
-            snippet = (uh.get("text") or "").strip().replace("\n", " ")
-            if len(snippet) > 400:
-                snippet = snippet[:400] + "..."
-            up_bullets.append(f"[{label}] {snippet}")
-        up_text = _prepare_summaries(["用户项目推荐："] + up_bullets, max_items=min(1 + len(up_bullets), top_k + 1), max_chars=4000)
-        modified_text = (modified_text + SUMMARY_SEPARATOR + up_text) if modified_text else up_text
+    # TODO: 暂时注释掉用户项目推荐的文本合成逻辑
+    # if user_hits:
+    #     up_bullets = []
+    #     for i, uh in enumerate(user_hits[: min(3, top_k)], 1):
+    #         label = uh.get("label") or f"用户项目 {i}" # 保留此处两个特定业务中文
+    #         snippet = (uh.get("text") or "").strip().replace("\n", " ")
+    #         if len(snippet) > 400:
+    #             snippet = snippet[:400] + "..."
+    #         up_bullets.append(f"[{label}] {snippet}")
+    #     up_text = _prepare_summaries(["用户项目推荐："] + up_bullets, max_items=min(1 + len(up_bullets), top_k + 1), max_chars=4000)
+    #     modified_text = (modified_text + SUMMARY_SEPARATOR + up_text) if modified_text else up_text
 
     dispatched_out = [original_query] if original_query else []
-    
+
     logger.info("[NEO_LOG] [rag_search] Result: %d sources_gathered, %d chars modified_text", 
                 len(segments), len(modified_text))
     logger.info("[NEO_LOG] [rag_search] Modified text preview: %s", 
                 modified_text[:200] + "..." if len(modified_text) > 200 else modified_text)
-    
+
     return {
         "sources_gathered": segments,
         "search_query": [state.get("search_query", "")],

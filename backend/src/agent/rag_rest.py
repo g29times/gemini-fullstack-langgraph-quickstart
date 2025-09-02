@@ -8,7 +8,7 @@ from urllib import request, parse, error
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_LOCAL_JSON = "backend/examples/vendor_projects.json"
+DEFAULT_LOCAL_JSON = "backend/examples/mock_rag_response.json"
 
 
 def _http_post_json(url: str, payload: dict | list, headers: dict | None, timeout: int) -> dict | list | None:
@@ -98,7 +98,7 @@ def _load_local_projects(local_json: str) -> List[Dict[str, Any]]:
     backend_dir = os.path.normpath(os.path.join(here, os.pardir, os.pardir))
     candidates.append(os.path.normpath(os.path.join(backend_dir, os.path.relpath(raw, start="backend") if raw.startswith("backend" + os.sep) or raw.startswith("backend/") else raw)))
     # 4) Direct known default under backend/examples
-    candidates.append(os.path.normpath(os.path.join(backend_dir, "examples", "vendor_projects.json")))
+    candidates.append(os.path.normpath(os.path.join(backend_dir, "examples", "mock_rag_response.json")))
 
     path = None
     for c in candidates:
@@ -118,6 +118,7 @@ def _load_local_projects(local_json: str) -> List[Dict[str, Any]]:
             return []
     except Exception:
         return []
+
 
 # 双重评分机制
 # 精确匹配：查询字符串完全包含在项目文本中 → +2.0分
@@ -152,8 +153,10 @@ def _score_project(query: str, item: Dict[str, Any]) -> float:
     if not q:
         return 0.0
     fields = [
-        str(item.get("project_name", "")),
-        str(item.get("user_name", "")),
+        str(item.get("projectName", "")),
+        str(item.get("userName", "")),
+        str(item.get("partyAName", "")),
+        str(item.get("projectSummary", "")),
         str(item.get("date", "")),
         str(item.get("tags", "")),
     ]
@@ -171,10 +174,10 @@ def _score_project(query: str, item: Dict[str, Any]) -> float:
 
 
 def _normalize_item(item: Dict[str, Any], idx: int, path_hint: str | None, score: float) -> Dict[str, Any]:
-    pname = str(item.get("project_name") or f"Project-{idx+1}")
-    uname = str(item.get("user_name") or "UnknownUser")
-    aname = str(item.get("party_a_name") or "")
-    summary = str(item.get("project_summary") or "")
+    pname = str(item.get("projectName") or f"Project-{idx+1}")
+    uname = str(item.get("userName") or "UnknownUser")
+    aname = str(item.get("partyAName") or "")
+    summary = str(item.get("projectSummary") or "")
     date = str(item.get("date") or "")
     label = pname
     snippet = f"项目：{pname}；概要：{summary}；日期：{date}；用户：{uname}；甲方：{aname}"

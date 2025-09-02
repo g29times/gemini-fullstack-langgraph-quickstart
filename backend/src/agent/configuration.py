@@ -54,7 +54,7 @@ class Configuration(BaseModel):
 
     # 最大研究循环数
     max_research_loops: int = Field(
-        default=10,
+        default=5,
         metadata={"description": "The maximum number of research loops to perform."},
     )
 
@@ -199,7 +199,7 @@ class Configuration(BaseModel):
         },
     )
     rag_rest_api_key: str | None = Field(
-        default="eyJhbGciOiJIUzUxMiJ9.eyJjcmVhdGVfdGltZSI6IjIwMjUtMDktMDEgMTQ6NDc6NTgiLCJ1c2VyX2lkIjoxNTk2MDQxNzE0NDQ0MTg1NjAxLCJ1c2VyX25hbWUiOiLpgpPlrrbmmI4gIDEzNzEzNTUxMzQ0IiwidXNlcl9rZXkiOiJhakM3cjI5Sm50QUdIaGR1MGZnSU0iLCJuZXdfZmxhZyI6Im5ld19mbGFnIn0.sm3yfjGIMJd-EZIAKuBqgczSROpHOfTIuW_ZbIeON_7Dsu_g2AWI9gawWNFxDd6T_S5yqOt-Rix2DG5Lux6vwA",
+        default="",
         metadata={
             "description": "Optional API key for RAG REST endpoint (Authorization: Bearer).",
         },
@@ -211,7 +211,7 @@ class Configuration(BaseModel):
         },
     )
     rag_rest_local_json: str = Field(
-        default="backend/examples/vendor_projects.json",
+        default="",
         metadata={
             "description": "Local JSON file path for mock vendor projects when no REST endpoint is configured.",
         },
