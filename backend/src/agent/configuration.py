@@ -187,25 +187,25 @@ class Configuration(BaseModel):
 
     # HITL bypass for testing
     enable_hitl_bypass: bool = Field(
-        default=False,
+        default=True,
         metadata={
             "description": "Enable HITL bypass for automated testing. When true, automatically approve research plans and skip clarifications.",
         },
     )
     rag_rest_endpoint: str | None = Field(
-        default=None,
+        default="http://www-test.raritag.cn/intelligence-platform/bidProject/search", # http://mock-endpoint
         metadata={
             "description": "RAG REST endpoint URL. If empty, client will use local JSON mock.",
         },
     )
     rag_rest_api_key: str | None = Field(
-        default=None,
+        default="eyJhbGciOiJIUzUxMiJ9.eyJjcmVhdGVfdGltZSI6IjIwMjUtMDktMDEgMTQ6NDc6NTgiLCJ1c2VyX2lkIjoxNTk2MDQxNzE0NDQ0MTg1NjAxLCJ1c2VyX25hbWUiOiLpgpPlrrbmmI4gIDEzNzEzNTUxMzQ0IiwidXNlcl9rZXkiOiJhakM3cjI5Sm50QUdIaGR1MGZnSU0iLCJuZXdfZmxhZyI6Im5ld19mbGFnIn0.sm3yfjGIMJd-EZIAKuBqgczSROpHOfTIuW_ZbIeON_7Dsu_g2AWI9gawWNFxDd6T_S5yqOt-Rix2DG5Lux6vwA",
         metadata={
             "description": "Optional API key for RAG REST endpoint (Authorization: Bearer).",
         },
     )
     rag_rest_timeout: int = Field(
-        default=8,
+        default=10,
         metadata={
             "description": "HTTP timeout (seconds) for RAG REST calls.",
         },

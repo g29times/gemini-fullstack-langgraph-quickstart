@@ -1,0 +1,56 @@
+{
+  "success": true,
+  "code": 200,
+  "message": "操作成功",
+  "data": [
+    {
+      "id": "334",
+      "projectName": "吉县农业生产基地建设项目招标公告",
+      "userName": "",
+      "projectSummary": null,
+      "url": null,
+      "date": "2025-09-08 09:00:00",
+      "partyAName": null
+    },
+    {
+      "id": "390",
+      "projectName": "2025年濉溪县百善镇叶刘湖村高标准农田建设项目",
+      "userName": "",
+      "projectSummary": null,
+      "url": null,
+      "date": "2025-09-03 09:00:00",
+      "partyAName": null
+    },
+    {
+      "id": "391",
+      "projectName": "2025年绩溪县双堆集镇芦沟村高标准农田建设项目",
+      "userName": "",
+      "projectSummary": null,
+      "url": null,
+      "date": "2025-09-04 09:00:00",
+      "partyAName": null
+    },
+    {
+      "id": "392",
+      "projectName": "某市水库除险加固工程招标",
+      "userName": "水利建设公司",
+      "projectSummary": "大型水库大坝除险加固及配套设施改造项目",
+      "url": "http://example.com/project/392",
+      "date": "2025-08-28 10:00:00",
+      "partyAName": "市水利局"
+    },
+    {
+      "id": "393",
+      "projectName": "保障性住房建设工程",
+      "userName": "城建集团",
+      "projectSummary": "保障性住房建设，总建筑面积12万平方米",
+      "url": "http://example.com/project/393",
+      "date": "2025-08-22 14:30:00",
+      "partyAName": "市住建局"
+    }
+  ],
+  "status": null,
+  "timestamp": 1756731452854,
+  "cost": 0,
+  "requestId": null
+}

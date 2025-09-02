@@ -2,13 +2,67 @@ import json
 import os
 import time
 import re
+import logging
 from typing import Any, Dict, List, Optional
 from urllib import request, parse, error
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_LOCAL_JSON = "backend/examples/vendor_projects.json"
 
 
-def _http_post_json(url: str, payload: dict, headers: dict | None, timeout: int) -> dict | list | None:
+def _http_post_json(url: str, payload: dict | list, headers: dict | None, timeout: int) -> dict | list | None:
+    # Mock endpoint: 直接返回mock数据
+    if url == "http://mock-endpoint":
+        logger.info("使用mock endpoint，返回mock数据")
+        try:
+            # 尝试多个可能的路径
+            mock_paths = [
+                "backend/examples/mock_rag_response.json",
+                "examples/mock_rag_response.json", 
+                os.path.join(os.path.dirname(__file__), "..", "..", "examples", "mock_rag_response.json")
+            ]
+            
+            for mock_path in mock_paths:
+                try:
+                    if os.path.exists(mock_path):
+                        with open(mock_path, 'r', encoding='utf-8') as f:
+                            return json.load(f)
+                except Exception:
+                    continue
+            
+            # 如果文件不存在，返回内置mock数据
+            logger.warning("mock文件未找到，使用内置mock数据")
+            return {
+                "success": True,
+                "code": 200,
+                "message": "操作成功",
+                "data": [
+                    {
+                        "id": "334",
+                        "projectName": "吉县农业生产基地建设项目招标公告",
+                        "userName": "",
+                        "projectSummary": None,
+                        "url": None,
+                        "date": "2025-09-08 09:00:00",
+                        "partyAName": None
+                    },
+                    {
+                        "id": "390", 
+                        "projectName": "2025年濉溪县百善镇叶刘湖村高标准农田建设项目",
+                        "userName": "",
+                        "projectSummary": None,
+                        "url": None,
+                        "date": "2025-09-03 09:00:00",
+                        "partyAName": None
+                    }
+                ]
+            }
+        except Exception as e:
+            logger.error("Mock数据加载失败: %s", str(e))
+            return None
+    
+    # 真实HTTP请求
     data = json.dumps(payload).encode("utf-8")
     req = request.Request(url, data=data, headers=headers or {}, method="POST")
     try:
@@ -17,10 +71,13 @@ def _http_post_json(url: str, payload: dict, headers: dict | None, timeout: int)
             if not raw:
                 return None
             try:
-                return json.loads(raw)
-            except json.JSONDecodeError:
+                result = json.loads(raw)
+                return result
+            except json.JSONDecodeError as e:
+                logger.warning("RAG REST JSON解析失败: %s", str(e))
                 return None
-    except Exception:
+    except Exception as e:
+        logger.warning("RAG REST请求失败: %s", str(e))
         return None
 
 
@@ -150,38 +207,76 @@ def query_rag_rest(
     # 1) Try REST if endpoint is configured
     hits: List[Dict[str, Any]] = []
     if endpoint:
-        headers = {"Content-Type": "application/json"}
+        logger.info("[NEO_LOG] [query_rag_rest] 调用REST接口: %s", endpoint)
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "*/*"
+        }
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
-        payload = {"query": query, "top_k": int(top_k)}
+        
+        # New API format: send query as array of strings
+        payload = [query]  # Changed from dict to array format
+        
         resp = _http_post_json(endpoint, payload, headers, timeout)
-        if isinstance(resp, list):
-            # normalize top_k first N items
-            for i, it in enumerate(resp[: max(1, top_k)]):
+        
+        # Handle new API response format: {"success": true, "data": [...]}
+        projects_data = []
+        if isinstance(resp, dict):
+            if resp.get("success") and resp.get("data"):
+                projects_data = resp["data"]
+                logger.info("[NEO_LOG] [query_rag_rest] 从API响应中提取到 %d 个项目", len(projects_data))
+            else:
+                logger.warning("[NEO_LOG] [query_rag_rest] API响应格式错误或无数据: success=%s", resp.get('success'))
+        elif isinstance(resp, list):
+            # 兼容旧格式：直接是项目数组
+            projects_data = resp
+            logger.info("[NEO_LOG] [query_rag_rest] 使用旧格式，项目数量: %d", len(projects_data))
+        
+        # Process projects data
+        if projects_data:
+            for i, it in enumerate(projects_data[: max(1, top_k)]):
                 try:
-                    pname = it.get("project_name") or it.get("title") or f"Project-{i+1}"
-                    uname = it.get("user_name") or "User"
-                    aname = it.get("party_a_name") or "甲方"
+                    # 兼容新旧字段名
+                    pname = (it.get("projectName") or it.get("project_name") or 
+                            it.get("title") or f"Project-{i+1}")
+                    uname = (it.get("userName") or it.get("user_name") or 
+                            it.get("supplier") or "供应商")
+                    aname = (it.get("partyAName") or it.get("party_a_name") or 
+                            it.get("owner") or "甲方")
                     date = it.get("date") or it.get("time") or ""
+                    summary = (it.get("projectSummary") or it.get("project_summary") or 
+                              it.get("description") or "")
+                    
                     label = str(pname)
                     url = it.get("url") or f"rag://user_project/rest/{i}"
-                    score = float(it.get("score") or 0.0)
-                    summary = str(it.get("project_summary") or "")
-                    snippet = f"项目：{pname}；概要：{summary}；日期：{date}；用户：{uname}；甲方：{aname}"
-                    hits.append(
-                        # _normalize_item(it, i, endpoint, score)
-                        {
-                            "label": label,
-                            "url": url,
-                            "path": endpoint,
-                            "chunk_index": i,
-                            "text": snippet,
-                            "score": score,
-                        }
-                    )
-                except Exception:
+                    score = float(it.get("score") or 1.0)  # 默认评分1.0
+                    
+                    # 构建项目描述文本
+                    snippet = f"项目：{pname}"
+                    if summary:
+                        snippet += f"；概要：{summary}"
+                    if date:
+                        snippet += f"；日期：{date}"
+                    if uname and uname != "供应商":
+                        snippet += f"；用户：{uname}"
+                    if aname and aname != "甲方":
+                        snippet += f"；甲方：{aname}"
+                    
+                    hits.append({
+                        "label": label,
+                        "url": url,
+                        "path": endpoint,
+                        "chunk_index": i,
+                        "text": snippet,
+                        "score": score,
+                    })
+                except Exception as e:
+                    logger.warning("[NEO_LOG] [query_rag_rest] 处理项目 %d 时出错: %s", i, str(e))
                     continue
-        # If REST enabled but empty/failed, continue to fallback below
+    
+    logger.info("[NEO_LOG] [query_rag_rest] rest hits: %d", len(hits))
+    # If REST enabled but empty/failed, continue to fallback below
 
     # 2) Fallback to local JSON
     if not hits:
@@ -192,7 +287,7 @@ def query_rag_rest(
         top = scored[: max(1, top_k)]
         for idx, (it, sc) in enumerate(top):
             hits.append(_normalize_item(it, idx, local_json, sc))
-
+        logger.info("[NEO_LOG] [query_rag_rest] local hits: %d", len(hits))
     return hits
 
 

@@ -1899,7 +1899,7 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
             current_date=get_current_date(),
             research_topic=query_text,
         )
-        # logger.info("[web_searcher] formatted: %s", formatted)
+        # logger.info("[NEO_LOG] [web_research] prompt: %s", formatted)
         tools = [{"google_search": {}}]
         if allow_url_context:
             tools = [{"url_context": {}}, {"google_search": {}}]
@@ -1916,7 +1916,8 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
         except Exception as e:
             msg = str(e)
             try:
-                logger.warning("[web_searcher] primary call failed: %s", msg)
+                1 == 1
+                # logger.warning("[NEO_LOG] [web_research] primary call failed: %s", msg)
             except Exception:
                 pass
             # 针对 URL 超限或服务端错误，回退禁用 url_context 再试一次
@@ -1932,7 +1933,7 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
                     )
                 except Exception as e2:
                     try:
-                        logger.error("[web_searcher] fallback without url_context failed: %s", str(e2))
+                        logger.error("[NEO_LOG] [web_research] fallback without url_context failed: %s", str(e2))
                     except Exception:
                         pass
                     return [], "[web_search error suppressed] " + (msg or "")
@@ -1973,7 +1974,7 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
                 urls = [u for u in urls if u]
             except Exception:
                 urls = []
-            logger.info("[NEO_LOG] [web_searcher] url_context retrieved URLs ---> %s", urls)
+            logger.info("[NEO_LOG] [web_research] url_context retrieved URLs ---> %s", urls)
 
             # Truncate URLs to respect tool limits
             if len(urls) > configurable.max_urls_per_query:
@@ -1999,30 +2000,33 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
 
     # First attempt with primary (possibly translated) query
     try:
-        logger.info("[NEO_LOG] [web_research] Attempting primary query: '%s'", primary_query)
+        # logger.info("[NEO_LOG] [web_research] Attempting primary query: '%s'", primary_query)
         sources_gathered, modified_text = _run_and_extract(primary_query)
-        logger.info("[NEO_LOG] [web_research] Primary query result: %d sources, %d chars", 
-                   len(sources_gathered), len(modified_text))
+        # logger.info("[NEO_LOG] [web_research] Primary query result: %d sources, %d chars", 
+        #            len(sources_gathered), len(modified_text))
     except Exception as e:
         # 兜底：任何未预期异常都不应中断流程
         try:
-            logger.exception("[NEO_LOG] [web_research] Primary query unexpected error: %s", str(e))
+            1 == 1
+            # logger.exception("[NEO_LOG] [web_research] Primary query unexpected error: %s", str(e))
         except Exception:
             pass
         sources_gathered, modified_text = [], "[web_search error suppressed] " + str(e)
     # Retry with secondary (original) if no sources gathered
     if not sources_gathered and secondary_query:
         try:
-            logger.info("[NEO_LOG] [web_research] Retrying with secondary query: '%s'", secondary_query)
+            1 == 1
+            # logger.info("[NEO_LOG] [web_research] Retrying with secondary query: '%s'", secondary_query)
         except Exception:
             pass
         try:
             sources_gathered, modified_text = _run_and_extract(secondary_query)
-            logger.info("[NEO_LOG] [web_research] Secondary query result: %d sources, %d chars", 
-                       len(sources_gathered), len(modified_text))
+            # logger.info("[NEO_LOG] [web_research] Secondary query result: %d sources, %d chars", 
+            #            len(sources_gathered), len(modified_text))
         except Exception as e:
             try:
-                logger.exception("[NEO_LOG] [web_research] Secondary query unexpected error: %s", str(e))
+                1 == 1
+                # logger.exception("[NEO_LOG] [web_research] Secondary query unexpected error: %s", str(e))
             except Exception:
                 pass
             sources_gathered, modified_text = [], "[web_search error suppressed] " + str(e)
@@ -2032,8 +2036,8 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
     
     logger.info("[NEO_LOG] [web_research] Final result: %d sources_gathered, %d chars modified_text", 
                 len(sources_gathered), len(modified_text))
-    logger.info("[NEO_LOG] [web_research] Modified text preview: %s", 
-                modified_text[:200] + "..." if len(modified_text) > 200 else modified_text)
+    # logger.info("[NEO_LOG] [web_research] Modified text preview: %s", 
+    #             modified_text[:200] + "..." if len(modified_text) > 200 else modified_text)
     
     return {
         "sources_gathered": sources_gathered,
@@ -2098,7 +2102,7 @@ def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
         hits = []
         err = str(e)
 
-    # Optionally fetch user project recommendations when we can infer a user/vendor name
+    # 用户项目推荐 Optionally fetch user project recommendations when we can infer a user/vendor name
     try:
         candidate_name = None
         if state.get("intent") and isinstance(state["intent"], dict):
@@ -2218,6 +2222,7 @@ def thinking_startup_stage(state: OverallState, config: RunnableConfig) -> Overa
         research_objectives=objectives_text,
         research_methodology=methodology_text,
     )
+    logger.info("[NEO_LOG] [thinking_startup_stage] prompt: %s", formatted_prompt)
     
     result = structured_llm.invoke(formatted_prompt)
     thinking_record = {
@@ -2225,7 +2230,7 @@ def thinking_startup_stage(state: OverallState, config: RunnableConfig) -> Overa
         "timestamp": current_date,
         "content": result.model_dump(),
     }
-    logger.info("[NEO_LOG] [thinking_startup_stage] thinking_record: %s", thinking_record)
+    logger.info("[NEO_LOG] [thinking_startup_stage] thinking: %s", thinking_record)
     
     # Create or update the single thinking record with startup content
     thinking_record_updated = {
@@ -2241,10 +2246,7 @@ def thinking_startup_stage(state: OverallState, config: RunnableConfig) -> Overa
         "thinking_stage": "middle",
     }
     startup_thinking_value = thinking_record_updated["startup_thinking"]
-    if isinstance(startup_thinking_value, str):
-        logger.info("[NEO_LOG] [thinking_startup_stage] startup_thinking: %s", startup_thinking_value[:100])
-    else:
-        logger.info("[NEO_LOG] [thinking_startup_stage] startup_thinking (non-string): %s", str(startup_thinking_value)[:100])
+    logger.info("[NEO_LOG] [thinking_startup_stage] startup_thinking: %s", startup_thinking_value[:100])
     
     # Preserve core state fields (移除不常用的历史记录)
     for key in ["research_plan", "objectives_progress", "overall_completion", "research_loop_count", 
@@ -2305,6 +2307,7 @@ def thinking_middle_stage(state: OverallState, config: RunnableConfig) -> Overal
         research_methodology=methodology_text,
         summaries=summaries,
     )
+    # logger.info("[NEO_LOG] [thinking_middle_stage] prompt: %s", formatted_prompt)
     
     result = structured_llm.invoke(formatted_prompt)
     thinking_record = {
@@ -2330,10 +2333,7 @@ def thinking_middle_stage(state: OverallState, config: RunnableConfig) -> Overal
         "thinking_stage": "finalization",
     }
     middle_thinking_value = thinking_record_updated["middle_thinking"]
-    if isinstance(middle_thinking_value, str):
-        logger.info("[NEO_LOG] [thinking_middle_stage] middle_thinking: %s", middle_thinking_value[:100])
-    else:
-        logger.info("[NEO_LOG] [thinking_middle_stage] middle_thinking (non-string): %s", str(middle_thinking_value)[:100])
+    logger.info("[NEO_LOG] [thinking_middle_stage] middle_thinking: %s", middle_thinking_value[:100])
     
     # Keep critical state for research loop continuity
     critical_keys = ["follow_up_queries", "is_sufficient", "knowledge_gap", 
@@ -2386,6 +2386,7 @@ def thinking_finalization_stage(state: OverallState, config: RunnableConfig) -> 
         research_methodology=methodology_text,
         summaries=summaries,
     )
+    # logger.info("[NEO_LOG] [thinking_finalization_stage] prompt: %s", formatted_prompt)
     
     result = structured_llm.invoke(formatted_prompt)
     thinking_record = {
@@ -2412,10 +2413,7 @@ def thinking_finalization_stage(state: OverallState, config: RunnableConfig) -> 
         "thinking_process": thinking_record_updated,
     }
     final_thinking_value = thinking_record_updated.get("final_thinking", "")
-    if isinstance(final_thinking_value, str):
-        logger.info("[NEO_LOG] [thinking_finalization_stage] final_thinking: %s", final_thinking_value[:100])
-    else:
-        logger.info("[NEO_LOG] [thinking_finalization_stage] final_thinking (non-string): %s", str(final_thinking_value)[:100])
+    logger.info("[NEO_LOG] [thinking_finalization_stage] final_thinking: %s", final_thinking_value[:100])
     
     # Preserve core state fields (保留report生成必需的字段)
     for key in ["research_plan", "objectives_progress", "overall_completion", "research_loop_count", 

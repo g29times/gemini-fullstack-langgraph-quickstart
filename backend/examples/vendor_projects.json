@@ -9,49 +9,13 @@
     "url": "https://www.chinabidding.com.cn/zbgg/202509/t20250901_123456.htm"
   },
   {
-    "project_name": "新模村村级公共服务设施及文化礼堂工程-办公家具采购公告",
-    "user_name": "浙江办公设备公司",
-    "party_a_name": "宁波市北仑区人民政府",
-    "date": "2025-09-08",
-    "tags": ["办公家具", "政府采购", "文化礼堂"],
-    "project_summary": "村级公共服务设施配套办公家具采购，投标保证金2900元",
-    "url": "https://www.bl.gov.cn/procurement/202509/t20250908_234567.htm"
-  },
-  {
     "project_name": "科益药业办公家具公开招标公告",
-    "user_name": "现代办公家具",
+    "user_name": "现代办公集团",
     "party_a_name": "通用技术集团",
     "date": "2025-09-16",
     "tags": ["办公家具", "药业", "公开招标"],
     "project_summary": "科益药业新办公区家具配置项目，包含高端办公家具采购",
     "url": "https://www.genertec.com.cn/tender/202509/t20250916_345678.htm"
-  },
-  {
-    "project_name": "滁州铁塔2025年办公室家具采购项目比选公告",
-    "user_name": "铁塔办公用品",
-    "party_a_name": "中国铁塔股份有限公司",
-    "date": "2025-09-04",
-    "tags": ["办公家具", "铁塔", "比选"],
-    "project_summary": "中国铁塔滁州分公司办公家具采购，招标文件费150元/套",
-    "url": "https://www.tower.com.cn/bidding/202509/t20250904_456789.htm"
-  },
-  {
-    "project_name": "安徽警官职业学院办公设备、家具集中采购第1包",
-    "user_name": "学院家具供应商",
-    "party_a_name": "安徽警官职业学院",
-    "date": "2025-09-17",
-    "tags": ["办公家具", "学院", "集中采购"],
-    "project_summary": "警官学院办公设备和家具采购项目第一包，包含办公桌椅等",
-    "url": "https://ggzy.hefei.gov.cn/tender/202509/t20250917_567890.htm"
-  },
-  {
-    "project_name": "吉林艺术学院繁荣校区办公家具采购项目",
-    "user_name": "艺术家具设计",
-    "party_a_name": "吉林艺术学院",
-    "date": "2025-09-24",
-    "tags": ["办公家具", "艺术学院", "校区"],
-    "project_summary": "吉林艺术学院繁荣校区新建办公区域家具配置项目",
-    "url": "https://ggzy.jl.gov.cn/tender/202509/t20250924_678901.htm"
   },
   {
     "project_name": "2025年联通数据智能有限公司办公家具采购项目招标公告",
@@ -61,6 +25,87 @@
     "tags": ["办公家具", "联通", "数据智能"],
     "project_summary": "联通数据智能公司2025年度办公家具采购，要求供应商具备350万元以上业绩",
     "url": "https://www.mayitouzi.com/tender/202509/t20250917_789012.htm"
+  },
+  {
+    "project_name": "高标准农田建设项目施工招标",
+    "user_name": "绿野农业工程",
+    "party_a_name": "江苏省农业农村厅",
+    "date": "2025-08-15",
+    "tags": ["农田建设", "高标准", "施工"],
+    "project_summary": "建设高标准农田5000亩，包含土地平整、灌溉设施、田间道路等工程",
+    "url": "https://www.jsagri.gov.cn/tender/202508/t20250815_001234.htm"
+  },
+  {
+    "project_name": "现代农业示范园区基础设施建设",
+    "user_name": "华农建设集团",
+    "party_a_name": "山东省农业开发办",
+    "date": "2025-09-05",
+    "tags": ["农田建设", "示范园区", "基础设施"],
+    "project_summary": "现代农业示范园区土地整理及配套设施建设，总投资2800万元",
+    "url": "https://www.sdagri.gov.cn/tender/202509/t20250905_002345.htm"
+  },
+  {
+    "project_name": "农田水利综合治理工程",
+    "user_name": "中农水利建设",
+    "party_a_name": "河南省水利厅",
+    "date": "2025-09-12",
+    "tags": ["农田建设", "水利治理", "综合工程"],
+    "project_summary": "农田水利设施改造提升，涉及灌排渠系、泵站建设等",
+    "url": "https://www.hnsl.gov.cn/tender/202509/t20250912_003456.htm"
+  },
+  {
+    "project_name": "大型水库除险加固工程",
+    "user_name": "水利建设集团",
+    "party_a_name": "湖北省水利厅",
+    "date": "2025-08-28",
+    "tags": ["水利工程", "水库", "除险加固"],
+    "project_summary": "大型水库大坝除险加固及配套设施改造，确保防洪安全",
+    "url": "https://www.hubeiwater.gov.cn/tender/202508/t20250828_004567.htm"
+  },
+  {
+    "project_name": "城市防洪排涝工程建设",
+    "user_name": "市政水利工程",
+    "party_a_name": "广州市水务局",
+    "date": "2025-09-20",
+    "tags": ["水利工程", "防洪", "排涝"],
+    "project_summary": "城市防洪排涝体系建设，包含河道治理、泵站建设等",
+    "url": "https://www.gzwater.gov.cn/tender/202509/t20250920_005678.htm"
+  },
+  {
+    "project_name": "农村饮水安全巩固提升工程",
+    "user_name": "农村水务建设",
+    "party_a_name": "四川省水利厅",
+    "date": "2025-09-08",
+    "tags": ["水利工程", "饮水安全", "农村"],
+    "project_summary": "农村饮水安全工程建设，解决偏远地区供水问题",
+    "url": "https://www.scwater.gov.cn/tender/202509/t20250908_006789.htm"
+  },
+  {
+    "project_name": "保障性住房建设项目",
+    "user_name": "城建房屋工程",
+    "party_a_name": "深圳市住建局",
+    "date": "2025-08-22",
+    "tags": ["房屋建筑", "保障房", "住宅"],
+    "project_summary": "保障性住房建设，总建筑面积15万平方米，包含住宅及配套设施",
+    "url": "https://www.szjs.gov.cn/tender/202508/t20250822_007890.htm"
+  },
+  {
+    "project_name": "医院综合楼建设工程",
+    "user_name": "医疗建筑专家",
+    "party_a_name": "北京市卫健委",
+    "date": "2025-09-15",
+    "tags": ["房屋建筑", "医院", "综合楼"],
+    "project_summary": "三甲医院综合楼建设，地上20层地下3层，包含医疗及办公功能",
+    "url": "https://www.bjhealth.gov.cn/tender/202509/t20250915_008901.htm"
+  },
+  {
+    "project_name": "学校教学楼改扩建工程",
+    "user_name": "教育建筑集团",
+    "party_a_name": "上海市教委",
+    "date": "2025-09-25",
+    "tags": ["房屋建筑", "学校", "教学楼"],
+    "project_summary": "中小学教学楼改扩建，新增教学用房及现代化教学设施",
+    "url": "https://www.shedu.gov.cn/tender/202509/t20250925_009012.htm"
   },
   {
     "project_name": "智慧园区物联网平台升级",
