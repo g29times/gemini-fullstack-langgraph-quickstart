@@ -54,7 +54,7 @@ def test_thinking_process_handling():
     
     # 模拟配置
     class MockConfig:
-        answer_model = "gemini-2.0-flash-lite"
+        pro_model = "gemini-2.0-flash-lite"
     
     config = RunnableConfig(configurable=MockConfig())
     

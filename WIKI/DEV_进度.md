@@ -73,6 +73,7 @@ _norm()
       2. 记忆算法研究
     BUG
       可能存在多轮clarify_intent的情况 需要测试
+      部分情况（如低端模型，reflection未推进进度导致）循环过多报错，"Recursion limit of 25 reached without hitting a stop condition. You can increase the limit by setting the `recursion_limit` config key. 
     开发类
       thinking_startup_stage 之后 支持直接阅读网址或文件内容
       目标 TODO

@@ -304,8 +304,8 @@ genai_client.models.generate_content()  # 直接调用，避免封装开销
 
 # 3. 模型专业化
 query_generator_model: "gemini-2.5-flash-lite"    # 快速
-reflection_model: "gemini-2.5-flash"         # 平衡
-answer_model: "gemini-2.5-pro"               # 质量
+thinking_model: "gemini-2.5-flash"         # 平衡
+pro_model: "gemini-2.5-pro"               # 质量
 ```
 
 ## 🎯 总结
@@ -429,10 +429,10 @@ worker3: 搜索"AI药物发现" (2K tokens)
 query_generator_model: "gemini-2.5-flash-lite"
 
 # 推理平衡：反思评估  
-reflection_model: "gemini-2.5-flash"
+thinking_model: "gemini-2.5-flash"
 
 # 质量保证：答案合成
-answer_model: "gemini-2.5-pro"
+pro_model: "gemini-2.5-pro"
 ```
 
 ## 🎯 关键洞察

@@ -25,6 +25,7 @@ from langgraph.prebuilt import ToolNode
 from langgraph.errors import NodeInterrupt
 from langgraph.types import interrupt
 from google.genai import Client
+from google.genai import types
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 from agent.state import OverallState, ReflectionState, QueryGenerationState, WebSearchState, FollowUpDetection, IntentClarificationResult, EntitySpecificityResult
@@ -853,7 +854,7 @@ def answer_simple_fact(state: OverallState, config: RunnableConfig) -> OverallSt
     """
     configurable = Configuration.from_runnable_config(config)
     llm = ChatGoogleGenerativeAI(
-        model=configurable.query_generator_model,
+        model=configurable.fast_lite_model,
         temperature=0.5,
         max_retries=2,
         api_key=os.getenv("GEMINI_API_KEY"),
@@ -1040,35 +1041,18 @@ def direct_lookup(state: OverallState, config: RunnableConfig) -> OverallState:
     for i, query in enumerate(selected_queries):
         logger.debug("[NEO_LOG] [direct_lookup] [query %d/%d] executing: '%s'", i+1, len(selected_queries), query[:50] + "..." if len(query) > 50 else query)
         
-        # Choose prompt based on whether we have an official domain
-        if domain:
-            formatted_prompt = direct_lookup_instructions.format(
-                official_domain=domain,
-                current_date=get_current_date(),
-                research_topic=query,  # Use individual query instead of full topic
-                entity=entity,
-                attribute=attribute,
-            )
-        else:
-            formatted_prompt = quick_lookup_fallback_instructions.format(
-                current_date=get_current_date(),
-                research_topic=query,  # Use individual query instead of full topic
-                entity=entity,
-                attribute=attribute,
-            )
-        
         try:
-            response = genai_client.models.generate_content(
-                model=configurable.query_generator_model,
-                contents=formatted_prompt,
-                config={
-                    "tools": [{"url_context": {}}, {"google_search": {}}],
-                    "temperature": configurable.direct_lookup_temperature,
-                },
+            # Use the shared function for executing single direct lookup
+            query_sources, query_text = _execute_single_direct_lookup(
+                domain=domain,
+                topic=query,  # Use individual query instead of full topic
+                entity=entity,
+                attribute=attribute,
+                configurable=configurable,
+                state=state,
+                query_index=i,
+                log_prefix=f"[query {i+1}/{len(selected_queries)}]"
             )
-            
-            # Process response and collect sources
-            query_sources, query_text = _process_direct_lookup_response(response, state, i, configurable)
             all_sources.extend(query_sources)
             all_texts.append(query_text)
             
@@ -1077,31 +1061,53 @@ def direct_lookup(state: OverallState, config: RunnableConfig) -> OverallState:
             continue
     
     # Combine results from all queries
-    if all_texts:
-        combined_text = "\n------------------------------------\n".join(filter(None, all_texts))
-        unique_sources = []
-        seen_urls = set()
-        for source in all_sources:
-            url = source.get("value", "")
-            if url and url not in seen_urls:
-                unique_sources.append(source)
-                seen_urls.add(url)
-        
+    combined_text = "\n------------------------------------\n".join(filter(None, all_texts)) if all_texts else ""
+    
+    # Deduplicate sources by URL
+    unique_sources = []
+    seen_urls = set()
+    for source in all_sources:
+        url = source.get("value", "")
+        if url and url not in seen_urls:
+            unique_sources.append(source)
+            seen_urls.add(url)
+    
+    # Return results even if empty - let downstream handle empty results
+    if combined_text or unique_sources:
+        logger.info("[NEO_LOG] [direct_lookup] Combined results: %d sources, %d chars", 
+                   len(unique_sources), len(combined_text))
         return {
             "web_research_result": [combined_text] if combined_text else [],
             "sources_gathered": unique_sources,
         }
     else:
-        # Fallback to original single-query approach if all queries failed
-        logger.warning("[NEO_LOG] [direct_lookup] all queries failed, falling back to original approach")
-        return _execute_single_query_lookup(domain, topic, entity, attribute, configurable, state)
+        # All queries failed - return empty results instead of retrying
+        logger.warning("[NEO_LOG] [direct_lookup] All %d queries failed, returning empty results", len(selected_queries))
+        return {
+            "web_research_result": ["[Direct lookup failed] No information found for the specified queries."],
+            "sources_gathered": [],
+        }
 
 def _select_relevant_queries(planned_queries: list[str], max_count: int = 5) -> list[str]:
     """Select first max_count queries from planned_queries for direct lookup."""
     return planned_queries[:max_count] if planned_queries else []
 
-def _execute_single_query_lookup(domain: str, topic: str, entity: str, attribute: str, configurable: Configuration, state: OverallState) -> dict:
-    """Fallback function to execute original single-query lookup."""
+def _execute_single_direct_lookup(domain: str, topic: str, entity: str, attribute: str, configurable: Configuration, state: OverallState, query_index: int = 0, log_prefix: str = "") -> tuple[list, str]:
+    """Execute a single direct lookup query and return sources and text.
+    
+    Args:
+        domain: Official domain to search (if available)
+        topic: Research topic/query to search for
+        entity: Entity name
+        attribute: Attribute to search for
+        configurable: Configuration object
+        state: Current state
+        query_index: Index of the query (for logging)
+        log_prefix: Prefix for log messages
+        
+    Returns:
+        Tuple of (sources, text)
+    """
     # Choose prompt based on whether we have an official domain
     if domain:
         formatted_prompt = direct_lookup_instructions.format(
@@ -1111,7 +1117,7 @@ def _execute_single_query_lookup(domain: str, topic: str, entity: str, attribute
             entity=entity,
             attribute=attribute,
         )
-        logger.info("[NEO_LOG] [direct_lookup] [fallback] search topic '%s' using official domain: %s", topic, domain)
+        logger.info("[NEO_LOG] [direct_lookup] %s search topic '%s' using official domain: %s", log_prefix, topic, domain)
     else:
         formatted_prompt = quick_lookup_fallback_instructions.format(
             current_date=get_current_date(),
@@ -1119,7 +1125,7 @@ def _execute_single_query_lookup(domain: str, topic: str, entity: str, attribute
             entity=entity,
             attribute=attribute,
         )
-        logger.info("[NEO_LOG] [direct_lookup] [fallback] search topic: '%s'", topic)
+        logger.info("[NEO_LOG] [direct_lookup] %s search topic: '%s'", log_prefix, topic)
     
     response = genai_client.models.generate_content(
         model=configurable.query_generator_model,
@@ -1130,13 +1136,8 @@ def _execute_single_query_lookup(domain: str, topic: str, entity: str, attribute
         },
     )
     
-    # Process the fallback response using the same logic
-    sources, text = _process_direct_lookup_response(response, state, 0, configurable)
-    
-    return {
-        "web_research_result": [text] if text else [],
-        "sources_gathered": sources,
-    }
+    # Process the response using the shared logic
+    return _process_direct_lookup_response(response, state, query_index, configurable)
 
 def _process_direct_lookup_response(response, state: OverallState, query_index: int, configurable: Configuration) -> tuple[list, str]:
     """Process a single direct lookup response and return sources and text."""
@@ -1224,7 +1225,7 @@ def finalize_answer(state: OverallState, config: RunnableConfig):
         Dictionary with state update, including running_summary key containing the formatted final summary with sources
     """
     configurable = Configuration.from_runnable_config(config)
-    reasoning_model = state.get("reasoning_model") or configurable.reflection_model
+    reasoning_model = configurable.thinking_model
 
     # Format the prompt
     current_date = get_current_date()
@@ -1268,7 +1269,7 @@ def generate_research_plan(state: OverallState, config: RunnableConfig) -> Overa
     configurable = Configuration.from_runnable_config(config)
     
     llm = ChatGoogleGenerativeAI(
-        model=configurable.reflection_model,
+        model=configurable.thinking_model,
         temperature=0.2,
         max_retries=2,
         api_key=os.getenv("GEMINI_API_KEY"),
@@ -1815,7 +1816,8 @@ def generate_query(state: OverallState, config: RunnableConfig) -> OverallState:
     # 构建返回状态
     response = {
         "current_queries": result.queries,
-        "search_query": result.queries
+        "search_query": result.queries,
+        "reasoning_model": configurable.query_generator_model,
     }
     
     # 如果有backlog，添加到状态中
@@ -1838,6 +1840,35 @@ def generate_query(state: OverallState, config: RunnableConfig) -> OverallState:
         logger.exception("[generate_query] Runtime params logging failed")
     
     return response
+
+def _extract_key_terms_query(query: str) -> str:
+    """从查询中提取关键词，生成更简洁的备选查询"""
+    try:
+        # 移除常见的连接词和修饰词
+        stop_words = {'的', '和', '与', '或', '但是', '然而', '因为', '所以', '关于', '对于', 'and', 'or', 'but', 'the', 'a', 'an', 'in', 'on', 'at', 'for', 'with', 'about'}
+        words = query.split()
+        key_terms = [w for w in words if w.lower() not in stop_words and len(w) > 1]
+        return ' '.join(key_terms[:4])  # 限制为前4个关键词
+    except Exception:
+        return query
+
+def _rephrase_query(query: str) -> str:
+    """重新表述查询，提供不同的搜索角度"""
+    try:
+        # 简单的重新表述策略
+        if '招投标' in query:
+            return query.replace('招投标', 'bidding tender')
+        elif 'bidding' in query.lower():
+            return query.replace('bidding', 'procurement')
+        elif '公司' in query:
+            return query.replace('公司', 'company corporation')
+        elif '技术' in query:
+            return query.replace('技术', 'technology tech')
+        else:
+            # 添加相关术语扩展
+            return f"{query} information details"
+    except Exception:
+        return query
 
 def route_after_generate_query(state: QueryGenerationState, config: RunnableConfig):
     """LangGraph node that sends the search queries to the web research node.
@@ -1894,7 +1925,24 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
                 primary_query = f"{primary_query} {suffix}".strip()
     except Exception:
         pass
-    secondary_query = original_query if translated_query else None
+    # 设计更合理的备选查询策略（可通过配置禁用）
+    secondary_query = None
+    if configurable.enable_secondary_query:
+        if translated_query:
+            # 如果有翻译，备选查询可以是：原始查询的关键词提取版本
+            secondary_query = _extract_key_terms_query(original_query)
+            logger.info("[NEO_LOG] [web_research] Secondary strategy: key terms from original '%s' -> '%s'", 
+                       original_query, secondary_query)
+        else:
+            # 如果没有翻译，备选查询可以是：重新表述的查询
+            secondary_query = _rephrase_query(original_query) if len(original_query.split()) > 2 else None
+            if secondary_query:
+                logger.info("[NEO_LOG] [web_research] Secondary strategy: rephrase '%s' -> '%s'", 
+                           original_query, secondary_query)
+            else:
+                logger.info("[NEO_LOG] [web_research] No secondary query - original too short: '%s'", original_query)
+    else:
+        logger.info("[NEO_LOG] [web_research] Secondary query disabled by configuration")
 
     def _run_and_extract(query_text: str, allow_url_context: bool = True):
         formatted = web_searcher_instructions.format(
@@ -1903,50 +1951,50 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
         )
         # logger.info("[NEO_LOG] [web_research] prompt: %s", formatted)
         tools = [{"google_search": {}}]
-        if allow_url_context:
-            tools = [{"url_context": {}}, {"google_search": {}}]
+        # 暂时禁用url_context以避免URL数量超限问题
+        # Google API的url_context工具会自动发现URL，无法通过提示词控制数量
+        # if allow_url_context:
+        #     tools = [{"url_context": {}}, {"google_search": {}}]
         # 调用模型并捕获异常；如 URL 超限/服务错误，降级重试（禁用 url_context）
+        api_start = time.time()
         try:
+            logger.debug("[NEO_LOG] [web_research] API call starting with tools: %s", [list(t.keys())[0] for t in tools])
+            # 构建API配置
+            api_config = {
+                "tools": tools,
+                "temperature": 0.1,
+            }
+            
             resp = genai_client.models.generate_content(
                 model=configurable.query_generator_model,
                 contents=formatted,
-                config={
-                    "tools": tools,
-                    "temperature": 0.1,
-                },
+                config=api_config,
             )
+            api_elapsed = time.time() - api_start
+            logger.debug("[NEO_LOG] [web_research] API call completed in %.2fs", api_elapsed)
         except Exception as e:
+            api_elapsed = time.time() - api_start
             msg = str(e)
-            try:
-                1 == 1
-                # logger.warning("[NEO_LOG] [web_research] primary call failed: %s", msg)
-            except Exception:
-                pass
-            # 针对 URL 超限或服务端错误，回退禁用 url_context 再试一次
-            if allow_url_context and ("exceeds the limit" in msg or "INVALID_ARGUMENT" in msg or "500" in msg or "unavailable" in msg.lower()):
-                try:
-                    resp = genai_client.models.generate_content(
-                        model=configurable.query_generator_model,
-                        contents=formatted,
-                        config={
-                            "tools": [{"google_search": {}}],
-                            "temperature": 0,
-                        },
-                    )
-                except Exception as e2:
-                    try:
-                        logger.error("[NEO_LOG] [web_research] fallback without url_context failed: %s", str(e2))
-                    except Exception:
-                        pass
-                    return [], "[web_search error suppressed] " + (msg or "")
-            else:
-                return [], "[web_search error suppressed] " + (msg or "")
+            logger.error("[NEO_LOG] [web_research] API call failed after %.2fs: %s", api_elapsed, msg)
+            # 详细分析错误类型
+            if "400" in msg or "Bad Request" in msg:
+                logger.warning("[NEO_LOG] [web_research] HTTP 400 detected - checking for rate limit or invalid params")
+            elif "429" in msg or "rate limit" in msg.lower():
+                logger.warning("[NEO_LOG] [web_research] Rate limit detected: %s", msg)
+            elif "timeout" in msg.lower():
+                logger.warning("[NEO_LOG] [web_research] Timeout detected: %s", msg)
+            elif "connection" in msg.lower():
+                logger.warning("[NEO_LOG] [web_research] Connection issue: %s", msg)
+            
+            # 直接返回错误，不再尝试回退（因为已经禁用了url_context）
+            return [], "[web_search error suppressed] " + (msg or "")
         # Prefer Google Search grounding when available; otherwise fallback to URL context metadata
         try:
             ch = resp.candidates[0].grounding_metadata.grounding_chunks
         except Exception:
             ch = []
 
+        # 根据 grounding_chunks 构建最终的数据，如果没有 grounding_chunks 则使用 URL context
         if ch:
             # Truncate grounding chunks to respect URL context limit
             limited_chunks = ch[:configurable.max_grounding_chunks]
@@ -1955,84 +2003,52 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
             base = resp.text or ""
             mod = insert_citation_markers(base, cits)
             src = [item for citation in cits for item in citation["segments"]]
-            try:
-                1 == 1
-                # grounded_list = [seg.get("value") for citation in cits for seg in citation["segments"]]
-                # logger.info("[NEO_LOG] grounding urls ---> %s", grounded_list)
-            except Exception:
-                pass
             return src, mod
         else:
-            # URL context fallback
-            urls = []
-            try:
-                url_meta = resp.candidates[0].url_context_metadata.url_metadata
-                for m in url_meta:
-                    status = getattr(m, "url_retrieval_status", None)
-                    if not status or "SUCCESS" in status:
-                        try:
-                            urls.append(getattr(m, "url", None) or getattr(m, "final_url", None))
-                        except Exception:
-                            pass
-                urls = [u for u in urls if u]
-            except Exception:
-                urls = []
-            logger.info("[NEO_LOG] [web_research] url_context retrieved URLs ---> %s", urls)
-
-            # Truncate URLs to respect tool limits
-            if len(urls) > configurable.max_urls_per_query:
-                urls = urls[:configurable.max_urls_per_query]
-
-            prefix = "https://vertexaisearch.cloud.google.com/id/"
-            resolved = {u: f"{prefix}{state.get('id', 0)}-{i}" for i, u in enumerate(urls)}
-            text_len = len(resp.text or "")
-            segments = []
-            for u in urls:
-                try:
-                    netloc = urlparse(u).netloc or u
-                    label = netloc.split(":")[0]
-                except Exception:
-                    label = u
-                segments.append({"label": label, "short_url": resolved[u], "value": u})
-            cits = []
-            if segments:
-                cits.append({"start_index": text_len, "end_index": text_len, "segments": segments})
+            # 没有grounding_chunks时，只返回文本内容（无引用）
             base = resp.text or ""
-            mod = insert_citation_markers(base, cits)
-            return segments, mod
+            logger.info("[NEO_LOG] [web_research] No grounding chunks, returning text only: %d chars", len(base))
+            return [], base
 
     # First attempt with primary (possibly translated) query
+    import time
+    start_time = time.time()
     try:
-        # logger.info("[NEO_LOG] [web_research] Attempting primary query: '%s'", primary_query)
+        logger.info("[NEO_LOG] [web_research] Starting primary query at %s: '%s'", time.strftime('%H:%M:%S'), primary_query)
         sources_gathered, modified_text = _run_and_extract(primary_query)
-        # logger.info("[NEO_LOG] [web_research] Primary query result: %d sources, %d chars", 
-        #            len(sources_gathered), len(modified_text))
+        elapsed = time.time() - start_time
+        logger.info("[NEO_LOG] [web_research] Primary query completed in %.2fs: %d sources, %d chars", 
+                   elapsed, len(sources_gathered), len(modified_text))
     except Exception as e:
         # 兜底：任何未预期异常都不应中断流程
-        try:
-            1 == 1
-            # logger.exception("[NEO_LOG] [web_research] Primary query unexpected error: %s", str(e))
-        except Exception:
-            pass
-        sources_gathered, modified_text = [], "[web_search error suppressed] " + str(e)
+        elapsed = time.time() - start_time
+        error_msg = str(e)
+        logger.error("[NEO_LOG] [web_research] Primary query failed after %.2fs: %s", elapsed, error_msg)
+        # 检查是否是API限流或网络问题
+        if "400" in error_msg or "Bad Request" in error_msg:
+            logger.warning("[NEO_LOG] [web_research] Detected HTTP 400 - possible API rate limit or invalid request")
+        elif "timeout" in error_msg.lower() or "connection" in error_msg.lower():
+            logger.warning("[NEO_LOG] [web_research] Detected network issue: %s", error_msg)
+        sources_gathered, modified_text = [], "[web_search error suppressed] " + error_msg
     # Retry with secondary (original) if no sources gathered
     if not sources_gathered and secondary_query:
-        try:
-            1 == 1
-            # logger.info("[NEO_LOG] [web_research] Retrying with secondary query: '%s'", secondary_query)
-        except Exception:
-            pass
+        retry_start = time.time()
+        logger.info("[NEO_LOG] [web_research] Starting secondary query at %s: '%s'", time.strftime('%H:%M:%S'), secondary_query)
         try:
             sources_gathered, modified_text = _run_and_extract(secondary_query)
-            # logger.info("[NEO_LOG] [web_research] Secondary query result: %d sources, %d chars", 
-            #            len(sources_gathered), len(modified_text))
+            retry_elapsed = time.time() - retry_start
+            logger.info("[NEO_LOG] [web_research] Secondary query completed in %.2fs: %d sources, %d chars", 
+                       retry_elapsed, len(sources_gathered), len(modified_text))
         except Exception as e:
-            try:
-                1 == 1
-                # logger.exception("[NEO_LOG] [web_research] Secondary query unexpected error: %s", str(e))
-            except Exception:
-                pass
-            sources_gathered, modified_text = [], "[web_search error suppressed] " + str(e)
+            retry_elapsed = time.time() - retry_start
+            error_msg = str(e)
+            logger.error("[NEO_LOG] [web_research] Secondary query failed after %.2fs: %s", retry_elapsed, error_msg)
+            # 检查是否是API限流或网络问题
+            if "400" in error_msg or "Bad Request" in error_msg:
+                logger.warning("[NEO_LOG] [web_research] Secondary query also hit HTTP 400 - likely API rate limit")
+            elif "timeout" in error_msg.lower() or "connection" in error_msg.lower():
+                logger.warning("[NEO_LOG] [web_research] Secondary query network issue: %s", error_msg)
+            sources_gathered, modified_text = [], "[web_search error suppressed] " + error_msg
 
     # 记录已派发查询，避免重复
     dispatched_out = [original_query] if original_query else []
@@ -2047,7 +2063,9 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
         "search_query": [state.get("search_query", "")],
         "web_research_result": [modified_text],
         "dispatched_queries": dispatched_out,
+        # "reasoning_model": configurable.query_generator_model,
     }
+
 # 重点方法 RAG
 def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
     """Mock RAG node: retrieve local markdown knowledge and produce web-compatible outputs.
@@ -2199,7 +2217,7 @@ def route_thinking_stage(state: OverallState):
     else:
         return "generate_query"
 
-# 重点方法 三阶段思考 Gemini 2.5 Flash-Lite 0.5
+# 重点方法 三阶段思考 Gemini 2.5 Flash-Lite 0.5 0.5 0.2
 def thinking_startup_stage(state: OverallState, config: RunnableConfig) -> OverallState:
     """Execute the startup thinking stage: 概述分解规划."""
     configurable = Configuration.from_runnable_config(config)
@@ -2245,12 +2263,13 @@ def thinking_startup_stage(state: OverallState, config: RunnableConfig) -> Overa
         "stage_name": "研究思考过程",
         "startup_thinking": thinking_record["content"], # .get("startup_thinking", ""),
         "middle_thinking": "",
-        "final_thinking": ""
+        "final_thinking": "",
     }
     
     preserved_state = {
         "thinking_process": thinking_record_updated,
         "thinking_stage": "middle",
+        "reasoning_model": configurable.query_generator_model,
     }
     startup_thinking_value = thinking_record_updated["startup_thinking"]
     logger.info("[NEO_LOG] [thinking_startup_stage] startup_thinking: %s", startup_thinking_value[:100])
@@ -2332,12 +2351,13 @@ def thinking_middle_stage(state: OverallState, config: RunnableConfig) -> Overal
         "stage_name": "研究思考过程",
         "startup_thinking": existing_thinking.get("startup_thinking", ""),
         "middle_thinking": thinking_record["content"].get("middle_thinking", ""),
-        "final_thinking": ""
+        "final_thinking": "",
     }
     
     preserved_state = {
         "thinking_process": thinking_record_updated,
         "thinking_stage": "finalization",
+        "reasoning_model": configurable.query_generator_model,
     }
     middle_thinking_value = thinking_record_updated["middle_thinking"]
     logger.info("[NEO_LOG] [thinking_middle_stage] middle_thinking: %s", middle_thinking_value[:100])
@@ -2360,7 +2380,7 @@ def thinking_finalization_stage(state: OverallState, config: RunnableConfig) -> 
     
     llm = ChatGoogleGenerativeAI(
         model=configurable.query_generator_model,
-        temperature=0.5,
+        temperature=0.2,
         max_retries=2,
         api_key=os.getenv("GEMINI_API_KEY"),
     )
@@ -2411,13 +2431,14 @@ def thinking_finalization_stage(state: OverallState, config: RunnableConfig) -> 
         "stage_name": "研究思考过程",
         "startup_thinking": existing_thinking.get("startup_thinking", ""),
         "middle_thinking": existing_thinking.get("middle_thinking", ""),
-        "final_thinking": thinking_record["content"].get("final_thinking", "")
+        "final_thinking": thinking_record["content"].get("final_thinking", ""),
     }
     logger.info("[NEO_LOG] [thinking_finalization_stage] Added finalization thinking record")
     
     # Preserve all critical state while adding thinking record
     preserved_state = {
         "thinking_process": thinking_record_updated,
+        "reasoning_model": configurable.query_generator_model,
     }
     final_thinking_value = thinking_record_updated.get("final_thinking", "")
     logger.info("[NEO_LOG] [thinking_finalization_stage] final_thinking: %s", final_thinking_value[:100])
@@ -2450,7 +2471,7 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
     configurable = Configuration.from_runnable_config(config)
     # Increment the research loop count and get the reasoning model
     state["research_loop_count"] = state.get("research_loop_count", 0) + 1
-    reasoning_model = state.get("reasoning_model", configurable.reflection_model)
+    reasoning_model = configurable.query_generator_model
 
     # Format the prompt
     current_date = get_current_date()
@@ -2761,6 +2782,7 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
         "knowledge_gap_history": new_gap_history,
         "objectives_progress_history": new_prog_history,
         "objective_rr_index": state.get("objective_rr_index"),
+        "reasoning_model": configurable.query_generator_model,
     }
 
 def route_after_reflection(state: OverallState, config: RunnableConfig):
@@ -2836,7 +2858,7 @@ def route_after_reflection(state: OverallState, config: RunnableConfig):
 def generate_enhanced_report(state: OverallState, config: RunnableConfig) -> OverallState:
     """Generate an enhanced structured report similar to Google DeepResearch."""
     configurable = Configuration.from_runnable_config(config)
-    reasoning_model = configurable.reflection_model # answer_model
+    reasoning_model = configurable.thinking_model # pro_model
     
     llm = ChatGoogleGenerativeAI(
         model=reasoning_model,
@@ -2941,6 +2963,7 @@ def generate_enhanced_report(state: OverallState, config: RunnableConfig) -> Ove
     return {
         "messages": [AIMessage(content=enhanced_content)],
         "sources_gathered": unique_sources,
+        "reasoning_model": configurable.thinking_model,
     }
 
 # TODO 没用上

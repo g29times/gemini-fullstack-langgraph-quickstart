@@ -39,7 +39,7 @@ async def test_full_rag_flow():
         # 模型配置
         query_generator_model="gemini-2.0-flash-lite",
         web_search_model="gemini-2.0-flash-lite",
-        reflection_model="gemini-2.0-flash-lite",
+        thinking_model="gemini-2.0-flash-lite",
         report_model="gemini-2.0-flash-lite"
     )
     

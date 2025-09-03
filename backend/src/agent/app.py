@@ -154,7 +154,7 @@ app.mount(
 #     )
 
 #     # Best-effort LLM synthesis (non-blocking if missing)
-#     model_for_answer = getattr(cfg, "answer_model", "models/gemini-2.5-flash-lite")
+#     model_for_answer = getattr(cfg, "pro_model", "models/gemini-2.5-flash-lite")
 #     answer = _gemini_quick_answer(q, hits, model_for_answer)
 
 #     return {

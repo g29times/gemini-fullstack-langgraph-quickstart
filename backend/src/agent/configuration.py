@@ -5,36 +5,72 @@ from typing import Any, Optional
 
 from langchain_core.runnables import RunnableConfig
 
+def _get_rag_endpoint() -> str:
+    """根据环境变量动态获取RAG REST端点URL。
+    
+    Returns:
+        str: 根据环境配置返回相应的API端点
+            - 本地环境: http://www-test.raritag.cn/intelligence-platform/bidProject/search
+            - test环境: http://113.98.240.54:8903/intelligence-platform/bidProject/search
+    """
+    environment = os.environ.get("ENVIRONMENT", "test").lower()
+    
+    if environment == "local":
+        return "http://www-test.raritag.cn/intelligence-platform/bidProject/search"
+    else:
+        # 默认使用test环境的配置
+        return "http://113.98.240.54:8903/intelligence-platform/bidProject/search"
 
 class Configuration(BaseModel):
     """The configuration for the agent."""
 
+    fast_lite_model: str = Field(
+        default="gemini-2.0-flash-lite",
+        metadata={
+            "description": "Our smallest and most cost effective model, built for at scale usage."
+        },
+    )
+
+    # 比较容易触发 503 服务故障
+    # general_model: str = Field(
+    #     default="gemini-2.0-flash",
+    #     metadata={
+    #         "description": "Our most balanced multimodal model with great performance across all tasks."
+    #     },
+    # )
+
     query_generator_model: str = Field(
         default="gemini-2.5-flash-lite",
         metadata={
-            "description": "The name of the language model to use for the agent's query generation."
+            "description": "Our smallest and most cost effective model, built for at scale usage."
         },
     )
 
-    reflection_model: str = Field(
+    thinking_model: str = Field(
         default="gemini-2.5-flash",
         metadata={
-            "description": "The name of the language model to use for the agent's reflection."
+            "description": "Our hybrid reasoning model, with a 1M token context window and thinking budgets."
         },
     )
 
-    answer_model: str = Field(
+    pro_model: str = Field(
         default="gemini-2.5-pro",
         metadata={
-            "description": "The name of the language model to use for the agent's answer."
+            "description": "Our most powerful reasoning model, which excels at coding and complex reasoning tasks."
         },
     )
 
-    # Parallel research controls
+    # Web search | Parallel research controls
     enable_parallel_research: bool = Field(
         default=True,
         metadata={
             "description": "Whether to dispatch multiple web_research tasks in parallel per loop."
+        },
+    )
+    enable_secondary_query: bool = Field(
+        default=True,
+        metadata={
+            "description": "Whether to enable secondary query retry when primary web search fails to find sources.",
         },
     )
     
@@ -104,11 +140,11 @@ class Configuration(BaseModel):
     # These can be overridden via env vars:
     #   EFFORT_LOW_COMPLETION_THRESHOLD, EFFORT_MEDIUM_COMPLETION_THRESHOLD, EFFORT_HIGH_COMPLETION_THRESHOLD
     effort_low_completion_threshold: float = Field(
-        default=0.3,
+        default=0.5,
         metadata={"description": "Early finalization completion threshold for low effort (0-1)."},
     )
     effort_medium_completion_threshold: float = Field(
-        default=0.6,
+        default=0.7,
         metadata={"description": "Early finalization completion threshold for medium effort (0-1)."},
     )
     effort_high_completion_threshold: float = Field(
@@ -156,6 +192,7 @@ class Configuration(BaseModel):
             "description": "Whether to deduplicate follow-up queries across history to avoid repetition.",
         },
     )
+    
 
     # RAG controls
     # LOCAL RAG Mock
@@ -193,7 +230,8 @@ class Configuration(BaseModel):
         },
     )
     rag_rest_endpoint: str | None = Field(
-        default="http://www-test.raritag.cn/intelligence-platform/bidProject/search", # http://mock-endpoint
+        default_factory=lambda: _get_rag_endpoint(),
+        # default="http://www-test.raritag.cn/intelligence-platform/bidProject/search", # http://mock-endpoint
         metadata={
             "description": "RAG REST endpoint URL. If empty, client will use local JSON mock.",
         },

@@ -219,8 +219,8 @@ multiple web_research nodes running in parallel
 ```python
 class Configuration(BaseModel):
     query_generator_model: str = "gemini-2.5-flash-lite"    # 速度优先
-    reflection_model: str = "gemini-2.5-flash"         # 平衡能力
-    answer_model: str = "gemini-2.5-pro"               # 质量保证
+    thinking_model: str = "gemini-2.5-flash"         # 平衡能力
+    pro_model: str = "gemini-2.5-pro"               # 质量保证
 ```
 
 **创新**：不同阶段使用最适合的模型，实现性能和成本的最优平衡。

@@ -128,8 +128,8 @@ def web_research(state: WebSearchState, config: RunnableConfig):
 ```python
 class Configuration(BaseModel):
     query_generator_model: str = "gemini-2.5-flash-lite"    # 快速查询生成
-    reflection_model: str = "gemini-2.5-flash"         # 中等推理能力
-    answer_model: str = "gemini-2.5-pro"               # 深度答案合成
+    thinking_model: str = "gemini-2.5-flash"         # 中等推理能力
+    pro_model: str = "gemini-2.5-pro"               # 深度答案合成
 ```
 
 **设计理念**：
