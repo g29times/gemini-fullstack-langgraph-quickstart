@@ -8,7 +8,8 @@
   target:low
     研究下犀照科技和Material Bank的业务相似性和商业潜力
     研究下深圳犀照科技和Material Bank的业务相似性和商业潜力
-    最近准备代表犀照科技在WaytoAGI 8.31的摆摊大会作为摊主出席，给我策划几个好方案
+    clarifi 最近准备作为摊主代表犀照科技出席WaytoAGI 8.31的摆摊大会，给我策划几个方案
+    我是一个室内设计公司想了解一下目前在珠三角地区有没有招标的室内设计项目
   target:mid
     Research Macaron AI founder team, business and tech
   target:high

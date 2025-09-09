@@ -5,17 +5,60 @@ from langchain_core.messages import AnyMessage, AIMessage, HumanMessage
 def get_research_topic(messages: List[AnyMessage]) -> str:
     """
     Get the research topic from the messages.
+    Enhanced to provide structured context for follow-up scenarios.
     """
-    # check if request has a history and combine the messages into a single string
+    if not messages:
+        return ""
+    
+    # For single message, return its content
     if len(messages) == 1:
-        research_topic = messages[-1].content
-    else:
-        research_topic = ""
-        for message in messages:
-            if isinstance(message, HumanMessage):
-                research_topic += f"User: {message.content}\n"
-            elif isinstance(message, AIMessage):
-                research_topic += f"Assistant: {message.content}\n"
+        return messages[-1].content
+    
+    # For multiple messages, check if this might be a follow-up scenario
+    # If the last message is from user and there are previous messages, 
+    # provide structured context: [原始问题][助手回复摘要][追问]
+    last_message = messages[-1]
+    if isinstance(last_message, HumanMessage):
+        # This looks like a follow-up question - build structured context
+        latest_question = last_message.content
+        
+        # Find the first user message (original question)
+        first_user_msg = None
+        for msg in messages:
+            if isinstance(msg, HumanMessage):
+                first_user_msg = msg
+                break
+        
+        if first_user_msg and first_user_msg != last_message:
+            # Find the assistant's response (usually the second-to-last or a recent AI message)
+            assistant_summary = ""
+            for msg in reversed(messages[:-1]):  # Exclude the latest user message
+                if isinstance(msg, AIMessage):
+                    # Extract a summary from the assistant's response
+                    content = msg.content
+                    if len(content) > 300:
+                        # Take the first 200 chars and last 100 chars for context
+                        assistant_summary = f"{content[:200]}...{content[-100:]}"
+                    else:
+                        assistant_summary = content
+                    break
+            
+            # Build structured context
+            if assistant_summary:
+                return f"**原始问题**: {first_user_msg.content}\n\n**助手回复摘要**: {assistant_summary}\n\n**用户追问**: {latest_question}"
+            else:
+                # Fallback if no assistant message found
+                return f"**原始问题**: {first_user_msg.content}\n\n**用户追问**: {latest_question}"
+        else:
+            return latest_question
+    
+    # Fallback: combine all messages (original behavior)
+    research_topic = ""
+    for message in messages:
+        if isinstance(message, HumanMessage):
+            research_topic += f"User: {message.content}\n"
+        elif isinstance(message, AIMessage):
+            research_topic += f"Assistant: {message.content}\n"
     return research_topic
 
 
@@ -73,6 +116,26 @@ def insert_citation_markers(text, citations_list):
         )
 
     return modified_text
+
+
+def truncate_content(content: str, max_length: int = 300) -> str:
+    """
+    Truncate content using smart strategy to reduce token consumption.
+    
+    Args:
+        content: The content to truncate
+        max_length: Maximum length threshold (default: 300)
+        
+    Returns:
+        str: Truncated content using "first 200 + ... + last 100" strategy for long content
+    """
+    if not content or len(content) <= max_length:
+        return content
+    
+    # For long content: take first 200 chars + "..." + last 100 chars
+    first_part = content[:200]
+    last_part = content[-100:]
+    return f"{first_part}...{last_part}"
 
 
 def normalize_query(query: str) -> str:

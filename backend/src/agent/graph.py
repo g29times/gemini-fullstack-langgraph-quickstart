@@ -34,7 +34,8 @@ from agent.utils import (
     get_research_topic,
     insert_citation_markers,
     resolve_urls,
-    normalize_query
+    normalize_query,
+    truncate_content
 )
 from agent.prompts import (
     query_writer_instructions,
@@ -374,8 +375,9 @@ def detect_follow_up(state: OverallState, config: RunnableConfig) -> OverallStat
             except (json.JSONDecodeError, AttributeError):
                 pass
     
-    # 检查是否有研究计划但未批准 - 这意味着我们应该跳过追问检测
-    if state.get("research_plan"):
+    # 检查是否有研究计划但未批准 - 只有在没有previous_report的情况下才跳过追问检测
+    # 如果有previous_report，说明已经完成过研究，这时的新消息可能是追问
+    if state.get("research_plan") and not state.get("previous_report"):
         return {"is_follow_up": False}
     
     # 如果消息太少，直接判定为非追问
@@ -399,11 +401,13 @@ def detect_follow_up(state: OverallState, config: RunnableConfig) -> OverallStat
     
     for i, msg in enumerate(messages):
         content = msg.content if hasattr(msg, 'content') else str(msg)
+        # 应用智能截断策略减少token消耗
+        truncated_content = truncate_content(content)
         role = "User" if hasattr(msg, 'type') and msg.type == "human" else "Assistant"
         if i == len(messages) - 1:
-            current_message = content
+            current_message = truncated_content
         else:
-            conversation_history += f"{role}: {content}\n\n"
+            conversation_history += f"{role}: {truncated_content}\n\n"
     
     # 如果没有对话历史，直接判定为非追问
     if not conversation_history.strip():
@@ -509,7 +513,7 @@ def classify_intent(state: OverallState, config: RunnableConfig) -> OverallState
     if is_follow_up and previous_report:
         prompt = enhanced_intent_classifier_instructions.format(
             research_topic=topic,
-            previous_report=previous_report[:1000], # Limit context size
+            previous_report=truncate_content(previous_report), # Apply smart truncation
             is_follow_up=is_follow_up
         )
     else:
@@ -530,6 +534,14 @@ def classify_intent(state: OverallState, config: RunnableConfig) -> OverallState
         payload.setdefault("confidence", 0.0)
         payload.setdefault("entity", None)
         payload.setdefault("attribute", None)
+        
+        # 基于confidence阈值判断needs_clarification，而不是依赖LLM输出
+        confidence = payload.get("confidence", 0.0)
+        needs_clarification = confidence < configurable.intent_confidence_threshold
+        payload["needs_clarification"] = needs_clarification
+        
+        logger.info("[NEO_LOG] [classify_intent] confidence=%.3f, threshold=%.3f, needs_clarification=%s", 
+                   confidence, configurable.intent_confidence_threshold, needs_clarification)
         logger.info("[NEO_LOG] [classify_intent] structured payload ===> %s", payload)
         return {"intent": payload}
     except Exception as e:
@@ -541,6 +553,7 @@ def classify_intent(state: OverallState, config: RunnableConfig) -> OverallState
                 "confidence": 0.0,
                 "entity": None,
                 "attribute": None,
+                "needs_clarification": True,  # 异常情况下默认需要澄清
             }
         }
 
@@ -553,7 +566,7 @@ def clarify_intent(state: OverallState, config: RunnableConfig) -> OverallState:
     3. Maximum clarification rounds reached
     4. User explicitly opts out
     """
-    logger.debug("[NEO_LOG] [clarify_intent] ===== CLARIFY_INTENT NODE CALLED =====")
+    logger.debug("[NEO_LOG] [意图澄清] ===== CLARIFY_INTENT NODE CALLED =====")
     configurable = Configuration.from_runnable_config(config)
     
     # Initialize clarification state if not present
@@ -614,21 +627,25 @@ def clarify_intent(state: OverallState, config: RunnableConfig) -> OverallState:
         result = structured_llm.invoke(prompt)
         clarification_result = result.model_dump() if hasattr(result, 'model_dump') else dict(result)
         
-        logger.info("[NEO_LOG] [clarify_intent] needs_clarification=%s confidence=%.2f missing_info=%s", 
-                   clarification_result.get("needs_clarification", False),
-                   clarification_result.get("confidence_score", 0.0),
+        # 基于confidence阈值判断needs_clarification，而不是依赖LLM输出
+        confidence_score = clarification_result.get("confidence_score", 0.0)
+        needs_clarification = confidence_score < configurable.intent_confidence_threshold
+        clarification_result["needs_clarification"] = needs_clarification
+        
+        logger.info("[NEO_LOG] [意图澄清] confidence=%.3f, threshold=%.3f, needs_clarification=%s, missing_info=%s", 
+                   confidence_score, configurable.intent_confidence_threshold, needs_clarification,
                    clarification_result.get("missing_info", []))
         
         # Update state with clarification results
         updated_state = {
             "clarification_count": clarification_count + 1,
-            "intent_clarified": not clarification_result.get("needs_clarification", True)
+            "intent_clarified": not needs_clarification
         }
         
         # If clarification is needed, prepare questions for user
         if clarification_result.get("needs_clarification", True) and clarification_count < max_rounds:
             questions = clarification_result.get("clarification_questions", [])
-            logger.info("[NEO_LOG] [clarify_intent] questions generated: %s", questions)
+            logger.info("[NEO_LOG] [意图澄清] questions generated: %s", questions)
             if questions:
                 # Format questions as a user-friendly message
                 question_text = "为了更好地帮助您，我需要了解一些额外信息：\n\n"
@@ -647,18 +664,18 @@ def clarify_intent(state: OverallState, config: RunnableConfig) -> OverallState:
                 clarification_msg = AIMessage(content=question_text)
                 updated_state["messages"] = [clarification_msg]
                 
-                logger.info("[NEO_LOG] [clarify_intent] Added clarification message to state.messages: %s", question_text[:100])
+                logger.info("[NEO_LOG] [意图澄清] Added clarification message to state.messages: %s", question_text[:100])
                 
                 # Store the clarification question in state for later use
                 updated_state["pending_clarification"] = question_text
                 updated_state["clarification_needed"] = True
                 
-                logger.info("[NEO_LOG] [clarify_intent] Raising NodeInterrupt with question text")
+                logger.info("[NEO_LOG] [意图澄清] Raising NodeInterrupt with question text")
                 
                 # Raise NodeInterrupt - the updated_state should be applied before the interrupt
                 raise NodeInterrupt(question_text)
             else:
-                logger.info("[NEO_LOG] [clarify_intent] no questions generated, skipping clarification")
+                logger.info("[NEO_LOG] [意图澄清] no questions generated, skipping clarification")
         
         # If intent is clarified or max rounds reached, update intent with gathered info
         if not clarification_result.get("needs_clarification", True) or clarification_count >= max_rounds:
@@ -685,8 +702,8 @@ def clarify_intent(state: OverallState, config: RunnableConfig) -> OverallState:
     except NodeInterrupt:
         # 检查是否启用HITL bypass
         configurable = Configuration.from_runnable_config(config)
-        if configurable.enable_hitl_bypass:
-            logger.info("[NEO_LOG] [clarify_intent] HITL bypass enabled, skipping clarification")
+        if configurable.enable_clarification_bypass:
+            logger.info("[NEO_LOG] [意图澄清] bypass enabled, skipping clarification")
             return {
                 "clarification_count": clarification_count + 1,
                 "intent_clarified": True
@@ -695,7 +712,7 @@ def clarify_intent(state: OverallState, config: RunnableConfig) -> OverallState:
             # 正常情况下让NodeInterrupt抛出
             raise
     except Exception as e:
-        logger.error("[NEO_LOG] [clarify_intent] clarification failed: %s", e)
+        logger.error("[NEO_LOG] [意图澄清] clarification failed: %s", e)
         # Fallback: mark as clarified to continue with research
         return {
             "clarification_count": clarification_count + 1,
@@ -1331,6 +1348,7 @@ def generate_research_plan(state: OverallState, config: RunnableConfig) -> Overa
     return {
         "research_plan": plan_dict,
         "plan_approved": False,
+        "reasoning_model": configurable.thinking_model,
     }
 
 # 重点方法 人类审核 New HITL and Enhanced Thinking Nodes
@@ -1482,17 +1500,19 @@ class QueryManager:
         """主查询生成入口"""
         follow_ups = self.state.get("follow_up_queries") or []
         planned_queries = self.state.get("research_plan", {}).get("planned_queries", [])
-        if len(planned_queries) > 10:
-            planned_queries = planned_queries[:10]
+        # 限制并行查询数量
+        # if len(planned_queries) > self.config.max_parallel_queries:
+        #     planned_queries = planned_queries[:self.config.max_parallel_queries]
         if follow_ups:
             return self._handle_followup_queries(follow_ups)
         elif planned_queries and not self.state.get("search_query"):
             logger.info("[QueryManager] Using planned queries")
-            return self._handle_planned_queries(planned_queries)
+            return self._handle_planned_queries(self.config.max_parallel_queries, planned_queries)
         else:
             logger.info("[QueryManager] Using initial queries")
             return self._handle_initial_queries()
     
+    # 生成follow-up查询
     def _handle_followup_queries(self, follow_ups: list) -> QueryResult:
         """处理follow-up查询拆解"""
         llm = ChatGoogleGenerativeAI(
@@ -1517,36 +1537,56 @@ class QueryManager:
         current_date = get_current_date()
         followups_text = "\n".join(f"• {q}" for q in follow_ups)
         
+        # 获取middle_thinking内容
+        thinking_process = self.state.get("thinking_process", {})
+        middle_thinking = thinking_process.get("middle_thinking", "") if thinking_process else ""
+        
+        # 如果没有middle_thinking，提供默认值
+        if not middle_thinking:
+            middle_thinking = "无深度分析内容"
+        
         formatted_prompt = followup_decomposer_instructions.format(
             research_topic=get_research_topic(self.state.get("messages", [])),
             knowledge_gap=self.state.get("knowledge_gap", ""),
             follow_ups=followups_text,
             current_date=current_date,
             number_queries=max_queries,
+            middle_thinking=middle_thinking,
         )
         
         queries = self._safe_invoke_llm(structured_llm, formatted_prompt, follow_ups)
         
         logger.info(
-            "[QueryManager] Follow-up decomposition: %d follow-ups -> %d queries (middle_stage=%s, target=%d)",
-            len(follow_ups), len(queries), is_middle_stage, max_queries,
+            "[QueryManager] Follow-up questions: %d follow-ups -> %d queries (middle_stage=%s, target=%d, middle_thinking_len=%d)",
+            len(follow_ups), len(queries), is_middle_stage, max_queries, len(middle_thinking),
         )
         
-        return QueryResult(queries=queries)
+        # 保留planned_backlog以便后续轮次继续使用
+        existing_backlog = self.state.get("planned_backlog", [])
+        
+        return QueryResult(
+            queries=queries,
+            backlog=existing_backlog,  # 传递现有的计划backlog
+            metadata={"source": "followup"}
+        )
     
-    def _handle_planned_queries(self, planned_queries: list) -> QueryResult:
+    # 使用计划查询
+    def _handle_planned_queries(self, max_parallel_queries: int, planned_queries: list) -> QueryResult:
         """搜索关键词"""
         logger.info("[QueryManager] Using %d planned queries from research plan", len(planned_queries))
         
-        # 保留完整计划，设置backlog供后续分批使用
-        sanitized_full = _sanitize_queries(planned_queries, None)  # 不截断，保留完整计划
+        # 完整计划，设置backlog供后续分批查询
+        sanitized_full = _sanitize_queries(planned_queries, None)
+        # 首轮查询限额
+        sanitized_planned = _sanitize_queries(planned_queries, max_parallel_queries)
         
         return QueryResult(
-            queries=sanitized_full,
-            backlog=sanitized_full,
+            queries=sanitized_planned,
+            backlog=sanitized_full,  # 保留完整计划作为backlog
             metadata={"source": "planned"}
         )
     
+    # 初始查询生成（暂时未使用，在第一轮问题生成时，直接继承了research_plan中的planned_queries）
     def _handle_initial_queries(self) -> QueryResult:
         """处理初始查询生成"""
         llm = ChatGoogleGenerativeAI(
@@ -1607,15 +1647,21 @@ class QueryManager:
             # 规范化比较，避免因大小写/多空格/标点造成重复
             norm_dispatched = set(normalize_query(q) for q in dispatched_list)
             
-            # 从当轮待选中剔除已派发
+            # 步骤1：从当轮待选中剔除已派发
             if queries:
                 queries = [q for q in queries if normalize_query(q) not in norm_dispatched]
             
-            # 追加backlog的剩余项（未派发）
+            # 步骤2：追加backlog的剩余项（未派发），但要控制总数量
             if backlog:
                 remaining = [q for q in backlog if normalize_query(q) not in norm_dispatched]
                 if remaining:
-                    queries = list(queries) + remaining
+                    # 步骤3：合并但控制总数量 计算还能添加多少查询（避免超出并发限制）
+                    current_count = len(queries)
+                    max_additional = max(0, self.config.max_parallel_queries - current_count)
+                    if max_additional > 0:
+                        queries = list(queries) + remaining[:max_additional]
+                        logger.info("[QueryManager] Added %d remaining queries from backlog (limit: %d)", 
+                                   min(len(remaining), max_additional), self.config.max_parallel_queries)
         except Exception:
             pass
         
@@ -1816,7 +1862,7 @@ def generate_query(state: OverallState, config: RunnableConfig) -> OverallState:
     # 构建返回状态
     response = {
         "current_queries": result.queries,
-        "search_query": result.queries,
+        # "search_query": result.queries,
         "reasoning_model": configurable.query_generator_model,
     }
     
@@ -2241,27 +2287,56 @@ def thinking_startup_stage(state: OverallState, config: RunnableConfig) -> Overa
     objectives_text = "\n".join(f"• {obj}" for obj in research_objectives) if research_objectives else "无明确目标"
     methodology_text = research_methodology if research_methodology else "无明确方法"
     
-    formatted_prompt = thinking_startup_instructions.format(
-        current_date=current_date,
-        research_topic=get_research_topic(state.get("messages", [])),
-        research_objectives=objectives_text,
-        research_methodology=methodology_text,
-    )
-    logger.info("[NEO_LOG] [thinking_startup_stage] prompt: %s", formatted_prompt)
+    # 检测是否为追问场景
+    is_follow_up = state.get("is_follow_up", False)
+    previous_report = state.get("previous_report", "")
     
-    # result = structured_llm.invoke(formatted_prompt)
-    thinking_record = {
-        "stage": "startup",
-        "timestamp": current_date,
-        "content": methodology_text # result.model_dump(),
-    }
-    # logger.info("[NEO_LOG] [thinking_startup_stage] thinking: %s", thinking_record)
+    # 构建上下文信息
+    context_info = ""
+    followup_tasks = ""
+    previous_context = ""
+    
+    if is_follow_up and previous_report:
+        context_info = "**注意**：这是一个追问场景，用户基于之前的研究报告提出了新的问题。"
+        followup_tasks = "\n3. **追问分析**：分析用户的追问意图，识别需要深入研究的特定方面\n4. **差异化策略**：基于已有研究成果，制定针对性的研究策略"
+        # 应用智能截断策略，避免prompt过长
+        previous_context = f"\n\n**之前的研究报告摘要**：\n{truncate_content(previous_report)}"
+        logger.info("[NEO_LOG] [初始思考] Follow-up scenario detected, enabling LLM thinking")
+        use_llm = True
+    else:
+        context_info = "这是一个新的研究任务。"
+        use_llm = False  # 新研究任务继续使用简化逻辑
+    
+    if use_llm:
+        # 追问场景：使用LLM进行真正的思考
+        formatted_prompt = thinking_startup_instructions.format(
+            current_date=current_date,
+            research_topic=get_research_topic(state.get("messages", [])),
+            research_objectives=objectives_text,
+            research_methodology=methodology_text,
+            context_info=context_info,
+            followup_tasks=followup_tasks,
+            previous_context=previous_context,
+        )
+        logger.info("[NEO_LOG] [初始思考] LLM prompt: %s", formatted_prompt[:200] + "...")
+        
+        try:
+            result = structured_llm.invoke(formatted_prompt)
+            startup_thinking_content = result.startup_thinking if hasattr(result, 'startup_thinking') else str(result)
+            logger.info("[NEO_LOG] [初始思考] LLM generated thinking: %s", startup_thinking_content[:100])
+        except Exception as e:
+            logger.warning("[NEO_LOG] [初始思考] LLM invocation failed: %s, using fallback", e)
+            startup_thinking_content = f"追问分析：{get_research_topic(state.get('messages', []))}"
+    else:
+        # 新研究任务：使用简化逻辑（保持原有性能）
+        startup_thinking_content = methodology_text
+        logger.info("[NEO_LOG] [初始思考] Using simplified logic for new research")
     
     # Create or update the single thinking record with startup content
     thinking_record_updated = {
-        "timestamp": thinking_record["timestamp"],
+        "timestamp": current_date,
         "stage_name": "研究思考过程",
-        "startup_thinking": thinking_record["content"], # .get("startup_thinking", ""),
+        "startup_thinking": startup_thinking_content,
         "middle_thinking": "",
         "final_thinking": "",
     }
@@ -2271,8 +2346,8 @@ def thinking_startup_stage(state: OverallState, config: RunnableConfig) -> Overa
         "thinking_stage": "middle",
         "reasoning_model": configurable.query_generator_model,
     }
-    startup_thinking_value = thinking_record_updated["startup_thinking"]
-    logger.info("[NEO_LOG] [thinking_startup_stage] startup_thinking: %s", startup_thinking_value[:100])
+    
+    logger.info("[NEO_LOG] [初始思考] startup_thinking: %s", startup_thinking_content[:100])
     
     # Preserve core state fields (移除不常用的历史记录)
     for key in ["research_plan", "objectives_progress", "overall_completion", "research_loop_count", 
@@ -2280,8 +2355,6 @@ def thinking_startup_stage(state: OverallState, config: RunnableConfig) -> Overa
         if key in state:
             preserved_state[key] = state[key]
 
-    # logger.info("[NEO_LOG] [thinking_startup_stage] State: %s", preserved_state)
-    
     return preserved_state
 
 def thinking_middle_stage(state: OverallState, config: RunnableConfig) -> OverallState:
@@ -2768,19 +2841,23 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
             logger.debug("[NEO_LOG] [reflection] Returning followups: %s", [f[:80] + "..." if len(f) > 80 else f for f in follow_up_queries[:2]])
     except Exception:
         pass
-
+    
+    effort = _infer_effort(state, configurable)
+    completion_threshold = _effort_completion_threshold(configurable, effort)
     return {
         # None-safe extraction to avoid AttributeError when result is None
+        "effort": effort,
+        "completion_threshold": completion_threshold,
+        "overall_completion": overall_completion,
         "is_sufficient": bool(getattr(result, "is_sufficient", False)),
         "knowledge_gap": (getattr(result, "knowledge_gap", "") or ""),
+        "knowledge_gap_history": new_gap_history,
         "follow_up_queries": follow_up_queries,
+        "followups_history": new_followups_history,
         "objectives_progress": merged_prog,
-        "overall_completion": overall_completion,
+        "objectives_progress_history": new_prog_history,
         "research_loop_count": state["research_loop_count"],
         "number_of_ran_queries": len(state.get("search_query") or []),
-        "followups_history": new_followups_history,
-        "knowledge_gap_history": new_gap_history,
-        "objectives_progress_history": new_prog_history,
         "objective_rr_index": state.get("objective_rr_index"),
         "reasoning_model": configurable.query_generator_model,
     }
@@ -2964,6 +3041,7 @@ def generate_enhanced_report(state: OverallState, config: RunnableConfig) -> Ove
         "messages": [AIMessage(content=enhanced_content)],
         "sources_gathered": unique_sources,
         "reasoning_model": configurable.thinking_model,
+        "previous_report": result.content,  # 设置previous_report以支持追问检测
     }
 
 # TODO 没用上

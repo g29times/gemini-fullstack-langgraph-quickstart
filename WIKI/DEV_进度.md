@@ -66,11 +66,14 @@ _norm()
 
 
 # TODO
-    web_research_result 全链路测试
+    全链路测试
+    全链路开发backup
     核心：
+      APIKEY替换
       0. 全链路上下文感知 而不是割裂的 每节点独立提示词
       1. 搜索、汇总能力提升
       2. 记忆算法研究
+      增量数据后面整体设计（目前未保存记录 无法判断是否是增量）
     BUG
       可能存在多轮clarify_intent的情况 需要测试
       部分情况（如低端模型，reflection未推进进度导致）循环过多报错，"Recursion limit of 25 reached without hitting a stop condition. You can increase the limit by setting the `recursion_limit` config key. 

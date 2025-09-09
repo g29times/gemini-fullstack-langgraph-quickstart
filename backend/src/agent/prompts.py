@@ -7,7 +7,7 @@ def get_current_date():
 
 
 
-# 快速生成查询 生成问题 generate_query | Gemini 2.5 Flash-Lite 0.2
+# 快速生成初始查询 generate_query | Gemini 2.5 Flash-Lite 0.2
 query_writer_instructions = """Generate diverse, atomic web search queries for an automated research tool.
 
 Rules:
@@ -27,7 +27,7 @@ Output JSON:
 Context: {research_topic}"""
 
 
-# followup_decomposer | Gemini 2.5 Flash-Lite (跟进问题拆解为可执行关键词)
+# 快速生成跟进查询 generate_query | Gemini 2.5 Flash-Lite (跟进问题拆解为可执行关键词)
 followup_decomposer_instructions = """Transform high-level follow-up questions into executable, keyword-level queries.
 
 Inputs:
@@ -35,9 +35,11 @@ Inputs:
 - Knowledge Gap: {knowledge_gap}
 - Follow-ups (verbatim):\n{follow_ups}
 - Current Date: {current_date}
+- Middle Stage Analysis: {middle_thinking}
 
 Rules:
 - Directly target the Knowledge Gap; if identity is ambiguous, FIRST do disambiguation (canonical name/aliases/geography/industry/registration IDs).
+- **CRITICAL**: Pay close attention to the Middle Stage Analysis which contains deep insights and specific keyword suggestions. Incorporate these suggestions into your query generation.
 - Prefer concise keyword-style queries; keep local proper nouns in original script; add cross-lingual variants when helpful.
 - Atomic only: one intent per query; never combine entities (avoid "vs/VS"); for comparisons, use per-entity queries and a separate metric query.
 - Keep the canonical entity string verbatim in quotes; add aliases/transliterations as OR variants.
@@ -47,7 +49,7 @@ Rules:
 
 Output JSON:
 {{
-  "rationale": "Why these queries close the gap",
+  "rationale": "Why these queries close the gap (referencing middle stage insights)",
   "query": ["query1", "query2", "..."]
 }}
 """
@@ -178,7 +180,7 @@ Instructions:
   * **Location Element**: Is the geographic location clearly defined (especially for weather, traffic, or local service queries)?
   * **Subject/Entity Element**: Is the subject of the query clearly identified (company, product, person, etc.)?
   * **Event/Attribute Element**: Is the specific event or attribute being asked about explicit?
-- **Clarification Requirement Assessment**: If any key element is missing, set `needs_clarification` to true and list the missing elements in `missing_elements`.
+- **Missing Elements Assessment**: If any key element is missing, list them in `missing_elements` and provide reasoning in `clarification_reason`.
 - Provide a confidence score between 0 and 1.
 
 Examples:
@@ -198,7 +200,6 @@ Output Format (JSON):
   "confidence": number,
   "entity": string | null,
   "attribute": string | null,
-  "needs_clarification": boolean,
   "missing_elements": ["time", "location", "subject", "event"] | [],
   "clarification_reason": string | null
 }}
@@ -226,7 +227,7 @@ Instructions:
   * **Location Element**: Is the geographic location clearly defined (especially for weather, traffic, or local service queries)?
   * **Subject/Entity Element**: Is the subject of the query clearly identified (company, product, person, etc.)?
   * **Event/Attribute Element**: Is the specific event or attribute being asked about explicit?
-- **Clarification Requirement Assessment**: If any key element is missing, set `needs_clarification` to true and list the missing elements in `missing_elements`.
+- **Missing Elements Assessment**: If any key element is missing, list them in `missing_elements` and provide reasoning in `clarification_reason`.
 - Provide a confidence score between 0 and 1.
 
 Previous Research Context:
@@ -234,6 +235,7 @@ Previous Research Context:
 
 Follow-up Question:
 {research_topic}
+Is Follow-up: {is_follow_up}
 
 Output Format (JSON):
 {{
@@ -242,7 +244,6 @@ Output Format (JSON):
   "confidence": number,
   "entity": string | null,
   "attribute": string | null,
-  "needs_clarification": boolean,
   "missing_elements": ["time", "location", "subject", "event"] | [],
   "clarification_reason": string | null
 }}
@@ -355,13 +356,15 @@ follow_up_instructions = """你是一个专业的研究助手。
 回答格式：
 - can_answer_directly: true/false
 - direct_answer: 如果可以直接回答，提供答案，保持与用户相同的语言。（但对于特定领域，必要时可以结合英语等专业术语）
-- needs_research: true/false  
+- needs_research: true/false
 - research_queries: 如果需要研究，提供具体的搜索查询列表，保持与研究报告相同的语言（指英文、中文等）。
 """
 
 
 # 意图澄清 clarify_intent | Gemini 2.5 Flash-Lite (多轮对话澄清用户意图)
-intent_clarification_instructions = """你是一个全球多语种智能助手，专门帮助澄清用户的模糊查询意图。
+intent_clarification_instructions = """你是一个全球多语种智能助手，帮助澄清用户的模糊查询意图，使用与用户相同的语言进行提问。
+
+当前日期：{current_date}
 
 当前对话历史：
 {conversation_history}
@@ -369,18 +372,16 @@ intent_clarification_instructions = """你是一个全球多语种智能助手�
 用户最新消息：{user_message}
 
 当前识别状态：
-- 意图标签：{current_intent_label}
-- 置信度：{current_confidence}
 - 识别实体：{current_entity}
 - 关注属性：{current_attribute}
 
-任务：分析用户查询是否包含足够信息进行准确的意图识别和后续处理。
+任务：分析用户消息是否包含足够信息进行后续处理。
 
 判断标准：
 1. **信息充足** - 用户身份明确，查询目标具体，可以直接进行搜索或研究
-2. **信息不足** - 缺少关键信息（如用户身份、具体需求、时间范围等）
+2. **信息不足** - 缺少关键信息（如用户身份、具体需求、时间范围、事件背景、机构名称等不清晰）
 
-如果信息不足，生成1-2个澄清问题，帮助用户提供更多细节。
+如果信息不足，在（Who What Where When Why How）等维度中选择1-3个生成澄清问题，帮助用户提供更多细节。
 
 输出JSON格式：
 {{
@@ -393,15 +394,19 @@ intent_clarification_instructions = """你是一个全球多语种智能助手�
   "reasoning": "判断理由"
 }}
 
-澄清问题示例：
-- "请问您是哪家公司或机构？这样我可以为您推荐更相关的项目机会。"
-- "您主要关注哪个行业或领域的项目？比如建筑、IT、制造等。"
-- "您希望了解最近多长时间内的项目信息？比如最近3个月、半年等。"
-- "您的公司主要提供什么类型的服务或产品？"
-- "请问您想了解哪个城市或地区的天气？比如北京、上海、深圳等。"
-- "您需要查询哪家公司或产品的具体信息？请提供准确的名称。"
+例如：用户问：“最近犀照科技发展动态如何？”
+这里信息不足在于：尽管可以通过用户语言（中文）推断犀照科技可能是一家中国企业，但是无法确定是哪个城市的，
+所以最好能问清犀照科技的全名或注册地址。-> "请问您是否能提供犀照科技的全称或注册地址？"
+如果用户询问的是某种事件，你必须弄清楚事件发生的时间、地点、人物、背景等信息。
 
-当前日期：{current_date}"""
+澄清问题示例：
+- "请问您是否能提供该公司的全称或注册地址？"（Who）
+- "您需要查询哪款产品的具体信息？请提供准确的名称。"（What）
+- "您主要关注哪个行业或领域？比如建筑、IT、制造等。"（What）
+- "请问您说的8.31指的是8月31日吗？"（When）
+- "您希望了解最近多长时间内的信息？比如最近3个月、半年等。"（When）
+- "请问您想了解哪个城市或地区的天气？比如北京、上海、深圳等。"（Where）
+"""
 
 
 # answer_simple_fact | Gemini 2.5 Flash-Lite (快速事实应答) 0.5
@@ -425,43 +430,47 @@ research_plan_instructions = """你是一位专业的全球化 多语种 研究�
 当前日期：{current_date}
 你将基于研究主题，制定一个详细的研究计划。
 
-指导原则：
-- 任务1：分析研究主题，制定1~5个清晰的研究目标
-- 任务2：规划具体的研究方法论
-- 任务3：生成1~8个与研究主题紧密相关的查询关键词或短语（适合搜索引擎）
+研究主题：{research_topic}
+
+任务：
+- 任务1：research_objectives 理解并分析研究主题，制定1~5个清晰的研究目标 
+- 任务2：research_methodology 规划具体的研究方法或路径 
+- 任务3：planned_queries 生成1~10个与研究主题相关的，适合搜索引擎的查询关键词或短语 
+
+任务指导：
 - 要求：语言：编写 research_objectives 和 research_methodology 时，保持与研究主题相同的语言（主题是英文就用英文、主题是中文就用中文等，但保留专业术语）
-- 要求：语言：编写 planned_queries 时，为了确保搜索引擎的召回效果，应尽可能的混合使用多种语言（英、中、日等），生成多样化的关键搜索词
-- 要求：planned_queries 列表中每一项必须是独立的“原子查询”（一条查询只表达一个主体/一个意图）。严禁在一条查询里合并多个主体名称，若需要比较不同主体，在独立拆分每个主体后，额外增加一条进行比较的查询，（如 ["A", "B", "比较'A'与'B'..." ]）。
-- 要求：对于你不知道或不确定的主体，一定要弄清楚主体的时间属性和空间属性，防止出现重名、过期、误判等错误。可以酌情扩展（Who What Where When Why How）等信息，确保不重不漏。
-  - 例如对于商业实体，要弄清该商业实体的经营地、注册地是什么，主营业务是什么，什么时间注册的，是否正常营业？
-  - 对于历史事件，要弄清该事件发生的时间、地点、人物、原因、结果、影响等信息。
-  - 对于人物，要弄清该人物的年代、活动地点和时间、主要事迹等信息。
-  - 对于物体，要弄清该物体的产地、材质、用途等信息。
-  - 对于概念、理论、虚拟物，要弄清该主题的起源、发展、影响等信息。
-- 技巧：倒金字塔式递进构词法，例如：用户希望研究主题：“研究下 某地 某科技公司A发展前景”，可以先搜索"公司A名称" -> "地名 公司A名称" -> "地名 公司A名称 主营业务" -> 再进一步发散到科技等关键词 -> 用多语言进一步发散
-- 技巧：对于中国企业信息，要重点关注“天眼查”，“企查查”，“爱企查”三个企业分析平台，其他国家的也类似的使用当地的信息平台
+- 要求：语言：编写 planned_queries 时，面向搜索引擎优化，根据主题的文化背景，适当混合多种语言，生成多样化的关键搜索词（主题语言占80% + 英、中、法、日等，根据主题文化背景 可占20%）
+  - 主体： 人物、组织、事件、物体、概念、理论、虚拟物等
+  - 原子性： planned_queries 应体现主体的“原子性”（一个查询只包含一个主体/意图）。
+  - 围绕主体扩展搜索维度，弄清主体的空间属性和时间属性，防止出现重名、过期等错误。可以酌情扩展（Who What Where When Why How）等维度，确保不重不漏。
+    - 例如对于商业实体，经营地、注册地是什么，主营业务是什么，什么时间注册的，是否正常营业？
+    - 对于历史事件，该事件发生的时间、地点、人物、原因、结果、影响等信息。
+    - 对于人物，该人物的年代、活动地点和时间、事迹等信息。
+    - 对于物体，该物体的产地、材质、用途等信息。
+    - 对于概念、理论、虚拟物，其起源、发展、影响等信息。
+  - 技巧：倒金字塔式递进构词法，例如主题：“研究下 某地 某科技公司A发展前景”，可以依次构造"公司A名称" -> "地名 公司A名称" -> "地名 公司A名称 主营业务" -> "地名 公司A名称 主营业务 科技板块" -> 多语言进一步发散
+  - 技巧：对于中国企业信息，要重点参考“天眼查”，“企查查”，“爱企查”三个企业分析平台，其他国家的研究主题也可类似的使用当地的信息平台
 
 输出格式（JSON）：
 {{
     "research_objectives": ["目标1", "目标2", "..."],
-    "research_methodology": "详细的研究方法、步骤",
+    "research_methodology": "研究方法、步骤",
     "planned_queries": ["查询1", "查询2", "..."]
 }}
 
 planned_queries 正例：
-  研究主题：“最近准备代表犀照科技在WaytoAGI 8.31的摆摊大会作为摊主出席，给我策划几个好方案”
-  "planned_queries": ["犀照科技", "深圳 犀照科技", "WaytoAGI", "WaytoAGI 8.31", "WaytoAGI 摆摊大会", "WaytoAGI 参展商", "科技展会互动方案", "AI公司展台设计", "..."]
-（良好原因：按照原子化很好的拆解了不同主体“犀照科技”和“WaytoAGI”，并进行了倒金字塔式拓展，关注了时间、地点，有利于搜索到关键信息）
+  研究主题：“最近准备代表深圳犀照科技在8月31号WaytoAGI的摆摊大会作为摊主出席，给我策划几个方案”
+  "planned_queries": ["犀照科技", "深圳 犀照科技", "WaytoAGI", "WaytoAGI 8-31", "WaytoAGI 摆摊大会", "AI公司展台设计", "..."]
+（良好原因：按照原子化拆解了不同主体“犀照科技”和“WaytoAGI”，并进行了倒金字塔式拓展，关注了时间、地点，有利于搜索到关键信息）
 
 planned_queries 反例：
-  研究主题：“最近这个 Context Engineering 的说法很流行，深入研究下他和模型记忆之间（如Mem0, MIRIX）的关系和研究进展。”
+  研究主题：“深入研究下Context Engineering和模型记忆之间（如Mem0, MIRIX）的关系和研究进展”
   "planned_queries": [
-    "Context Engineering 模型记忆 关系 研究", （不良原因：两个不同主题“Context Engineering”和“模型记忆”，且中英文混在同一个查询中，容易导致搜索引擎不返回有效结果）
-    "大型语言模型 上下文工程 记忆机制", （不良原因：同一主体“大型语言模型”的两个不同主题“上下文工程”和“记忆机制”，混在同一个查询中）
-    "Mem0 MIRIX engineering vs model-centric memory"（不良原因：两种不同技术“Mem0”和“MIRIX”混在同一个查询中）
+    "Context Engineering 模型记忆 关系 研究", （不良原因：两个不同研究课题“Context Engineering”和“模型记忆”未拆分，可能导致搜索引擎无法返回有效结果）
+    "Mem0 MIRIX engineering vs model-centric memory"（不良原因：两种不同技术主体“Mem0”和“MIRIX”未拆分）
+    "大型语言模型 上下文工程 记忆机制", （不良原因：大型语言模型的两个不同子主题“上下文工程”和“记忆机制”未拆分）
   ]
-
-研究主题：{research_topic}
+  改进建议：["Context Engineering", "模型记忆", "Mem0", "MIRIX", "大型语言模型 上下文工程", "大型语言模型 记忆机制"]
 """
 
 
@@ -471,22 +480,26 @@ planned_queries 反例：
     # "priorities": ["优先级1", "优先级2", "..."],
     # "next_actions": ["下一步行动1", "下一步行动2", "..."]
 thinking_startup_instructions = """你正处于研究的起步阶段，
-请围绕研究主题，参考研究目标和研究方法，进行思考。
+请围绕研究主题，参考研究目标和研究方法，进行思考。保持与研究主题相同的语言。
+
+{context_info}
 
 任务：
 1. **分解**：将复杂主题分解为子主题和子研究方向
 2. **规划**：细化主题和研究方向的优先级或行动步骤
+{followup_tasks}
 
 输出格式（JSON）：
 {{
     "stage_name": "startup_thinking",
-    "startup_thinking": "研究的初步思考"
+    "startup_thinking": "初步思考和分析"
 }}
 
+当前日期：{current_date}
 研究主题：{research_topic}
 研究目标：{research_objectives}
 研究方法：{research_methodology}
-当前日期：{current_date}
+{previous_context}
 """
 
 # thinking_middle_stage | Gemini 2.5 Flash (流程驱动深化) 0.5
@@ -496,14 +509,21 @@ thinking_startup_instructions = """你正处于研究的起步阶段，
     # "areas_for_deepening": ["深化领域1", "深化领域2", "..."],
     # "next_actions": ["下一步行动1", "下一步行动2", "..."]
 thinking_middle_instructions = """你正处于研究的中间阶段，
-请围绕研究主题，参考研究目标和研究方法以及当前研究成果，进行深入思考。
+请围绕研究主题，参考研究目标和研究方法以及当前研究成果，进行深入思考。保持与研究主题相同的语言。
+由于信息和数据收集/研究成果来自于搜索引擎，可能有不准确的数据。
 
 任务：
-1. **梳理**：理解当前数据收集/研究成果中不同信息源的内容，
-  分辨真伪和有效性，分析、筛选和整理有价值的数据，修复或删减无效的数据
-  对于招投标数据，以markdown表格的格式输出“项目名，截止时间，项目链接”
-  对于其他数据，以合适的markdown格式输出
-2. **深化**：从信息中提取关键洞察和发现，识别需要进一步探索的领域，如果没有有效信息，则需要考虑调整下一步的行动方向
+1. **数据整理**：
+  a. **数据清洗整理**：整理并清洗信息和数据收集/研究成果。
+    * 数据有效性：分辨数据真伪，分析、筛选和整理有价值的数据，识别、标记、删减错误或无关的数据。
+      * 实体信息确认：对出现的实体进行信息确认。重点关注实体名称、时间和地点维度，确保核心研究对象名称准确，时间有效，地点准确。
+      * 实体关联性：对于任何声称的关联性，务必有明确的、可验证的证据支撑。如果证据不足，则明确指出无法确认关联或仅为推测。
+      * 例如，研究主题是“帮我查询一下犀照科技的AI研究进展”，主题中，时间、地点不明，而数据中出现“深圳犀照科技”，“杭州犀照科技”，你综合数据后发现，深圳犀照科技有AI业务，而杭州犀照科技则是与本研究无关的噪声数据（搜索引擎结果偏差），反之，如果现有数据不足以推断主题对应的实体，则要明确标记出数据缺口。
+    * 数据完整性与准确性：检查数据的完整性和准确性，对于不完整或不准确、不确定的数据，给出明显的标记。
+    * 数据一致性：检查多个数据源的数据一致性，采用更高可信度的来源，将研究主题的语言国的数据作为主要数据来源，其他语种的数据可作为参考
+  b. **格式化输出**：
+     * 将数据以合适的markdown格式输出
+2. **深化思考**：从信息中发现关键洞察，识别需要进一步探索的领域，如果没有有效信息，则需要考虑调整下一步的行动方向
 
 输出格式（JSON）：
 {{
@@ -511,11 +531,11 @@ thinking_middle_instructions = """你正处于研究的中间阶段，
     "middle_thinking": "中间阶段的思考"
 }}
 
+当前日期：{current_date}
 研究主题：{research_topic}
 研究目标：{research_objectives}
 研究方法：{research_methodology}
-当前日期：{current_date}
-当前数据收集/研究成果：
+信息和数据收集/研究成果：
 {summaries}
 """
 
@@ -528,20 +548,23 @@ thinking_middle_instructions = """你正处于研究的中间阶段，
   # 已收集的洞察：
   # {insights}
 thinking_finalization_instructions = """你正处于研究的收尾阶段，
-请围绕研究主题，参考研究目标和研究方法以及当前研究成果，进行最后的整理和思考。
+请围绕研究主题，参考研究目标和研究方法以及当前研究成果，进行最后的整理和思考。保持与研究主题相同的语言。
+由于信息和数据收集/研究成果来自于搜索引擎，可能有不准确的数据。
 
 任务：
-1. **实体分辨与数据最终整理**：
-  a. **实体识别与关联性最终确认**：对所有识别出的商业实体进行最终确认。确保核心研究对象、有明确证据支持的关联实体与名称相似但无实际关联的独立实体之间界限清晰。对于任何声称的关联性，务必有明确的、可验证的证据支撑。如果证据不足，则明确指出无法确认关联或仅为推测。
-  b. **数据清洗与有效性审查**：在此基础上，整理数据、信息、知识体系。分辨真伪和有效性，分析、筛选和整理有价值的数据，**彻底修复或删减错误关联或无关的实体数据**。
-  c. **完整性与准确性检查**：检查数据的完整性和准确性，以及语言的一致性（将与研究主题相同的语言国家的数据作为主要数据，备注其他语种的数据可作为参考）。
-  d. **格式化输出**：
-     *   对于招投标数据，以markdown表格的格式输出“项目名，截止时间，项目链接”
+1. **数据整理**：
+  a. **数据清洗整理**：整理并清洗信息和数据收集/研究成果。
+    * 数据有效性：分辨数据真伪，分析、筛选和整理有价值的数据，识别、标记、删减错误或无关的数据。
+      * 实体信息确认：对出现的实体进行信息确认。重点关注实体名称、时间和地点维度，确保核心研究对象名称准确，时间有效，地点准确。
+      * 信息关联：对于任何潜在的关联性，务必有明确的、可验证的证据支撑。如果证据不足，则需指出无法确认关联或仅为推测。
+      * 例如，研究主题是“帮我查询一下犀照科技的AI研究进展”，主题中，时间、地点不明，而数据中出现“深圳犀照科技”，“杭州犀照科技”，你综合数据后发现，深圳犀照科技有AI业务，而杭州犀照科技则是与本研究无关的噪声数据（搜索引擎结果偏差），反之，如果现有数据不足以完成主题研究，则要明确提及数据缺失。
+    * 数据完整性与准确性：检查数据的完整性和准确性，对于不完整或不准确、不确定的数据，给出明显的标记。
+    * 数据一致性：检查多个数据源的数据一致性，采用更高可信度的来源，将研究主题的语言国的数据作为主要数据来源，其他语种的数据可作为参考
+  b. **格式化输出**：
+     *   如果主题与招投标相关且获取到招投标数据，以markdown表格输出“项目名，截止时间，项目链接”，否则忽略此项
      *   对于其他数据，以合适的markdown格式输出
-     *   如果表格中的数据数量超过10个，只展示前10个数据
-2. **总结**：综合所有经过实体分辨和验证的研究发现，进行总结性思考。
-
-整理场景
+     *   默认如果表格中的数据数量超过20个，只展示前20个数据，除非研究主题明确要求展示全部数据
+2. **知识构建与总结**：综合所有研究发现，进行简短总结。
 
 输出格式（JSON）：
 {{
@@ -549,62 +572,58 @@ thinking_finalization_instructions = """你正处于研究的收尾阶段，
     "final_thinking": "最终的思考内容"
 }}
 
+当前日期：{current_date}
 研究主题：{research_topic}
 研究目标：{research_objectives}
 研究方法：{research_methodology}
-当前日期：{current_date}
-当前数据收集/研究成果：
+信息和数据收集/研究成果：
 {summaries}
 """
 
 # generate_enhanced_report | Gemini 2.5 Pro/Flash (高质量报告生成) 0.5
 # 报告大纲：{report_outline}
-enhanced_report_instructions = """你是一个研究专家，你会结合研究主题和关键信息生成一份高质量的研究报告。
+enhanced_report_instructions = """你是一个研究专家，你会结合研究主题和资料数据/信息生成一份高质量的回答或研究报告。
 
 # 要求
-1. 使用与研究主题相同的语言（英文、中文等）生成报告。
+1. 使用与研究主题相同的语言（指英文、中文等）生成报告。
 2. 不要做语气类的、应答类的陈述，如“好的，下面是我为您生成的一份报告”等，直接输出报告。
-3. 如果关键信息不足以生成有意义的报告，则用简洁友好的语言告知用户：“针对您的问题，我能收集到的信息不足，无法为您生成报告”的意思，但表述可以友好、灵活一些。
-4. **实体分辨与报告呈现**：
-   * 报告中必须清晰地区分**核心研究实体**、**有明确证据支持的关联实体**，以及**名称相似但无实际关联的独立实体**。
-   * 对于名称相似但无实际关联的独立实体，应在报告中明确指出其与核心研究对象的关联度较低或为独立法人，并说明不作为核心分析内容。
-   * 如果对某个实体与核心研究对象之间的关联性存疑或缺乏明确证据，请在报告中明确指出这种不确定性。
+3. 如果资料数据/信息不足以生成有意义的回答，可用简洁友好的语言向用户表达“我能收集到的信息不足以生成一份详实的回答/报告，但根据现有数据，我可以为您...”的意思，表述可以灵活调整。
+4. 如果数据存疑或缺乏证据，可在备注中说明，但不要在正文中提及无效数据。
+5. 实体命名与区分：可根据需要在括号中附上实体译名（非必须）。在资料数据含有多个相似实体时，需明确其与研究主题的关系，对于明显无关的实体，直接忽略，对于难以分辨的情况，可在备注中说明。
 
 # 报告结构
-## 对于招投标查询类的主题，报告结构如下：
-（仅包括数据展示和数据分析两部分，不需引言、结论等部分。）
-1. **标题**
-2. **数据展示**：展示数据表、图、列表等  
+## 如果主题是招投标相关的查询，报告结构如下：
+1. **数据展示**：展示数据表、图、列表等  
    - 对于招投标数据，**严格使用标准Markdown表格格式**，只包含一行表头和一行分隔符，不要重复或延伸分隔符。  
    - 表格列字段固定为：“项目名 | 截止时间 | 项目链接”。  
    - 表格示例：  
-
      ```
      | 项目名 | 截止时间 | 项目链接 |
      | ------ | -------- | -------- |
      | 示例项目A | 2025-09-01 | http://example.com/a |
      | 示例项目B | 2025-09-10 | http://example.com/b |
+     | 更多项目... | ... | ... |
      ```
    - **不要在表格上下额外输出 ----- 或其他分隔符**。
    - 对于其他数据，使用合适的markdown格式输出（列表、表格、引用块等）。
-3. **数据分析**：对数据的分析
+2. **数据分析**：对数据的简要分析
+3. 不需引言、结论等部分，除非研究主题明确要求。
 
 ## 对于研究类的主题，建议报告结构如下：
-1. **标题和摘要**：大标题+简洁的摘要
+1. **标题和摘要**：标题+摘要(TLDR)
 2. **章节结构**：清晰的章节
-3. **Appendix、Glossary等**
+3. **备注、Appendix、Glossary等**
 
-## 对于其他主题的研究，根据主题的性质，选择合适的报告结构。
+## 对于其他类型的主题，根据主题的性质，选择合适的报告结构。
 
 # 输出格式：
 - 使用markdown格式
 - 适当的表格和图表
-- 引用请在相关句子后内联标注为 [n](SHORT_URL)，例如 [1](SHORT_URL)；同一来源可在多处复用同一编号；引用仅能从“关键信息”中复用，不要杜撰；若未包含引用，可不添加
-- **实体命名与区分**：首次出现时保留源语言命名，括号中可附英文或音译别名。全文保持实体名称的一致性。**在介绍每个实体时，需明确其法人全称及其与研究主题的关系（核心实体、关联实体、名称相似的独立实体等），并注明支撑此判断的简要依据（如“据工商信息显示其为子公司”、“无明确关联证据”等），以避免混淆。**
+- 引用请在相关句子后内联标注为 [n](SHORT_URL)，例如 [1](SHORT_URL)；同一来源可在多处复用同一编号；引用仅能从“资料数据/信息”中复用，不要杜撰；若未包含引用，可不添加
 
 # 当前日期：{current_date}
 # 研究主题：{research_topic}
-# 关键信息：
+# 资料数据/信息：
 {summaries}
 """
 

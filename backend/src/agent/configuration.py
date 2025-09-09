@@ -60,6 +60,21 @@ class Configuration(BaseModel):
         },
     )
 
+    # HITL bypass for testing
+    enable_clarification_bypass: bool = Field(
+        default=False,
+        metadata={
+            "description": "Enable HITL bypass for automated testing. When true, automatically approve research plans and skip clarifications.",
+        },
+    )
+    # HITL bypass for testing
+    enable_hitl_bypass: bool = Field(
+        default=True,
+        metadata={
+            "description": "Enable HITL bypass for automated testing. When true, automatically approve research plans and skip clarifications.",
+        },
+    )
+
     # Web search | Parallel research controls
     enable_parallel_research: bool = Field(
         default=True,
@@ -68,7 +83,7 @@ class Configuration(BaseModel):
         },
     )
     enable_secondary_query: bool = Field(
-        default=True,
+        default=False,
         metadata={
             "description": "Whether to enable secondary query retry when primary web search fails to find sources.",
         },
@@ -102,7 +117,7 @@ class Configuration(BaseModel):
         },
     )
     intent_confidence_threshold: float = Field(
-        default=0.7,
+        default=0.95,
         metadata={
             "description": "Minimum confidence required to take the direct lookup path (0-1)."
         },
@@ -219,14 +234,6 @@ class Configuration(BaseModel):
         default=5,
         metadata={
             "description": "Top-K chunks to retrieve from Mock RAG per query.",
-        },
-    )
-
-    # HITL bypass for testing
-    enable_hitl_bypass: bool = Field(
-        default=True,
-        metadata={
-            "description": "Enable HITL bypass for automated testing. When true, automatically approve research plans and skip clarifications.",
         },
     )
     rag_rest_endpoint: str | None = Field(
