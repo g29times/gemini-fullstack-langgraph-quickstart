@@ -219,7 +219,7 @@ def query_rag_rest(
             headers["Authorization"] = f"Bearer {api_key}"
         
         # New API format: send query as array of strings
-        payload = [query]  # Changed from dict to array format
+        payload = {"labels": [query] } # Changed from dict to array format
         
         resp = _http_post_json(endpoint, payload, headers, timeout)
         
@@ -243,15 +243,15 @@ def query_rag_rest(
                     # 兼容新旧字段名
                     pname = (it.get("projectName") or it.get("project_name") or 
                             it.get("title") or f"Project-{i+1}")
-                    uname = (it.get("userName") or it.get("user_name") or 
-                            it.get("supplier") or "供应商")
-                    aname = (it.get("partyAName") or it.get("party_a_name") or 
-                            it.get("owner") or "甲方")
+                    # 项目用户
+                    uname = (it.get("userName") or it.get("user_name") or it.get("supplier") or "供应商")
+                    # 项目甲方
+                    aname = (it.get("partyAName") or it.get("party_a_name") or it.get("owner") or "甲方")
                     date = it.get("date") or it.get("time") or ""
-                    summary = (it.get("projectSummary") or it.get("project_summary") or 
-                              it.get("description") or "")
-                    
+                    summary = (it.get("projectSummary") or it.get("project_summary") or it.get("description") or "")
+                    # 项目名称
                     label = str(pname)
+                    # 项目URL
                     url = it.get("url") or f"rag://user_project/rest/{i}"
                     score = float(it.get("score") or 1.0)  # 默认评分1.0
                     
@@ -269,16 +269,17 @@ def query_rag_rest(
                     hits.append({
                         "label": label,
                         "url": url,
-                        "path": endpoint,
+                        "date": date,
+                        "desc": snippet,
+                        # "path": endpoint,
                         "chunk_index": i,
-                        "text": snippet,
                         "score": score,
                     })
                 except Exception as e:
                     logger.warning("[NEO_LOG] [query_rag_rest] 处理项目 %d 时出错: %s", i, str(e))
                     continue
     
-    logger.info("[NEO_LOG] [query_rag_rest] rest hits: %d, 第一个项目数据: %s", len(hits), hits[0])
+    logger.info("[NEO_LOG] [query_rag_rest] rest hits: %d | %s", len(hits), hits[0])
     # If REST enabled but empty/failed, continue to fallback below
 
     # 2) Fallback to local JSON

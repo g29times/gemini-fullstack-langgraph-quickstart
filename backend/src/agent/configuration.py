@@ -62,7 +62,7 @@ class Configuration(BaseModel):
 
     # HITL bypass for testing
     enable_clarification_bypass: bool = Field(
-        default=False,
+        default=True,
         metadata={
             "description": "Enable HITL bypass for automated testing. When true, automatically approve research plans and skip clarifications.",
         },
@@ -95,9 +95,9 @@ class Configuration(BaseModel):
         metadata={"description": "The number of initial search queries to generate."},
     )
 
-    # 并行查询数
+    # 并行查询数 6 * 3 = 18 < 25(Recursion limit of 25 上限)
     max_parallel_queries: int = Field(
-        default=5,
+        default=6,
         metadata={
             "description": "Maximum number of queries to dispatch in parallel when enabled."
         },
@@ -105,7 +105,7 @@ class Configuration(BaseModel):
 
     # 最大研究循环数
     max_research_loops: int = Field(
-        default=5,
+        default=3,
         metadata={"description": "The maximum number of research loops to perform."},
     )
 
@@ -137,11 +137,107 @@ class Configuration(BaseModel):
 
     # Follow-up detection threshold
     follow_up_confidence_threshold: float = Field(
-        default=0.7,
+        default=0.5,
         metadata={
             "description": "Confidence threshold (0-1) to consider a message as a follow-up in detect_follow_up."
         },
     )
+
+    # reranking 重排相关配置
+    # RAG reranking configuration 1 是否启用本地重排
+    enable_rag_rerank: bool = Field(
+        default=True,
+        metadata={
+            "description": "Enable RAG data reranking to filter irrelevant results and reduce noise."
+        },
+    )
+    # RAG reranking configuration 2 相关性阈值
+    rag_relevance_threshold: float = Field(
+        default=0.3,
+        metadata={
+            "description": "Minimum relevance score (0-1) for RAG data to be included in results."
+        },
+    )
+    # RAG reranking configuration 3 保留的最大段数
+    rag_max_segments: int = Field(
+        default=10,
+        metadata={
+            "description": "Maximum number of RAG segments to keep after reranking."
+        },
+    )
+    # Final cross-source reranking configuration
+    final_rerank_min_sources: int = Field(
+        default=3,
+        metadata={
+            "description": "Minimum number of combined sources required to trigger final cross-source reranking."
+        },
+    )
+    # 本地重排守护策略 4 保留的最小段数
+    rag_min_keep: int = Field(
+        default=3,
+        metadata={
+            "description": "Minimum number of documents to keep after local reranking (fallback to top-K if filtered count is below this)."
+        },
+    )
+    # 重排策略配置
+    defer_api_rerank_to_reflection: bool = Field(
+        default=True,
+        metadata={
+            "description": "Defer VoyageAI API reranking to reflection stage instead of individual web/rag nodes."
+        },
+    )
+    enable_final_cross_rerank: bool = Field(
+        default=True,
+        metadata={
+            "description": "Enable cross-source (web+rag) final reranking in reflection stage."
+        },
+    )
+    final_rerank_top_k: int = Field(
+        default=10,
+        metadata={
+            "description": "Maximum number of sources to keep after final cross-source reranking."
+        },
+    )
+    # VoyageAI Rerank API configuration
+    enable_voyage_rerank: bool = Field(
+        default=True,
+        metadata={
+            "description": "Enable VoyageAI API for advanced document reranking (requires API key)."
+        },
+    )
+    voyage_api_key: str = Field(
+        default="",
+        metadata={
+            "description": "VoyageAI API key for reranking service (from VOYAGE_API_KEY env var)."
+        },
+    )
+    voyage_rerank_model: str = Field(
+        default="rerank-2.5-lite",
+        metadata={
+            "description": "VoyageAI rerank model to use (rerank-2.5-lite, rerank-2.5, etc.)."
+        },
+    )
+    voyage_rerank_timeout: int = Field(
+        default=5,
+        metadata={
+            "description": "Timeout in seconds for VoyageAI API calls."
+        },
+    )
+    voyage_rerank_max_retries: int = Field(
+        default=2,
+        metadata={
+            "description": "Maximum number of retries for VoyageAI API calls."
+        },
+    )
+    voyage_rerank_top_k: Optional[int] = Field(
+        default=None,
+        metadata={
+            "description": "Number of top results to return from VoyageAI (None for all)."
+        },
+    )
+    # 重排配置结束
+    
+
 
     # Effort level configuration (from frontend or explicit setting)
     effort: Optional[str] = Field(
@@ -350,6 +446,16 @@ class Configuration(BaseModel):
                 values["enable_rag_rest"] = values["enable_rag_rest"].strip().lower() in ("1", "true", "yes", "y", "on")
             if isinstance(values.get("rag_rest_timeout"), str) and values["rag_rest_timeout"].strip():
                 values["rag_rest_timeout"] = int(values["rag_rest_timeout"])
+            
+            # VoyageAI configuration from environment
+            if not values.get("voyage_api_key"):
+                values["voyage_api_key"] = os.environ.get("VOYAGE_API_KEY", "")
+            if isinstance(values.get("enable_voyage_rerank"), str) and values["enable_voyage_rerank"].strip():
+                values["enable_voyage_rerank"] = values["enable_voyage_rerank"].strip().lower() in ("1", "true", "yes", "y", "on")
+            if isinstance(values.get("voyage_rerank_timeout"), str) and values["voyage_rerank_timeout"].strip():
+                values["voyage_rerank_timeout"] = int(values["voyage_rerank_timeout"])
+            if isinstance(values.get("voyage_rerank_max_retries"), str) and values["voyage_rerank_max_retries"].strip():
+                values["voyage_rerank_max_retries"] = int(values["voyage_rerank_max_retries"])
         except Exception:
             pass
 

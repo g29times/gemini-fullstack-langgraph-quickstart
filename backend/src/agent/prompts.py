@@ -17,7 +17,7 @@ Rules:
 - Preserve local proper nouns in quotes (e.g., "Company Abc"); add transliterations/aliases as OR variants; add geographic qualifiers when helpful.
 - Do not use "vs/VS" to combine entities; emit per-entity queries. For comparisons, add a separate metric query.
 - For China-based entities, consider authority registries: site:天眼查 OR site:企查查 OR site:aiqicha.baidu.com.
-- Ensure recency: current date is {current_date}.
+- **TIME SENSITIVITY**: current date is {current_date}.
 - MAXIMIZE coverage within {number_queries} limit; use the full quota when possible.
 
 Output JSON:
@@ -35,11 +35,14 @@ Inputs:
 - Knowledge Gap: {knowledge_gap}
 - Follow-ups (verbatim):\n{follow_ups}
 - Current Date: {current_date}
+- Startup Stage Analysis: {startup_thinking}
 - Middle Stage Analysis: {middle_thinking}
 
 Rules:
 - Directly target the Knowledge Gap; if identity is ambiguous, FIRST do disambiguation (canonical name/aliases/geography/industry/registration IDs).
-- **CRITICAL**: Pay close attention to the Middle Stage Analysis which contains deep insights and specific keyword suggestions. Incorporate these suggestions into your query generation.
+- **CRITICAL**: Pay close attention to the Startup/Middle Stage Analysis which contains deep insights or specific keyword suggestions. Incorporate these suggestions into your query generation.
+- **PRIORITY**: If Startup/Middle Stage Analysis identifies specific entities, companies, or disambiguation needs, generate targeted queries for EACH identified entity.
+- **TIME SENSITIVITY**: Current date is {current_date}.
 - Prefer concise keyword-style queries; keep local proper nouns in original script; add cross-lingual variants when helpful.
 - Atomic only: one intent per query; never combine entities (avoid "vs/VS"); for comparisons, use per-entity queries and a separate metric query.
 - Keep the canonical entity string verbatim in quotes; add aliases/transliterations as OR variants.
@@ -169,7 +172,7 @@ Instructions:
 - Identify SIMPLE_FACT requests that can be answered immediately without browsing, such as: short calculations, unit conversions, acronym expansions, general knowledge questions, or other deterministic facts that do not require external sources.
 - Identify DIRECT_LOOKUP for real-time or location-specific information like: current date/time/weekday, weather inquiries, timezone conversions, stock prices, or other data that requires authoritative sources.
 - Identify DIRECT_LOOKUP when an official site likely contains the answer (e.g., today's top items, release notes, pricing, docs).
-- Choose RESEARCH for complex topics requiring multi-step analysis, such as: industry trends, historical analysis, comparative studies, or broad conceptual topics.
+- Choose RESEARCH for complex topics requiring deeper web search or multi-step analysis, such as: bidding projects, industry trends, historical analysis, comparative studies, or broad conceptual topics.
 - Extract an entity (canonical name) and attribute (what is being asked) when possible:
   * Entity: The main subject/object being asked about (e.g., "北京", "Product Hunt", "OpenAI")
   * Attribute: What specific information is requested (e.g., "weather", "function", "latest products")  
@@ -220,7 +223,7 @@ Instructions:
 - Consider both the follow-up question and the previous research context
 - Identify SIMPLE_FACT requests that can be answered immediately from the previous context or general knowledge
 - Identify DIRECT_LOOKUP for real-time or specific information that requires authoritative sources
-- Choose RESEARCH for complex follow-up topics requiring new multi-step analysis
+- Choose RESEARCH for complex follow-up topics requiring deeper web search or multi-step analysis
 - Extract an entity (canonical name) and attribute (what is being asked) when possible
 - **Key Element Completeness Check**: Verify the presence of all essential elements:
   * **Time Element**: Is the time range specified (e.g., "today", "now", "latest", etc.)?
@@ -311,7 +314,9 @@ Attribute: {attribute}
 
 
 # detect_follow_up | Gemini 2.5 Flash-Lite (快速追问检测) 0.1
-follow_up_detection_instructions = """你是一个专业的对话分析助手，需要判断用户的当前消息是否为追问（follow-up question）。
+follow_up_detection_instructions = """你是一个专业的对话分析助手，
+
+你需要结合对话历史判断用户的当前消息是否为追问（follow-up question）。
 
 对话历史：
 {conversation_history}
@@ -321,14 +326,9 @@ follow_up_detection_instructions = """你是一个专业的对话分析助手，
 
 判断标准：
 1. 追问通常基于之前的对话内容或报告
-2. 追问会使用"还有"、"另外"、"那么"、"进一步"等连接词
-3. 追问会引用或扩展之前讨论的主题
-4. 追问可能要求更多细节、相关信息或类似案例
-
-请分析：
-- 当前消息是否依赖之前的对话内容？
-- 是否在扩展或深化之前的主题？
-- 是否使用了表示延续的语言模式？
+2. 追问会引用或扩展之前讨论的主题
+3. 追问可能要求更多细节、相关信息或类似案例
+4. 有些时候，追问可能不包含任何与之前的对话内容或报告相关的信息，但其语境仍暗示了追问的意图。
 
 返回结果：
 - is_follow_up: true/false
@@ -364,6 +364,13 @@ follow_up_instructions = """你是一个专业的研究助手。
 # 意图澄清 clarify_intent | Gemini 2.5 Flash-Lite (多轮对话澄清用户意图)
 intent_clarification_instructions = """你是一个全球多语种智能助手，帮助澄清用户的模糊查询意图，使用与用户相同的语言进行提问。
 
+任务：分析用户消息是否包含足够信息进行后续处理。
+如果信息不足，生成3个澄清问题，帮助用户提供更多细节。
+
+判断标准：
+1. **信息充足** - 用户身份明确，查询目标具体，可以直接进行搜索或研究
+2. **信息不足** - 缺少关键信息（如用户身份、具体需求、时间范围、事件背景、机构名称等不清晰）
+
 当前日期：{current_date}
 
 当前对话历史：
@@ -374,14 +381,6 @@ intent_clarification_instructions = """你是一个全球多语种智能助手�
 当前识别状态：
 - 识别实体：{current_entity}
 - 关注属性：{current_attribute}
-
-任务：分析用户消息是否包含足够信息进行后续处理。
-
-判断标准：
-1. **信息充足** - 用户身份明确，查询目标具体，可以直接进行搜索或研究
-2. **信息不足** - 缺少关键信息（如用户身份、具体需求、时间范围、事件背景、机构名称等不清晰）
-
-如果信息不足，在（Who What Where When Why How）等维度中选择1-3个生成澄清问题，帮助用户提供更多细节。
 
 输出JSON格式：
 {{
@@ -395,16 +394,16 @@ intent_clarification_instructions = """你是一个全球多语种智能助手�
 }}
 
 例如：用户问：“最近犀照科技发展动态如何？”
-这里信息不足在于：尽管可以通过用户语言（中文）推断犀照科技可能是一家中国企业，但是无法确定是哪个城市的，
-所以最好能问清犀照科技的全名或注册地址。-> "请问您是否能提供犀照科技的全称或注册地址？"
-如果用户询问的是某种事件，你必须弄清楚事件发生的时间、地点、人物、背景等信息。
+信息不足：无法确定是哪个城市的犀照科技，可能存在不同城市的同名企业。-> "请问您是否能告知犀照科技的全称或注册地？"
+如果用户询问的是某种事件，则需要弄清楚事件发生的时间、地点、人物、背景等信息。
 
-澄清问题示例：
+优先级：
+主体准确命名（如企业全名、人名、产品名、事件名等）以及唯一性确认 - 时间 - 人物 - 地点 - 事件
+
+澄清问题示例：（Who What Where When Why How）等维度
 - "请问您是否能提供该公司的全称或注册地址？"（Who）
-- "您需要查询哪款产品的具体信息？请提供准确的名称。"（What）
 - "您主要关注哪个行业或领域？比如建筑、IT、制造等。"（What）
 - "请问您说的8.31指的是8月31日吗？"（When）
-- "您希望了解最近多长时间内的信息？比如最近3个月、半年等。"（When）
 - "请问您想了解哪个城市或地区的天气？比如北京、上海、深圳等。"（Where）
 """
 
@@ -587,12 +586,12 @@ enhanced_report_instructions = """你是一个研究专家，你会结合研究�
 # 要求
 1. 使用与研究主题相同的语言（指英文、中文等）生成报告。
 2. 不要做语气类的、应答类的陈述，如“好的，下面是我为您生成的一份报告”等，直接输出报告。
-3. 如果资料数据/信息不足以生成有意义的回答，可用简洁友好的语言向用户表达“我能收集到的信息不足以生成一份详实的回答/报告，但根据现有数据，我可以为您...”的意思，表述可以灵活调整。
-4. 如果数据存疑或缺乏证据，可在备注中说明，但不要在正文中提及无效数据。
-5. 实体命名与区分：可根据需要在括号中附上实体译名（非必须）。在资料数据含有多个相似实体时，需明确其与研究主题的关系，对于明显无关的实体，直接忽略，对于难以分辨的情况，可在备注中说明。
+3. 如果资料数据/信息不足以生成完全满足研究主题的回答，可在结尾部分用简洁友好的语言表达“我能收集到的信息不足以回答.../生成一份详实的报告/...，但根据现有数据，我可以为您...”的意思，表述可以灵活调整。你还可以根据已有信息，引导用户进一步交流，比如“希望这些信息能帮助你。如果你有特定的xx偏好，或者对某些类型的xx更感兴趣，我很乐意提供进一步的分析。”。
+4. 如果数据存疑或缺乏证据，可在备注中说明，但不要在正文章节中提及无效数据。
+5. 实体命名与区分：可根据需要在括号中附上实体译名（非必须）。在资料数据含有多个相似实体时，需明确其与研究主题的关系，对于无关的实体，直接忽略，对于难以分辨的情况，可在备注中说明。
 
 # 报告结构
-## 如果主题是招投标相关的查询，报告结构如下：
+## 情况1：如果主题与招投标有相关，报告结构必须包括数据展示和数据分析两部分：
 1. **数据展示**：展示数据表、图、列表等  
    - 对于招投标数据，**严格使用标准Markdown表格格式**，只包含一行表头和一行分隔符，不要重复或延伸分隔符。  
    - 表格列字段固定为：“项目名 | 截止时间 | 项目链接”。  
@@ -600,8 +599,8 @@ enhanced_report_instructions = """你是一个研究专家，你会结合研究�
      ```
      | 项目名 | 截止时间 | 项目链接 |
      | ------ | -------- | -------- |
-     | 示例项目A | 2025-09-01 | http://example.com/a |
-     | 示例项目B | 2025-09-10 | http://example.com/b |
+     | 示例项目A | 2025-09-01 | [查看详情](http://example.com/a) |
+     | 示例项目B | 2025-09-10 | [查看详情](http://example.com/b) |
      | 更多项目... | ... | ... |
      ```
    - **不要在表格上下额外输出 ----- 或其他分隔符**。
@@ -609,12 +608,13 @@ enhanced_report_instructions = """你是一个研究专家，你会结合研究�
 2. **数据分析**：对数据的简要分析
 3. 不需引言、结论等部分，除非研究主题明确要求。
 
-## 对于研究类的主题，建议报告结构如下：
-1. **标题和摘要**：标题+摘要(TLDR)
-2. **章节结构**：清晰的章节
+## 情况2：对于研究类的主题，建议报告结构如下：
+1. **标题和摘要**：标题+摘要
+2. **正文**：章节和段落
 3. **备注、Appendix、Glossary等**
 
-## 对于其他类型的主题，根据主题的性质，选择合适的报告结构。
+## 情况3：对于其他类型的主题，根据主题的性质，自行选择合适的报告结构。
+1. 例如对于生活类的主题，如活动策划，不需要非常死板的章节，语气也可以活泼一点
 
 # 输出格式：
 - 使用markdown格式

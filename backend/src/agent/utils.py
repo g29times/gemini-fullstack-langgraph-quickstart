@@ -2,40 +2,68 @@ from typing import Any, Dict, List
 from langchain_core.messages import AnyMessage, AIMessage, HumanMessage
 
 
-def get_research_topic(messages: List[AnyMessage]) -> str:
+def get_research_topic(messages: List[Any]) -> str:
     """
     Get the research topic from the messages.
     Enhanced to provide structured context for follow-up scenarios.
+    Supports both LangChain message objects and dict format.
     """
     if not messages:
         return ""
     
+    def extract_content(msg: Any) -> str:
+        """Extract content from message, supporting both object and dict formats"""
+        try:
+            if hasattr(msg, "content"):
+                return str(msg.content or "")
+            if isinstance(msg, dict):
+                return str(msg.get("content", "") or "")
+            if isinstance(msg, str):
+                return msg
+        except Exception:
+            pass
+        return str(msg) if msg is not None else ""
+    
+    def is_user_message(msg: Any) -> bool:
+        """Check if message is from user"""
+        if isinstance(msg, HumanMessage):
+            return True
+        if isinstance(msg, dict):
+            return msg.get("role") == "user"
+        return False
+    
+    def is_ai_message(msg: Any) -> bool:
+        """Check if message is from AI assistant"""
+        if isinstance(msg, AIMessage):
+            return True
+        if isinstance(msg, dict):
+            return msg.get("role") in ("assistant", "system")
+        return False
+    
     # For single message, return its content
     if len(messages) == 1:
-        return messages[-1].content
+        return extract_content(messages[-1])
     
     # For multiple messages, check if this might be a follow-up scenario
-    # If the last message is from user and there are previous messages, 
-    # provide structured context: [原始问题][助手回复摘要][追问]
     last_message = messages[-1]
-    if isinstance(last_message, HumanMessage):
+    if is_user_message(last_message):
         # This looks like a follow-up question - build structured context
-        latest_question = last_message.content
+        latest_question = extract_content(last_message)
         
         # Find the first user message (original question)
         first_user_msg = None
         for msg in messages:
-            if isinstance(msg, HumanMessage):
+            if is_user_message(msg):
                 first_user_msg = msg
                 break
         
-        if first_user_msg and first_user_msg != last_message:
+        if first_user_msg and first_user_msg is not last_message:
             # Find the assistant's response (usually the second-to-last or a recent AI message)
             assistant_summary = ""
             for msg in reversed(messages[:-1]):  # Exclude the latest user message
-                if isinstance(msg, AIMessage):
+                if is_ai_message(msg):
                     # Extract a summary from the assistant's response
-                    content = msg.content
+                    content = extract_content(msg)
                     if len(content) > 300:
                         # Take the first 200 chars and last 100 chars for context
                         assistant_summary = f"{content[:200]}...{content[-100:]}"
@@ -45,20 +73,20 @@ def get_research_topic(messages: List[AnyMessage]) -> str:
             
             # Build structured context
             if assistant_summary:
-                return f"**原始问题**: {first_user_msg.content}\n\n**助手回复摘要**: {assistant_summary}\n\n**用户追问**: {latest_question}"
+                return f"**原始问题**: {extract_content(first_user_msg)}\n\n**助手回复摘要**: {assistant_summary}\n\n**用户追问**: {latest_question}"
             else:
                 # Fallback if no assistant message found
-                return f"**原始问题**: {first_user_msg.content}\n\n**用户追问**: {latest_question}"
+                return f"**原始问题**: {extract_content(first_user_msg)}\n\n**用户追问**: {latest_question}"
         else:
             return latest_question
     
     # Fallback: combine all messages (original behavior)
     research_topic = ""
     for message in messages:
-        if isinstance(message, HumanMessage):
-            research_topic += f"User: {message.content}\n"
-        elif isinstance(message, AIMessage):
-            research_topic += f"Assistant: {message.content}\n"
+        if is_user_message(message):
+            research_topic += f"User: {extract_content(message)}\n"
+        elif is_ai_message(message):
+            research_topic += f"Assistant: {extract_content(message)}\n"
     return research_topic
 
 

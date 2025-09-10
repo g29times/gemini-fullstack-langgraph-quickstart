@@ -14,6 +14,8 @@ from agent.tools_and_schemas import (
     ThinkingStage,
     FollowUpResponse,
 )
+from agent.rag_rest import query_rag_rest
+from agent.rag_rerank import create_reranker
 from agent.configuration import Configuration
 from dotenv import load_dotenv
 from langchain_core.messages import AIMessage
@@ -72,7 +74,7 @@ if not logger.handlers:
     _handler = logging.StreamHandler()
     _handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s"))
     logger.addHandler(_handler)
-logger.setLevel(logging.DEBUG if os.getenv("DEBUG_INTENT_ROUTER") else logging.INFO)
+logger.setLevel(logging.DEBUG if os.getenv("DEBUG_INTENT_ROUTER") == "1" else logging.INFO)
 
 if os.getenv("GEMINI_API_KEY") is None:
     raise ValueError("GEMINI_API_KEY is not set")
@@ -419,7 +421,7 @@ def detect_follow_up(state: OverallState, config: RunnableConfig) -> OverallStat
     )
     
     try:
-        logger.info("[NEO_LOG][follow_up_detection] formatted_prompt=%s", formatted_prompt)
+        # logger.debug("[NEO_LOG][follow_up_detection] formatted_prompt=%s", formatted_prompt)
         result = structured_llm.invoke(formatted_prompt)
         
         # 转换为字典格式
@@ -430,8 +432,11 @@ def detect_follow_up(state: OverallState, config: RunnableConfig) -> OverallStat
         
         # 只有高置信度才判定为追问（可配置阈值）
         threshold = float(configurable.follow_up_confidence_threshold)
-        is_follow_up = detection_result.get("is_follow_up", False) and detection_result.get("confidence", 0.0) >= threshold
+        confidence = detection_result.get("confidence", 0.0)
+        is_follow_up = detection_result.get("is_follow_up", False) and confidence >= threshold
+        logger.info("[NEO_LOG][follow_up_detection] threshold=%s, confidence=%s, is_follow_up=%s", threshold, confidence, is_follow_up)
         
+        # 保留现有状态，只更新追问相关字段
         return {
             "is_follow_up": is_follow_up,
             "follow_up_detection": detection_result
@@ -439,36 +444,43 @@ def detect_follow_up(state: OverallState, config: RunnableConfig) -> OverallStat
         
     except Exception as e:
         logger.warning(f"Follow-up detection failed: {e}, falling back to simple logic")
-        # 回退到简单逻辑
+        # 回退到简单逻辑，但保留现有状态
         has_previous_report = bool(state.get("previous_report"))
         return {"is_follow_up": has_previous_report}
 
 def route_follow_up_detection(state: OverallState) -> str:
-    """Route based on follow-up detection with HITL support."""
+    """Route based on follow-up detection with HITL support.
+    
+    Can route directly to three main branches:
+    - answer_simple_fact: for simple conversational queries
+    - find_official_site: for direct lookup queries  
+    - generate_research_plan: for research queries
+    """
     # CRITICAL: 检查HITL人工选择的直接查询请求
-    messages = state.get("messages", [])
-    if messages:
-        last_message = messages[-1]
-        if hasattr(last_message, 'type') and last_message.type == "human":
-            try:
-                content = last_message.content if hasattr(last_message, 'content') else ""
-                if isinstance(content, str) and content.startswith("{") and content.endswith("}"):
-                    import json
-                    data = json.loads(content)
-                    if data.get("action") in ("quick_lookup", "direct_lookup"):
-                        return "find_official_site"
-            except (json.JSONDecodeError, AttributeError):
-                pass
+    # messages = state.get("messages", [])
+    # if messages:
+    #     last_message = messages[-1]
+    #     if hasattr(last_message, 'type') and last_message.type == "human":
+    #         try:
+    #             content = last_message.content if hasattr(last_message, 'content') else ""
+    #             if isinstance(content, str) and content.startswith("{") and content.endswith("}"):
+    #                 import json
+    #                 data = json.loads(content)
+    #                 if data.get("action") in ("quick_lookup", "direct_lookup"):
+    #                     return "find_official_site"
+    #         except (json.JSONDecodeError, AttributeError):
+    #             pass
     
-    # 检查是否有批准的研究计划
-    if state.get("plan_approved", False):
-        return "thinking_startup_stage"
+    # # 检查是否有批准的研究计划
+    # if state.get("plan_approved", False):
+    #     return "thinking_startup_stage"
     
-    # 检查是否有人工选择的直接查询偏好
-    if state.get("prefer_direct_lookup", False):
-        return "find_official_site"
+    # # 检查是否有人工选择的直接查询偏好
+    # if state.get("prefer_direct_lookup", False):
+    #     return "find_official_site"
     
-    # 统一路由到classify_intent处理追问和新对话
+    # 兜底路由到classify_intent处理追问
+    logger.info("[NEO_LOG][route_follow_up_detection] No direct routing, falling back to classify_intent")
     return "classify_intent"
 
 
@@ -571,7 +583,7 @@ def clarify_intent(state: OverallState, config: RunnableConfig) -> OverallState:
     
     # Initialize clarification state if not present
     clarification_count = state.get("clarification_count", 0)
-    max_rounds = state.get("max_clarification_rounds", 3)
+    max_rounds = state.get("max_clarification_rounds", 2)
     
     # Check if user wants to skip clarification
     messages = state.get("messages", [])
@@ -595,7 +607,7 @@ def clarify_intent(state: OverallState, config: RunnableConfig) -> OverallState:
     # Create structured LLM for intent clarification
     llm = ChatGoogleGenerativeAI(
         model=configurable.query_generator_model,
-        temperature=0.3,
+        temperature=0.2,
         max_retries=2,
         api_key=os.getenv("GEMINI_API_KEY"),
     )
@@ -642,7 +654,7 @@ def clarify_intent(state: OverallState, config: RunnableConfig) -> OverallState:
             "intent_clarified": not needs_clarification
         }
         
-        # If clarification is needed, prepare questions for user
+        # 1 需要澄清时的处理 If clarification is needed, prepare questions for user
         if clarification_result.get("needs_clarification", True) and clarification_count < max_rounds:
             questions = clarification_result.get("clarification_questions", [])
             logger.info("[NEO_LOG] [意图澄清] questions generated: %s", questions)
@@ -651,7 +663,7 @@ def clarify_intent(state: OverallState, config: RunnableConfig) -> OverallState:
                 question_text = "为了更好地帮助您，我需要了解一些额外信息：\n\n"
                 for i, question in enumerate(questions, 1):
                     question_text += f"{i}. {question}\n"
-                question_text += "\n请回答上述问题，或者输入'跳过'直接进行研究。"
+                question_text += "\n请回答上述问题，或者输入'跳过'直接研究。"
                 
                 # Add clarification message to conversation history
                 updated_state["conversation_history"] = [
@@ -670,14 +682,15 @@ def clarify_intent(state: OverallState, config: RunnableConfig) -> OverallState:
                 updated_state["pending_clarification"] = question_text
                 updated_state["clarification_needed"] = True
                 
-                logger.info("[NEO_LOG] [意图澄清] Raising NodeInterrupt with question text")
-                
                 # Raise NodeInterrupt - the updated_state should be applied before the interrupt
                 raise NodeInterrupt(question_text)
             else:
                 logger.info("[NEO_LOG] [意图澄清] no questions generated, skipping clarification")
-        
-        # If intent is clarified or max rounds reached, update intent with gathered info
+                return {
+                    "clarification_count": clarification_count + 1,
+                    "intent_clarified": True
+                }
+        # 2 澄清完成时的处理 If intent is clarified or max rounds reached, update intent with gathered info
         if not clarification_result.get("needs_clarification", True) or clarification_count >= max_rounds:
             updated_intent = intent.copy()
             
@@ -697,6 +710,8 @@ def clarify_intent(state: OverallState, config: RunnableConfig) -> OverallState:
             updated_state["intent"] = updated_intent
             updated_state["intent_clarified"] = True
         
+        logger.info("[NEO_LOG][clarify_intent] Returning updated_state: intent_clarified=%s, clarification_count=%d", 
+                   updated_state.get("intent_clarified", False), updated_state.get("clarification_count", 0))
         return updated_state
     
     except NodeInterrupt:
@@ -765,6 +780,7 @@ def route_after_classify(state: OverallState, config: RunnableConfig):
     - High confidence SIMPLE_FACT -> answer_simple_fact
     - High confidence DIRECT_LOOKUP -> find_official_site  
     - Low confidence or insufficient info -> clarify_intent (if clarification enabled and not exhausted)
+    - Follow-up questions skip clarification and go directly to research
     - Otherwise -> generate_research_plan
     """
     configurable = Configuration.from_runnable_config(config)
@@ -774,21 +790,27 @@ def route_after_classify(state: OverallState, config: RunnableConfig):
     intent = state.get("intent") or {}
     label = intent.get("intent_label")
     confidence = float(intent.get("confidence") or 0.0)
+    is_follow_up = state.get("is_follow_up", False)
     
     # Check if intent clarification is needed and available
     clarification_count = state.get("clarification_count", 0)
-    max_rounds = state.get("max_clarification_rounds", 3)
+    max_rounds = state.get("max_clarification_rounds", 2)
     intent_clarified = state.get("intent_clarified", False)
     
-    logger.info("[NEO_LOG][route_after_classify] label=%s confidence=%.2f threshold=%.2f clarified=%s round=%d/%d", 
+    logger.info("[NEO_LOG][route_after_classify] label=%s confidence=%.2f threshold=%.2f clarified=%s round=%d/%d is_follow_up=%s", 
                label, confidence, configurable.intent_confidence_threshold, 
-               intent_clarified, clarification_count, max_rounds)
+               intent_clarified, clarification_count, max_rounds, is_follow_up)
 
-    # If confidence is high enough and has sufficient info, proceed with direct routing
+    # 如果置信度高于阈值 If confidence is high enough and has sufficient info, proceed with direct routing
     if confidence >= configurable.intent_confidence_threshold:
         if label == "SIMPLE_FACT":
             return "answer_simple_fact"
         if label == "DIRECT_LOOKUP":
+            # For follow-up questions, skip clarification for DIRECT_LOOKUP
+            if is_follow_up:
+                logger.info("[NEO_LOG][route_after_classify] Follow-up DIRECT_LOOKUP, skipping clarification")
+                return "find_official_site"
+            
             # Check if clarification is needed based on LLM analysis
             needs_clarification = intent.get("needs_clarification", False)
             missing_elements = intent.get("missing_elements", [])
@@ -803,12 +825,17 @@ def route_after_classify(state: OverallState, config: RunnableConfig):
             return "find_official_site"
         # For RESEARCH, check if we have sufficient and specific entity information
         if label == "RESEARCH":
+            # For follow-up questions, skip clarification for RESEARCH (user already clarified)
+            if is_follow_up:
+                logger.info("[NEO_LOG][route_after_classify] Follow-up RESEARCH detected, user already clarified, routing to generate_research_plan")
+                return "generate_research_plan"
+            
             entity = intent.get("entity") or ""
             entity = entity.strip() if entity else ""
             # Check if entity is specific enough for research
             if _is_entity_specific_enough(entity, config):
                 # Has specific entity info, can proceed with research
-                pass  # Will fall through to research plan
+                return "generate_research_plan"
             else:
                 # Entity too vague or missing, should clarify even with good confidence
                 if not intent_clarified and clarification_count < max_rounds:
@@ -816,9 +843,12 @@ def route_after_classify(state: OverallState, config: RunnableConfig):
                     return "clarify_intent"
     
     # If confidence is low and clarification is available, try to clarify intent
+    # But skip clarification for follow-up questions (they've already been through clarification)
     if (not intent_clarified and 
         clarification_count < max_rounds and 
-        confidence < configurable.intent_confidence_threshold):
+        confidence < configurable.intent_confidence_threshold and
+        not is_follow_up):
+        logger.info("[NEO_LOG][route_after_classify] Low confidence, routing to clarify (not follow-up)")
         return "clarify_intent"
     
     # Default to research plan
@@ -838,7 +868,7 @@ def route_after_clarify(state: OverallState, config: RunnableConfig):
     conf = float(intent.get("confidence") or 0.0)
     
     clarification_count = state.get("clarification_count", 0)
-    max_rounds = state.get("max_clarification_rounds", 3)
+    max_rounds = state.get("max_clarification_rounds", 2)
     intent_clarified = state.get("intent_clarified", False)
     
     logger.info("[NEO_LOG] [route_after_clarify] label=%s conf=%.2f clarified=%s count=%d/%d", 
@@ -1504,12 +1534,13 @@ class QueryManager:
         # if len(planned_queries) > self.config.max_parallel_queries:
         #     planned_queries = planned_queries[:self.config.max_parallel_queries]
         if follow_ups:
+            logger.info("[QueryManager] 生成follow-up查询")
             return self._handle_followup_queries(follow_ups)
         elif planned_queries and not self.state.get("search_query"):
-            logger.info("[QueryManager] Using planned queries")
+            logger.info("[QueryManager] 使用计划查询")
             return self._handle_planned_queries(self.config.max_parallel_queries, planned_queries)
         else:
-            logger.info("[QueryManager] Using initial queries")
+            logger.info("[QueryManager] 使用初始查询")
             return self._handle_initial_queries()
     
     # 生成follow-up查询
@@ -1539,11 +1570,8 @@ class QueryManager:
         
         # 获取middle_thinking内容
         thinking_process = self.state.get("thinking_process", {})
-        middle_thinking = thinking_process.get("middle_thinking", "") if thinking_process else ""
-        
-        # 如果没有middle_thinking，提供默认值
-        if not middle_thinking:
-            middle_thinking = "无深度分析内容"
+        startup_thinking = thinking_process.get("startup_thinking", "") if thinking_process else "无深度分析内容"
+        middle_thinking = thinking_process.get("middle_thinking", "") if thinking_process else "无深度分析内容"
         
         formatted_prompt = followup_decomposer_instructions.format(
             research_topic=get_research_topic(self.state.get("messages", [])),
@@ -1551,9 +1579,10 @@ class QueryManager:
             follow_ups=followups_text,
             current_date=current_date,
             number_queries=max_queries,
+            startup_thinking=startup_thinking,
             middle_thinking=middle_thinking,
         )
-        
+        logger.debug("[QueryManager] Generate follow-up prompt: %s", formatted_prompt)
         queries = self._safe_invoke_llm(structured_llm, formatted_prompt, follow_ups)
         
         logger.info(
@@ -1977,18 +2006,18 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
         if translated_query:
             # 如果有翻译，备选查询可以是：原始查询的关键词提取版本
             secondary_query = _extract_key_terms_query(original_query)
-            logger.info("[NEO_LOG] [web_research] Secondary strategy: key terms from original '%s' -> '%s'", 
+            logger.debug("[NEO_LOG] [web_research] Secondary strategy: key terms from original '%s' -> '%s'", 
                        original_query, secondary_query)
         else:
             # 如果没有翻译，备选查询可以是：重新表述的查询
             secondary_query = _rephrase_query(original_query) if len(original_query.split()) > 2 else None
             if secondary_query:
-                logger.info("[NEO_LOG] [web_research] Secondary strategy: rephrase '%s' -> '%s'", 
+                logger.debug("[NEO_LOG] [web_research] Secondary strategy: rephrase '%s' -> '%s'", 
                            original_query, secondary_query)
             else:
-                logger.info("[NEO_LOG] [web_research] No secondary query - original too short: '%s'", original_query)
+                logger.debug("[NEO_LOG] [web_research] No secondary query - original too short: '%s'", original_query)
     else:
-        logger.info("[NEO_LOG] [web_research] Secondary query disabled by configuration")
+        logger.debug("[NEO_LOG] [web_research] Secondary query disabled by configuration")
 
     def _run_and_extract(query_text: str, allow_url_context: bool = True):
         formatted = web_searcher_instructions.format(
@@ -2049,22 +2078,24 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
             base = resp.text or ""
             mod = insert_citation_markers(base, cits)
             src = [item for citation in cits for item in citation["segments"]]
-            return src, mod
+            return src, mod, cits  # Return citations for source mapping
         else:
             # 没有grounding_chunks时，只返回文本内容（无引用）
             base = resp.text or ""
             logger.info("[NEO_LOG] [web_research] No grounding chunks, returning text only: %d chars", len(base))
-            return [], base
+            return [], base, []
 
     # First attempt with primary (possibly translated) query
     import time
     start_time = time.time()
     try:
         logger.info("[NEO_LOG] [web_research] Starting primary query at %s: '%s'", time.strftime('%H:%M:%S'), primary_query)
-        sources_gathered, modified_text = _run_and_extract(primary_query)
+        sources_gathered, modified_text, cits = _run_and_extract(primary_query)
         elapsed = time.time() - start_time
         logger.info("[NEO_LOG] [web_research] Primary query completed in %.2fs: %d sources, %d chars", 
                    elapsed, len(sources_gathered), len(modified_text))
+        logger.debug("[NEO_LOG] [web_research] Web搜索响应文本预览(200字): %s", 
+                    (modified_text or "")[:200] + ("..." if len(modified_text or "") > 200 else ""))
     except Exception as e:
         # 兜底：任何未预期异常都不应中断流程
         elapsed = time.time() - start_time
@@ -2075,15 +2106,15 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
             logger.warning("[NEO_LOG] [web_research] Detected HTTP 400 - possible API rate limit or invalid request")
         elif "timeout" in error_msg.lower() or "connection" in error_msg.lower():
             logger.warning("[NEO_LOG] [web_research] Detected network issue: %s", error_msg)
-        sources_gathered, modified_text = [], "[web_search error suppressed] " + error_msg
+        sources_gathered, modified_text, cits = [], "[web_search error suppressed] " + error_msg, []
     # Retry with secondary (original) if no sources gathered
     if not sources_gathered and secondary_query:
         retry_start = time.time()
-        logger.info("[NEO_LOG] [web_research] Starting secondary query at %s: '%s'", time.strftime('%H:%M:%S'), secondary_query)
+        logger.debug("[NEO_LOG] [web_research] Starting secondary query at %s: '%s'", time.strftime('%H:%M:%S'), secondary_query)
         try:
-            sources_gathered, modified_text = _run_and_extract(secondary_query)
+            sources_gathered, modified_text, cits = _run_and_extract(secondary_query)
             retry_elapsed = time.time() - retry_start
-            logger.info("[NEO_LOG] [web_research] Secondary query completed in %.2fs: %d sources, %d chars", 
+            logger.debug("[NEO_LOG] [web_research] Secondary query completed in %.2fs: %d sources, %d chars", 
                        retry_elapsed, len(sources_gathered), len(modified_text))
         except Exception as e:
             retry_elapsed = time.time() - retry_start
@@ -2094,22 +2125,178 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
                 logger.warning("[NEO_LOG] [web_research] Secondary query also hit HTTP 400 - likely API rate limit")
             elif "timeout" in error_msg.lower() or "connection" in error_msg.lower():
                 logger.warning("[NEO_LOG] [web_research] Secondary query network issue: %s", error_msg)
-            sources_gathered, modified_text = [], "[web_search error suppressed] " + error_msg
+            sources_gathered, modified_text, cits = [], "[web_search error suppressed] " + error_msg, []
 
     # 记录已派发查询，避免重复
     dispatched_out = [original_query] if original_query else []
     
+    # Apply local reranking to web sources if enabled
+    web_sources_reranked = sources_gathered[:] if sources_gathered else []
+    web_rerank_meta = {}
+    # 本地重排
+    if sources_gathered and getattr(configurable, 'enable_rag_rerank', True):
+        try:
+            from agent.rag_rerank import create_reranker
+            local_reranker = create_reranker(configurable)
+            
+            # Use the actual response text for reranking and map back to sources
+            # The modified_text contains the full content with citation markers
+            if modified_text and len(modified_text.strip()) > 50 and cits:  # Need citations for mapping
+                # Deduplicate sources by short_url first
+                unique_sources = []
+                seen_urls = set()
+                for source in sources_gathered:
+                    url_key = source.get('short_url', source.get('value', ''))
+                    if url_key not in seen_urls:
+                        unique_sources.append(source)
+                        seen_urls.add(url_key)
+                
+                logger.debug("[NEO_LOG] [web_research] 来源去重: %d个原始 -> %d个唯一", len(sources_gathered), len(unique_sources))
+                
+                # Split the text into sentences for reranking
+                import re
+                sentences = re.split(r'[.!?]\s+', modified_text.strip())
+                logger.debug("[NEO_LOG] [web_research] 文本分句: %d字符文本 -> %d个句子", len(modified_text), len(sentences))
+                
+                # Build sentence-to-citation mapping
+                sentence_citations = {}
+                char_pos = 0
+                
+                for i, sentence in enumerate(sentences):
+                    sentence = sentence.strip()
+                    if len(sentence) < 20:  # Skip very short sentences
+                        char_pos += len(sentence) + 1
+                        continue
+                        
+                    # Find citations that fall within this sentence's character range
+                    sentence_start = char_pos
+                    sentence_end = char_pos + len(sentence)
+                    
+                    # Find overlapping citations
+                    overlapping_citations = []
+                    for citation in cits:
+                        cit_start = citation.get('start_index', 0)
+                        cit_end = citation.get('end_index', 0)
+                        
+                        # Check if citation overlaps with sentence
+                        if (cit_start <= sentence_end and cit_end >= sentence_start):
+                            overlapping_citations.extend(citation.get('segments', []))
+                    
+                    if overlapping_citations:
+                        sentence_citations[sentence] = overlapping_citations
+                    
+                    char_pos = sentence_end + 1
+                
+                # Filter meaningful sentences for reranking
+                meaningful_sentences = [
+                    s for s in sentence_citations.keys() 
+                    if len(s) > 20 and not s.startswith('[') and not s.endswith(']')
+                ]
+                
+                # 打印所有句子的详细信息
+                logger.debug("[NEO_LOG] [web_research] 提取%d个有效句子用于重排:", len(meaningful_sentences))
+                if meaningful_sentences:
+                    for i, sentence in enumerate(meaningful_sentences):
+                        citations_count = len(sentence_citations.get(sentence, []))
+                        logger.debug("[NEO_LOG] [web_research] 有效句子 [%d] 引用%d个: %s", i+1, citations_count, sentence[:80] + ("..." if len(sentence) > 80 else ""))
+                else:
+                    logger.debug("[NEO_LOG] [web_research] 没有找到有效句子")
+                
+                if meaningful_sentences:
+                    # Apply local reranking
+                    min_keep = min(len(unique_sources), getattr(configurable, 'rag_min_keep', 3))
+                    local_result = local_reranker.rerank_rag_data(original_query, meaningful_sentences, min_keep=min_keep)
+                    
+                    # Aggregate scores by source URL
+                    source_scores = {}
+                    for sentence, score in zip(meaningful_sentences, local_result.relevance_scores):
+                        if sentence in sentence_citations:
+                            for segment in sentence_citations[sentence]:
+                                url_key = segment.get('short_url', segment.get('value', ''))
+                                if url_key:
+                                    if url_key not in source_scores:
+                                        source_scores[url_key] = []
+                                    source_scores[url_key].append(score)
+                    
+                    logger.debug("[NEO_LOG] [web_research] 句子到来源映射: %d个句子映射到%d个来源", 
+                            len([s for s in meaningful_sentences if s in sentence_citations]), len(source_scores))
+                    
+                    # Calculate aggregated scores (max score per source)
+                    source_final_scores = {}
+                    for url_key, scores in source_scores.items():
+                        source_final_scores[url_key] = max(scores) if scores else 0.0
+                    
+                    logger.debug("[NEO_LOG] [web_research] 来源最终得分: %s", 
+                            {k: f"{v:.3f}" for k, v in list(source_final_scores.items())[:5]})
+                    
+                    # Sort sources by aggregated scores
+                    scored_sources = []
+                    unscored_sources = []
+                    
+                    for source in unique_sources:
+                        url_key = source.get('short_url', source.get('value', ''))
+                        if url_key in source_final_scores:
+                            scored_sources.append((source, source_final_scores[url_key]))
+                        else:
+                            unscored_sources.append(source)
+                    
+                    # Sort by score (descending) and keep top sources
+                    scored_sources.sort(key=lambda x: x[1], reverse=True)
+                    
+                    # Build final reranked list: scored sources + unscored as fallback
+                    web_sources_reranked = [src for src, score in scored_sources]
+                    if len(web_sources_reranked) < min_keep:
+                        web_sources_reranked.extend(unscored_sources[:min_keep - len(web_sources_reranked)])
+                    
+                    # Limit to reasonable size
+                    web_sources_reranked = web_sources_reranked[:getattr(configurable, 'rag_max_segments', 10)]
+                    
+                    filtered_before_min_keep = len([score for score in source_final_scores.values() if score >= local_reranker.relevance_threshold])
+                    
+                    web_rerank_meta = {
+                        'threshold': local_reranker.relevance_threshold,
+                        'original_count': len(unique_sources),
+                        'filtered_count': len(web_sources_reranked),
+                        'avg_score': sum(source_final_scores.values()) / len(source_final_scores) if source_final_scores else 0.0,
+                        'min_keep_triggered': filtered_before_min_keep < min_keep,
+                        'content_based': True,
+                        'sentences_analyzed': len(meaningful_sentences),
+                        'sources_scored': len(scored_sources),
+                        'deduplication_applied': len(sources_gathered) != len(unique_sources)
+                    }
+                    
+                    logger.debug("[NEO_LOG] [web_research] 基于内容的来源重排: %d个句子 -> %d个来源评分 (平均分=%.3f, 保留%d个来源, 保底策略=%s)", 
+                               len(meaningful_sentences), len(scored_sources), web_rerank_meta['avg_score'], 
+                               len(web_sources_reranked), web_rerank_meta['min_keep_triggered'])
+                    
+                    # 打印最终保留的来源
+                    logger.debug("[NEO_LOG] [web_research] 最终保留的%d个来源:", len(web_sources_reranked))
+                    for i, source in enumerate(web_sources_reranked[:3]):  # 只显示前3个
+                        url_key = source.get('short_url', source.get('value', ''))
+                        score = source_final_scores.get(url_key, 0.0)
+                        logger.debug("[NEO_LOG] [web_research]   [%d] 分数=%.3f: %s", i+1, score, url_key[:60] + ("..." if len(url_key) > 60 else ""))
+                else:
+                    logger.debug("[NEO_LOG] [web_research] 未找到有效句子进行重排，使用去重后的顺序")
+                    web_sources_reranked = unique_sources
+            else:
+                logger.debug("[NEO_LOG] [web_research] 内容不足或无引用信息进行来源映射，使用原始顺序")
+            
+        except Exception as e:
+            logger.warning("[NEO_LOG] [web_research] 本地重排失败: %s，使用原始顺序", e)
+            web_sources_reranked = sources_gathered[:]
+            web_rerank_meta = {'error': str(e)}
+    
+
     logger.info("[NEO_LOG] [web_research] Final result: %d sources_gathered, %d chars modified_text", 
                 len(sources_gathered), len(modified_text))
-    # logger.info("[NEO_LOG] [web_research] Modified text preview: %s", 
-    #             modified_text[:200] + "..." if len(modified_text) > 200 else modified_text)
     
     return {
         "sources_gathered": sources_gathered,
+        "web_sources_reranked": web_sources_reranked,
+        "web_rerank_meta": web_rerank_meta,
         "search_query": [state.get("search_query", "")],
         "web_research_result": [modified_text],
         "dispatched_queries": dispatched_out,
-        # "reasoning_model": configurable.query_generator_model,
     }
 
 # 重点方法 RAG
@@ -2151,7 +2338,7 @@ def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
                 local_json=getattr(configurable, "rag_rest_local_json", "backend/examples/vendor_projects.json"),
                 top_k=top_k,
             )
-            # logger.info("[NEO_LOG] [rag_search] REST query returned %d hits", len(hits))
+            logger.info("[NEO_LOG] [rag_search] REST query returned %d hits", len(hits))
         else:
             logger.info("[NEO_LOG] [rag_search] RAG REST disabled, using empty results (local TF-IDF commented out)")
             # hits = query_rag(
@@ -2199,52 +2386,179 @@ def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
     segments = []
     for h in combined_hits:
         try:
-            url = h.get("url") or ""
-            label = h.get("label") or "RAG"
+            label = h.get("label") or "RAG" # 项目名
+            url = h.get("url") or "" # 项目链接
+            date = h.get("date") or "" # 项目时间
+            desc = h.get("desc", "") # 项目描述
             segments.append({
                 "label": label,
-                "short_url": url,
-                "value": url,
+                "url": url,
+                "date": date,
+                "desc": desc,
             })
         except Exception:
             continue
+
+    # 级联重排 Apply cascaded reranking: local heuristic -> VoyageAI (if enabled)
+    if combined_hits and getattr(configurable, 'enable_rag_rerank', True):
+        try:
+            # Stage 1: Local heuristic reranking (fast pre-filtering)
+            from agent.rag_rerank import create_reranker
+            local_reranker = create_reranker(configurable)
+            
+            # Extract text content for reranking
+            hit_texts = []
+            for h in combined_hits:
+                text_content = h.get("desc", "") or h.get("label", "")
+                hit_texts.append(text_content)
+            
+            # First pass: local heuristic filtering
+            local_result = local_reranker.rerank_rag_data(original_query, hit_texts)
+            
+            # Filter hits based on local reranking results
+            stage1_hits = []
+            for segment in local_result.filtered_segments:
+                for hit in combined_hits:
+                    hit_text = hit.get("description", "") or hit.get("project_summary", "") or hit.get("label", "")
+                    if hit_text == segment:
+                        stage1_hits.append(hit)
+                        break
+            
+            # 本地守护策略：确保有足够文档进入Stage2
+            min_keep = getattr(configurable, 'rag_min_keep', 10)
+            if len(stage1_hits) < min_keep and len(combined_hits) > 0:
+                # 按本地重排分数排序，取Top-K作为兜底
+                scored_hits = []
+                for i, hit in enumerate(combined_hits):
+                    hit_text = hit.get("description", "") or hit.get("project_summary", "") or hit.get("label", "")
+                    score = local_reranker.calculate_relevance_score(original_query, hit_text)
+                    scored_hits.append((hit, score))
+                
+                # 排序并取前min_keep个
+                scored_hits.sort(key=lambda x: x[1], reverse=True)
+                stage1_hits = [hit for hit, score in scored_hits[:min_keep]]
+                
+            logger.info("[NEO_LOG] [rag_search] Stage1 (local): %d -> %d hits (avg_score=%.3f)", 
+                       local_result.original_count, local_result.filtered_count,
+                       sum(local_result.relevance_scores) / len(local_result.relevance_scores) if local_result.relevance_scores else 0)
+            
+            # Stage 2: VoyageAI reranking (conditional based on defer_api_rerank_to_reflection)
+            defer_to_reflection = getattr(configurable, 'defer_api_rerank_to_reflection', True)
+            # 如果不延迟到反思节点（默认推迟） 才在本轮进行VoyageAI重排（会增加成本）
+            if (not defer_to_reflection and 
+                getattr(configurable, 'enable_voyage_rerank', False) and 
+                getattr(configurable, 'voyage_api_key', '') and 
+                stage1_hits):
+                
+                try:
+                    from agent.voyage_rerank import create_voyage_reranker
+                    voyage_reranker = create_voyage_reranker(configurable)
+                    
+                    if voyage_reranker:
+                        # Prepare documents for VoyageAI (combine title + description + url)
+                        voyage_documents = []
+                        for h in stage1_hits:
+                            doc_text = f"{h.get('label', '')}\n{h.get('description', '') or h.get('project_summary', '')}\n{h.get('url', '')}"
+                            voyage_documents.append(doc_text.strip())
+                        
+                        # Call VoyageAI rerank
+                        voyage_result = voyage_reranker.rerank_documents(
+                            query=original_query,
+                            documents=voyage_documents,
+                            top_k=getattr(configurable, 'voyage_rerank_top_k', None),
+                            relevance_threshold=getattr(configurable, 'rag_relevance_threshold', 0.3)
+                        )
+                        
+                        # Map back to original hits using indices
+                        final_hits = []
+                        for idx in voyage_result.original_indices:
+                            if 0 <= idx < len(stage1_hits):
+                                final_hits.append(stage1_hits[idx])
+                        
+                        hits = final_hits
+                        logger.info("[NEO_LOG] [rag_search] Stage2 (VoyageAI): %d -> %d hits (avg_score=%.3f, tokens=%d)", 
+                                   voyage_result.original_count, voyage_result.filtered_count,
+                                   sum(voyage_result.relevance_scores) / len(voyage_result.relevance_scores) if voyage_result.relevance_scores else 0,
+                                   voyage_result.api_usage.get('total_tokens', 0))
+                    else:
+                        hits = stage1_hits
+                        logger.info("[NEO_LOG] [rag_search] VoyageAI reranker not available, using stage1 results")
+                        
+                except Exception as e:
+                    logger.warning("[NEO_LOG] [rag_search] VoyageAI reranking failed: %s, falling back to local results", e)
+                    hits = stage1_hits
+            else:
+                hits = stage1_hits
+                if defer_to_reflection:
+                    logger.info("[NEO_LOG] [rag_search] VoyageAI reranking deferred to reflection stage, using local results only")
+                elif not getattr(configurable, 'enable_voyage_rerank', False):
+                    logger.info("[NEO_LOG] [rag_search] VoyageAI reranking disabled, using local results only")
+                elif not getattr(configurable, 'voyage_api_key', ''):
+                    logger.info("[NEO_LOG] [rag_search] VoyageAI API key not configured, using local results only")
+                    
+        except Exception as e:
+            logger.warning("[NEO_LOG] [rag_search] Reranking pipeline failed: %s, using original hits", e)
+            hits = combined_hits
+    else:
+        hits = combined_hits
 
     # Build a compact synthesized text
     if hits:
         bullets = []
         for i, h in enumerate(hits[:top_k], 1):
-            label = h.get("label") or f"RAG{i}"
-            url = h.get("url") or ""
-            snippet = (h.get("text") or "").strip().replace("\n", " ")
-            if len(snippet) > 400:
-                snippet = snippet[:400] + "..."
-            bullets.append(f"[{label}] {url} {snippet}")
-        logger.info("[NEO_LOG] [rag_search] Bullets test: %s", bullets[0])
-        modified_text = _prepare_summaries(bullets, max_items=top_k, max_chars=8000)
+            label = h.get("label") or f"RAG{i}" # 项目名
+            url = h.get("url") or "URL_NULL" # 项目链接
+            date = h.get("date") or "DATE_NULL" # 项目时间
+            desc = h.get("desc", "") # 项目描述
+            bullets.append(f"{i}. {label} | {date} | {url} | {desc[:100]}{'...' if len(desc) > 100 else ''}")
+        modified_text = "\n".join(bullets)
     else:
-        modified_text = "[RAG] No relevant knowledge found." + (f" Error: {err}" if err else "")
-
-    # Append user project recommendations into the synthesized text for compatibility
-    # TODO: 暂时注释掉用户项目推荐的文本合成逻辑
-    # if user_hits:
-    #     up_bullets = []
-    #     for i, uh in enumerate(user_hits[: min(3, top_k)], 1):
-    #         label = uh.get("label") or f"用户项目 {i}" # 保留此处两个特定业务中文
-    #         snippet = (uh.get("text") or "").strip().replace("\n", " ")
-    #         if len(snippet) > 400:
-    #             snippet = snippet[:400] + "..."
-    #         up_bullets.append(f"[{label}] {snippet}")
-    #     up_text = _prepare_summaries(["用户项目推荐："] + up_bullets, max_items=min(1 + len(up_bullets), top_k + 1), max_chars=4000)
-    #     modified_text = (modified_text + SUMMARY_SEPARATOR + up_text) if modified_text else up_text
+        modified_text = "RAG搜索未找到相关内容。"
 
     dispatched_out = [original_query] if original_query else []
 
-    logger.info("[NEO_LOG] [rag_search] Result: %d sources, %d chars | Preview: %s", 
+    # Prepare rag_sources_reranked for reflection stage
+    rag_sources_reranked = segments[:]  # Default: keep original order
+    rag_rerank_meta = {}
+    
+    if hits and getattr(configurable, 'enable_rag_rerank', True):
+        # Map hits back to segments for reranked order
+        reranked_segments = []
+        for h in hits:
+            try:
+                label = h.get("label") or "RAG" # 项目名
+                url = h.get("url") or "" # 项目链接
+                date = h.get("date") or "" # 项目时间
+                desc = h.get("desc", "") # 项目描述
+                reranked_segments.append({
+                    "label": label,
+                    "url": url,
+                    "date": date,
+                    "desc": desc,
+                })
+            except Exception:
+                continue
+        
+        rag_sources_reranked = reranked_segments
+        rag_rerank_meta = {
+            'original_count': len(combined_hits),
+            'filtered_count': len(hits),
+            'defer_to_reflection': getattr(configurable, 'defer_api_rerank_to_reflection', True)
+        }
+        
+        logger.info("[NEO_LOG] [rag_search] Prepared for reflection: %d -> %d sources (defer_api=%s)", 
+                   rag_rerank_meta['original_count'], rag_rerank_meta['filtered_count'],
+                   rag_rerank_meta['defer_to_reflection'])
+
+    logger.info("[NEO_LOG] [rag_search] Final result: %d sources, %d chars | Preview: %s", 
                 len(segments), len(modified_text),
-                modified_text[:200] + "..." if len(modified_text) > 200 else modified_text)
+                modified_text[:200] + "..." if len(modified_text) > 200 else modified_text,
+    )
 
     return {
         "sources_gathered": segments,
+        "rag_sources_reranked": rag_sources_reranked,
+        "rag_rerank_meta": rag_rerank_meta,
         "search_query": [state.get("search_query", "")],
         "web_research_result": [modified_text],
         "dispatched_queries": dispatched_out,
@@ -2681,7 +2995,7 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
         try:
             raw_result = llm.invoke(formatted_prompt)
             raw_content = raw_result.content if hasattr(raw_result, 'content') else str(raw_result)
-            logger.error("[NEO_LOG] [reflection] Raw LLM output: %s", raw_content[:500] + "..." if len(raw_content) > 500 else raw_content)
+            # logger.error("[NEO_LOG] [reflection] Raw LLM output: %s", raw_content[:500] + "..." if len(raw_content) > 500 else raw_content)
         except Exception:
             logger.error("[NEO_LOG] [reflection] Failed to get raw output for debugging")
         
@@ -2693,7 +3007,7 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
         try:
             raw_result = llm.invoke(formatted_prompt)
             raw_content = raw_result.content if hasattr(raw_result, 'content') else str(raw_result)
-            logger.error("[NEO_LOG] [reflection] Raw content for repair: %s", raw_content[:1000] + "..." if len(raw_content) > 1000 else raw_content)
+            # logger.error("[NEO_LOG] [reflection] Raw content for repair: %s", raw_content[:1000] + "..." if len(raw_content) > 1000 else raw_content)
             
             # Try to extract and repair JSON
             repaired_result = _repair_json_format(raw_content, prev_obj_prog)
@@ -2842,6 +3156,92 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
     except Exception:
         pass
     
+    # 重排 Web + RAG 阶段的混合信息 Apply final cross-source reranking (web + rag)
+    final_sources_reranked = []
+    final_rerank_meta = {}
+    
+    if getattr(configurable, 'enable_final_cross_rerank', True):
+        try:
+            # Collect sources from web and rag
+            web_sources = state.get("web_sources_reranked", []) or state.get("sources_gathered", [])
+            rag_sources = state.get("rag_sources_reranked", []) or []
+            
+            # Combine and deduplicate by URL
+            combined_sources = []
+            seen_urls = set()
+            
+            for source in web_sources + rag_sources:
+                url = source.get("short_url", "") or source.get("value", "")
+                if url and url not in seen_urls:
+                    seen_urls.add(url)
+                    combined_sources.append(source)
+                elif not url:  # Keep sources without URLs (avoid over-filtering)
+                    combined_sources.append(source)
+            
+            # Apply final reranking if we have enough sources
+            min_sources_for_rerank = getattr(configurable, 'final_rerank_min_sources', 3)
+            if (len(combined_sources) >= min_sources_for_rerank and 
+                getattr(configurable, 'enable_voyage_rerank', False) and 
+                getattr(configurable, 'voyage_api_key', '')):
+                
+                from agent.voyage_rerank import create_voyage_reranker
+                voyage_reranker = create_voyage_reranker(configurable)
+                
+                if voyage_reranker:
+                    # Prepare documents for VoyageAI
+                    documents = []
+                    for source in combined_sources:
+                        doc_text = f"{source.get('label', '')} {source.get('short_url', '')}".strip()
+                        documents.append(doc_text)
+                    
+                    # Get research topic for query
+                    research_topic = get_research_topic(state.get("messages", []))
+                    
+                    # Call VoyageAI final rerank
+                    voyage_result = voyage_reranker.rerank_documents(
+                        query=research_topic,
+                        documents=documents,
+                        top_k=getattr(configurable, 'final_rerank_top_k', 10),
+                        relevance_threshold=getattr(configurable, 'rag_relevance_threshold', 0.3)
+                    )
+                    
+                    # Map back to original sources
+                    reranked_sources = []
+                    for idx in voyage_result.original_indices:
+                        if 0 <= idx < len(combined_sources):
+                            reranked_sources.append(combined_sources[idx])
+                    
+                    final_sources_reranked = reranked_sources
+                    final_rerank_meta = {
+                        'web_count': len(web_sources),
+                        'rag_count': len(rag_sources),
+                        'combined_count': len(combined_sources),
+                        'final_count': len(final_sources_reranked),
+                        'avg_score': sum(voyage_result.relevance_scores) / len(voyage_result.relevance_scores) if voyage_result.relevance_scores else 0.0,
+                        'tokens': voyage_result.api_usage.get('total_tokens', 0)
+                    }
+                    
+                    logger.info("[NEO_LOG] [reflection] Final cross-rerank: web=%d + rag=%d -> combined=%d -> final=%d (avg_score=%.3f, tokens=%d)", 
+                               final_rerank_meta['web_count'], final_rerank_meta['rag_count'], 
+                               final_rerank_meta['combined_count'], final_rerank_meta['final_count'],
+                               final_rerank_meta['avg_score'], final_rerank_meta['tokens'])
+                else:
+                    logger.info("[NEO_LOG] [reflection] VoyageAI reranker not available for final rerank")
+                    final_sources_reranked = combined_sources[:getattr(configurable, 'final_rerank_top_k', 10)]
+            else:
+                logger.info("[NEO_LOG] [reflection] Skipping final rerank: sources=%d (min=%d), voyage_enabled=%s", 
+                           len(combined_sources), min_sources_for_rerank, 
+                           getattr(configurable, 'enable_voyage_rerank', False))
+                final_sources_reranked = combined_sources[:getattr(configurable, 'final_rerank_top_k', 10)]
+                
+        except Exception as e:
+            logger.warning("[NEO_LOG] [reflection] Final cross-reranking failed: %s", e)
+            # Fallback: use original sources
+            web_sources = state.get("sources_gathered", [])
+            rag_sources = state.get("rag_sources_reranked", [])
+            final_sources_reranked = (web_sources + rag_sources)[:getattr(configurable, 'final_rerank_top_k', 10)]
+            final_rerank_meta = {'error': str(e)}
+
     effort = _infer_effort(state, configurable)
     completion_threshold = _effort_completion_threshold(configurable, effort)
     return {
@@ -2860,6 +3260,8 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
         "number_of_ran_queries": len(state.get("search_query") or []),
         "objective_rr_index": state.get("objective_rr_index"),
         "reasoning_model": configurable.query_generator_model,
+        "final_sources_reranked": final_sources_reranked,
+        "final_rerank_meta": final_rerank_meta,
     }
 
 def route_after_reflection(state: OverallState, config: RunnableConfig):
@@ -3199,7 +3601,7 @@ builder.add_node("finalize_answer", finalize_answer)
 # Enhanced routing with HITL and structured thinking
 builder.add_edge(START, "detect_follow_up")
 builder.add_conditional_edges(
-    "detect_follow_up", route_follow_up_detection, ["classify_intent", "find_official_site", "thinking_startup_stage"]
+    "detect_follow_up", route_follow_up_detection, ["classify_intent"]
 )
 # builder.add_conditional_edges(
 #     "handle_follow_up", route_after_handle_follow_up, ["generate_query", "thinking_middle_stage", "thinking_finalization_stage", END]
