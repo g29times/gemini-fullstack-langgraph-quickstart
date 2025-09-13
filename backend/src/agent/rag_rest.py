@@ -173,21 +173,27 @@ def _score_project(query: str, item: Dict[str, Any]) -> float:
     return score
 
 
-def _normalize_item(item: Dict[str, Any], idx: int, path_hint: str | None, score: float) -> Dict[str, Any]:
-    pname = str(item.get("projectName") or f"Project-{idx+1}")
-    uname = str(item.get("userName") or "UnknownUser")
-    aname = str(item.get("partyAName") or "")
-    summary = str(item.get("projectSummary") or "")
+def _normalize_item(item: Dict[str, Any], score: float) -> Dict[str, Any]:
+    id = str(item.get("id") or "")
+    title = str(item.get("projectName") or "")
     date = str(item.get("date") or "")
-    label = pname
-    snippet = f"项目：{pname}；概要：{summary}；日期：{date}；用户：{uname}；甲方：{aname}"
+    url = str(item.get("url") or "")
+
+    summary = str(item.get("projectSummary") or "")
+    uname = str(item.get("userName") or "")
+    aname = str(item.get("partyAName") or "")
+    desc = f"项目概要：{summary}；用户：{uname}；甲方：{aname}"
     return {
-        "label": label, # label含义：项目名称
-        "url": f"rag://user_project/{idx}",
-        "path": path_hint or "",
-        "chunk_index": idx,
-        "text": snippet, # snippet含义：项目信息整合
-        "score": float(score),
+        "id": id,
+        "title": title,
+        "date": date,
+        "url": url,
+        "desc": desc,
+        "score": score,
+        # 兼容web属性 label，value
+        # 例 sources_gathered: {'label': 'gangwan123', 'short_url': 'https://vertexaisearch.cloud.google.com/id/2-0', 'value': 'https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQE4BxOaRRy-Nx_JarD8NxM7JDUYoAipg-L3WiuM7wberR8rPL5oRnYSB908g0dOD--M_sztGmYseBFEvn36hqCsjvXrK6UodzvSFoVYVkRuMLNAh7NeEfV8GoZoqQ=='}
+        "label": title,
+        "value": url,
     }
 
 
@@ -240,58 +246,64 @@ def query_rag_rest(
         if projects_data:
             for i, it in enumerate(projects_data[: max(1, top_k)]):
                 try:
-                    # 兼容新旧字段名
-                    pname = (it.get("projectName") or it.get("project_name") or 
-                            it.get("title") or f"Project-{i+1}")
-                    # 项目用户
-                    uname = (it.get("userName") or it.get("user_name") or it.get("supplier") or "供应商")
-                    # 项目甲方
-                    aname = (it.get("partyAName") or it.get("party_a_name") or it.get("owner") or "甲方")
-                    date = it.get("date") or it.get("time") or ""
-                    summary = (it.get("projectSummary") or it.get("project_summary") or it.get("description") or "")
+                    # 项目ID
+                    id = it.get("id")
                     # 项目名称
-                    label = str(pname)
+                    title = it.get("projectName") or f"Project-{i+1}"
+                    # 截止投标日期
+                    date = it.get("date") or ""
                     # 项目URL
-                    url = it.get("url") or f"rag://user_project/rest/{i}"
-                    score = float(it.get("score") or 1.0)  # 默认评分1.0
+                    url = it.get("url") or ""
+
+                    # 项目概要
+                    summary = it.get("projectSummary") or ""
+                    # 用户
+                    uname = it.get("userName") or ""
+                    # 甲方
+                    aname = it.get("partyAName") or ""
+                    # Embedding 相似度评分 默认评分1.0
+                    score = float(it.get("score") or 1.0)
                     
-                    # 构建项目描述文本
-                    snippet = f"项目：{pname}"
+                    # 构建 项目描述 文本
+                    desc = ""
                     if summary:
-                        snippet += f"；概要：{summary}"
-                    if date:
-                        snippet += f"；日期：{date}"
-                    if uname and uname != "供应商":
-                        snippet += f"；用户：{uname}"
-                    if aname and aname != "甲方":
-                        snippet += f"；甲方：{aname}"
+                        desc += f"项目概要：{summary}"
+                    if uname:
+                        desc += f"；用户：{uname}"
+                    if aname:
+                        desc += f"；甲方：{aname}"
                     
                     hits.append({
-                        "label": label,
-                        "url": url,
+                        "id": id,
+                        "title": title,
                         "date": date,
-                        "desc": snippet,
-                        # "path": endpoint,
-                        "chunk_index": i,
+                        "url": url, # "path": endpoint,
+                        "desc": desc,
                         "score": score,
+                        "label": title,
+                        "value": url
                     })
                 except Exception as e:
                     logger.warning("[NEO_LOG] [query_rag_rest] 处理项目 %d 时出错: %s", i, str(e))
                     continue
     
-    logger.info("[NEO_LOG] [query_rag_rest] rest hits: %d | %s", len(hits), hits[0])
+    logger.info("[NEO_LOG] [query_rag_rest] rest hits: %d", len(hits))
+    if hits and len(hits) > 0:
+        # print(f"[NEO_LOG] [query_rag_rest] 问题：{query}， | 第一个结果: {hits[0]}")
+        logger.info("[NEO_LOG] [query_rag_rest] 问题：%s， | 第一个结果: %s", query, hits[0])
     # If REST enabled but empty/failed, continue to fallback below
-
-    # 2) Fallback to local JSON
-    if not hits:
-        items = _load_local_projects(local_json)
-        scored = [(it, _score_project(query, it)) for it in items]
-        scored = [pair for pair in scored if pair[1] > 0.0] or scored  # if no matches, allow zero-scores
-        scored.sort(key=lambda x: x[1], reverse=True)
-        top = scored[: max(1, top_k)]
-        for idx, (it, sc) in enumerate(top):
-            hits.append(_normalize_item(it, idx, local_json, sc))
-        logger.info("[NEO_LOG] [query_rag_rest] local hits: %d", len(hits))
+    else:
+        logger.warning("[NEO_LOG] [query_rag_rest] 问题：%s， | RAG REST请求没有返回数据", query)
+    # 2) Fallback to local JSON or cache
+    # if not hits:
+    #     items = _load_local_projects(local_json)
+    #     scored = [(it, _score_project(query, it)) for it in items]
+    #     scored = [pair for pair in scored if pair[1] > 0.0] or scored  # if no matches, allow zero-scores
+    #     scored.sort(key=lambda x: x[1], reverse=True)
+    #     top = scored[: max(1, top_k)]
+    #     for idx, (it, sc) in enumerate(top):
+    #         hits.append(_normalize_item(it, idx, sc))
+    #     logger.info("[NEO_LOG] [query_rag_rest] local hits: %d", len(hits))
     return hits
 
 
@@ -303,7 +315,7 @@ def query_user_projects(
     """Get top-K projects by user from local mock JSON.
 
     - user_name: 用户名（支持部分匹配，大小写不敏感）
-    - 返回字段与 query_rag/query_rag_rest 归一：label/url/text/score/path/chunk_index
+    - 返回字段与 query_rag/query_rag_rest 归一： title/url/text/score/path/chunk_index
     - 排序规则：优先按日期降序（YYYY-MM-DD），缺失日期的排在后面
     """
     items = _load_local_projects(local_json)
@@ -337,7 +349,7 @@ def query_user_projects(
     for i, it in enumerate(top):
         # score: 优先匹配用户则给较高分，否则为0
         base = 1.0 if it in matched else 0.0
-        hits.append(_normalize_item(it, i, local_json, base))
+        hits.append(_normalize_item(it, i, base))
     return hits
 
 # Backward compatibility alias

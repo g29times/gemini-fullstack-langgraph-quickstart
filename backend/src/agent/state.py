@@ -60,13 +60,13 @@ class OverallState(TypedDict):
     knowledge_gap_history: NotRequired[list[str]]
     objectives_progress_history: NotRequired[list[dict]]
     objective_rr_index: NotRequired[int]
-    # RAG integration fields
-    rag_sources_reranked: NotRequired[Annotated[list, operator.add]]  # RAG sources after reranking
+    # RAG rerank fields
+    # rag_sources_reranked: NotRequired[Annotated[list, operator.add]]  # RAG sources after reranking
     # rag_rerank_meta: NotRequired[dict]  # RAG reranking metadata
-    # web_sources_reranked: NotRequired[list]  # Web sources after reranking  
+    # web_sources_reranked: NotRequired[Annotated[list, operator.add]]  # Web sources after reranking  
     # web_rerank_meta: NotRequired[dict]  # Web reranking metadata
-    # final_sources_reranked: NotRequired[list]  # Final cross-reranked sources
-    # final_rerank_meta: NotRequired[dict]  # Final reranking metadata
+    reflection_sources_reranked: NotRequired[list]  # Final cross-reranked sources
+    # reflection_rerank_meta: NotRequired[dict]  # Final reranking metadata
 
 
 class ReflectionState(TypedDict):

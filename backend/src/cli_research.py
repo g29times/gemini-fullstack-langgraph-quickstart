@@ -4,11 +4,18 @@ from langchain_core.messages import HumanMessage
 from langgraph.errors import NodeInterrupt
 from agent.graph import graph
 
-
+# python backend/src/cli_research.py --max-concurrency 
+# 4 --max-loops 1 --auto-approve "最近有哪些招投标项目"
 def main() -> None:
     """Run the research agent from the command line."""
     parser = argparse.ArgumentParser(description="Run the LangGraph research agent")
     parser.add_argument("question", help="Research question")
+    parser.add_argument(
+        "--max-concurrency",
+        type=int,
+        default=None,
+        help="Override: concurrent node executions within a superstep. If not set, computed as max_parallel_queries * (1 + enable_rag_rest)",
+    )
     parser.add_argument(
         "--initial-queries",
         type=int,
@@ -23,7 +30,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--reasoning-model",
-        default="gemini-2.5-pro-preview-05-06",
+        default="gemini-2.5-flash-lite",
         help="Model for the final answer",
     )
     parser.add_argument(
@@ -53,7 +60,14 @@ def main() -> None:
     # Run graph, handling HITL NodeInterrupt by optionally auto-approving
     while True:
         try:
-            result = graph.invoke(state)
+            # Enable true parallel execution of branches within the same superstep
+            # If user did not override, compute from configuration
+            from agent.configuration import Configuration
+            cfg = Configuration()
+            factor = 1 + (1 if getattr(cfg, "enable_rag_rest", False) else 0)
+            computed_mc = (getattr(cfg, "max_parallel_queries", 4) or 1) * max(1, factor)
+            mc = args.max_concurrency if args.max_concurrency is not None else computed_mc
+            result = graph.invoke(state, {"max_concurrency": mc})
             break
         except NodeInterrupt as interrupt:
             print("[CLI] Caught NodeInterrupt (HITL)")
@@ -81,7 +95,7 @@ def main() -> None:
 
     messages = result.get("messages", [])
     if messages:
-        print(messages[-1].content)
+        print("\n报告：\n" + messages[-1].content)
 
 
 if __name__ == "__main__":
