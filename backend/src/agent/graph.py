@@ -2583,7 +2583,7 @@ def thinking_finalization_stage(state: OverallState, config: RunnableConfig) -> 
     web_research_result = state.get("web_research_result", [])
     insights_gathered = state.get("insights_gathered", [])
     sources_reranked = state.get("reflection_sources_reranked", [])
-    logger.info("[NEO_LOG] [thinking_finalization_stage] sources_reranked: %s", sources_reranked[:3])
+    logger.info("[NEO_LOG] [thinking_finalization_stage] top3 sources_reranked: %s", sources_reranked[:3])
     safe_results = []
     if sources_reranked:
         safe_results = [s for s in sources_reranked if isinstance(s, str)]
@@ -3018,7 +3018,7 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
     # 7 返回值调试日志 - 记录最终返回给下游节点的数据
     effort = _infer_effort(state, configurable)
     completion_threshold = _effort_completion_threshold(configurable, effort)
-    logger.info("[NEO_LOG] [reflection] reflection_sources_reranked: %s", reflection_sources_reranked)
+    # logger.info("[NEO_LOG] [reflection] reflection_sources_reranked: %s", reflection_sources_reranked)
     return {
         # None-safe extraction to avoid AttributeError when result is None
         "reflection_sources_reranked": reflection_sources_reranked,
@@ -3123,7 +3123,7 @@ def generate_enhanced_report(state: OverallState, config: RunnableConfig) -> Ove
     
     current_date = get_current_date()
     reflection_sources_reranked = state.get("reflection_sources_reranked", [])
-    logger.info("[NEO_LOG] [generate_enhanced_report] sources_reranked: %s", reflection_sources_reranked[:3])
+    logger.info("[NEO_LOG] [generate_enhanced_report] top3 sources_reranked: %s", reflection_sources_reranked[:3])
     safe_results = []
     if reflection_sources_reranked:
         safe_results = [s for s in reflection_sources_reranked if isinstance(s, str)]

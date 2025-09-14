@@ -21,7 +21,7 @@ def _get_rag_endpoint() -> str:
     elif environment == "prod":
         return os.environ.get("RAG_REST_PROD_ENDPOINT")
     else:
-        return os.environ.get("RAG_REST_PROD_ENDPOINT")
+        return os.environ.get("RAG_REST_ENDPOINT")
 
 class Configuration(BaseModel):
     """The configuration for the agent."""
