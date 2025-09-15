@@ -83,7 +83,7 @@ genai_client = Client(api_key=os.getenv("GEMINI_API_KEY"))
 # Unified summaries separator and builder
 SUMMARY_SEPARATOR = "\n\n---\n\n"
 
-def _prepare_summaries(results: list[str] | None, max_items: int = 10, max_chars: int = 10000) -> str:
+def _prepare_summaries(results: list[str] | None, max_items: int = 10, max_chars: int = 40000) -> str:
     """Build a normalized, light deduped and size-capped summaries string.
 
     - Filters non-strings
@@ -1292,8 +1292,8 @@ def generate_research_plan(state: OverallState, config: RunnableConfig) -> Overa
     configurable = Configuration.from_runnable_config(config)
     
     llm = ChatGoogleGenerativeAI(
-        model=configurable.thinking_model,
-        temperature=0.2,
+        model=configurable.query_generator_model,
+        temperature=0.1,
         max_retries=2,
         api_key=os.getenv("GEMINI_API_KEY"),
     )
@@ -1355,7 +1355,7 @@ def generate_research_plan(state: OverallState, config: RunnableConfig) -> Overa
     return {
         "research_plan": plan_dict,
         "plan_approved": False,
-        "reasoning_model": configurable.thinking_model,
+        "reasoning_model": configurable.query_generator_model,
     }
 
 # 重点方法 人类审核 New HITL and Enhanced Thinking Nodes
@@ -1932,6 +1932,380 @@ def route_after_generate_query(state: QueryGenerationState, config: RunnableConf
     manager = QueryManager(state, configurable)
     return manager.schedule_queries(queries)
 
+# 重点方法 搜索 SerpAPI Baidu 替换原Google API
+def web_research_SerpAPI(state: WebSearchState, config: RunnableConfig) -> OverallState:
+    """LangGraph node that performs web research using SerpAPI Baidu search.
+
+    Uses SerpAPI Baidu engine to retrieve web sources and format them
+    in the same structure as the original web_research function.
+
+    Args:
+        state: Current graph state containing the search query and research loop count
+        config: Configuration for the runnable, including search API settings
+
+    Returns:
+        Dictionary with state update, including sources_gathered, research_loop_count, and web_research_results
+    """
+    from serpapi.google_search import GoogleSearch
+    from typing import Tuple
+    
+    # SerpAPI configuration
+    SERPAPI_KEY = os.getenv("SERPAPI_KEY")
+    if not SERPAPI_KEY:
+        raise ValueError("SERPAPI_KEY environment variable is required")
+    
+    # Configure
+    configurable = Configuration.from_runnable_config(config)
+    original_query = state.get("search_query", "")
+    
+    logger.info("[SERPAPI_LOG] [web_research] Entry: query='%s', id=%s", original_query, state.get("id", "N/A"))
+    
+    # Translate Chinese queries to English for better coverage
+    translated_query = _translate_to_english(original_query, configurable.query_generator_model) if _contains_cjk(original_query) else ""
+    primary_query = translated_query or original_query
+    
+    # 保留中文实体词到主查询中（即使已翻译）
+    try:
+        cjk_terms = _extract_cjk_terms(original_query)
+        if translated_query and cjk_terms:
+            missing = [t for t in cjk_terms if t not in primary_query]
+            if missing:
+                suffix = " ".join(f'"{t}"' for t in missing)
+                primary_query = f"{primary_query} {suffix}".strip()
+    except Exception:
+        pass
+    
+    # 设计更合理的备选查询策略
+    secondary_query = None
+    if getattr(configurable, 'enable_secondary_query', True):
+        if translated_query:
+            # 如果有翻译，备选查询可以是：原始查询的关键词提取版本
+            secondary_query = _extract_key_terms_query(original_query)
+            logger.info("[SERPAPI_LOG] [web_research] Secondary strategy: key terms from original '%s' -> '%s'", 
+                       original_query, secondary_query)
+        else:
+            # 如果没有翻译，备选查询可以是：重新表述的查询
+            secondary_query = _rephrase_query(original_query) if len(original_query.split()) > 2 else None
+            if secondary_query:
+                logger.info("[SERPAPI_LOG] [web_research] Secondary strategy: rephrase '%s' -> '%s'", 
+                           original_query, secondary_query)
+            else:
+                logger.info("[SERPAPI_LOG] [web_research] No secondary query - original too short: '%s'", original_query)
+    else:
+        logger.info("[SERPAPI_LOG] [web_research] Secondary query disabled by configuration")
+
+    def _run_serpapi_search(query_text: str, num_results: int = 10) -> Tuple[list, str]:
+        """Execute SerpAPI search and format results.
+        
+        Args:
+            query_text: Search query string
+            num_results: Number of results to retrieve
+            
+        Returns:
+            Tuple of (sources_list, formatted_text)
+        """
+        api_start = time.time()
+        try:
+            logger.debug("[SERPAPI_LOG] [web_research] API call starting for query: %s", query_text)
+            
+            # Configure SerpAPI search
+            search_params = {
+                "q": query_text,
+                "engine": "baidu",
+                "api_key": SERPAPI_KEY,
+                "num": num_results,
+                "hl": "zh",  # Language
+                "gl": "cn",  # Country
+                "safe": "active",  # Safe search
+            }
+            
+            search = GoogleSearch(search_params)
+            results = search.get_dict()
+            
+            api_elapsed = time.time() - api_start
+            logger.debug("[SERPAPI_LOG] [web_research] API call completed in %.2fs", api_elapsed)
+            
+            # Extract organic results
+            organic_results = results.get("organic_results", [])
+            
+            if not organic_results:
+                logger.warning("[SERPAPI_LOG] [web_research] No organic results found")
+                return [], "[SerpAPI] No search results found."
+            
+            logger.info("[SERPAPI_LOG] [web_research] Found %d organic results", len(organic_results))
+            
+            # Format sources for compatibility with existing system
+            sources_gathered = []
+            formatted_snippets = []
+            
+            for i, result in enumerate(organic_results[:num_results]):
+                title = result.get("title", "")
+                link = result.get("link", "")
+                snippet = result.get("snippet", "")
+                
+                # Log each search result in detail
+                logger.info("[SERPAPI_LOG] [RESULT_%d] Title: %s", i+1, title)
+                logger.info("[SERPAPI_LOG] [RESULT_%d] Link: %s", i+1, link)
+                logger.info("[SERPAPI_LOG] [RESULT_%d] Snippet: %s", i+1, snippet[:200] + "..." if len(snippet) > 200 else snippet)
+                
+                # Create source entry compatible with existing format
+                source_entry = {
+                    "label": title or f"Result {i+1}",
+                    "short_url": link,
+                    "value": link,
+                }
+                sources_gathered.append(source_entry)
+                
+                # Format snippet for text output
+                if snippet:
+                    formatted_snippet = f"[{title}] {link} {snippet}"
+                    formatted_snippets.append(formatted_snippet)
+            
+            # Combine all snippets into a single text response
+            if formatted_snippets:
+                modified_text = "\n\n".join(formatted_snippets)
+                logger.info("[SERPAPI_LOG] [web_research] Generated response text with %d characters", len(modified_text))
+            else:
+                modified_text = "[SerpAPI] Search completed but no detailed snippets available."
+                logger.warning("[SERPAPI_LOG] [web_research] No snippets available for response text")
+            
+            logger.info("[SERPAPI_LOG] [web_research] Successfully processed %d results", len(sources_gathered))
+            return sources_gathered, modified_text
+            
+        except Exception as e:
+            api_elapsed = time.time() - api_start
+            error_msg = str(e)
+            logger.error("[SERPAPI_LOG] [web_research] API call failed after %.2fs: %s", api_elapsed, error_msg)
+            
+            # Detailed error analysis
+            if "400" in error_msg or "Bad Request" in error_msg:
+                logger.warning("[SERPAPI_LOG] [web_research] HTTP 400 detected - checking for rate limit or invalid params")
+            elif "429" in error_msg or "rate limit" in error_msg.lower():
+                logger.warning("[SERPAPI_LOG] [web_research] Rate limit detected: %s", error_msg)
+            elif "timeout" in error_msg.lower():
+                logger.warning("[SERPAPI_LOG] [web_research] Timeout detected: %s", error_msg)
+            elif "connection" in error_msg.lower():
+                logger.warning("[SERPAPI_LOG] [web_research] Connection issue: %s", error_msg)
+            
+            return [], f"[SerpAPI search error] {error_msg}"
+
+    # First attempt with primary (possibly translated) query
+    import time
+    start_time = time.time()
+    try:
+        logger.info("[SERPAPI_LOG] [web_research] Starting primary query at %s: '%s'", time.strftime('%H:%M:%S'), primary_query)
+        sources_gathered, modified_text = _run_serpapi_search(primary_query)
+        cits = []  # SerpAPI doesn't provide citations like Google API
+        elapsed = time.time() - start_time
+        logger.info("[SERPAPI_LOG] [web_research] Primary query completed in %.2fs: %d sources, %d chars", 
+                   elapsed, len(sources_gathered), len(modified_text))
+        logger.debug("[SERPAPI_LOG] [web_research] Response text preview (200 chars): %s", 
+                    (modified_text or "")[:200] + ("..." if len(modified_text or "") > 200 else ""))
+    except Exception as e:
+        # 兜底：任何未预期异常都不应中断流程
+        elapsed = time.time() - start_time
+        error_msg = str(e)
+        logger.error("[SERPAPI_LOG] [web_research] Primary query failed after %.2fs: %s", elapsed, error_msg)
+        # 检查是否是API限流或网络问题
+        if "400" in error_msg or "Bad Request" in error_msg:
+            logger.warning("[SERPAPI_LOG] [web_research] Detected HTTP 400 - possible API rate limit or invalid request")
+        elif "timeout" in error_msg.lower() or "connection" in error_msg.lower():
+            logger.warning("[SERPAPI_LOG] [web_research] Detected network issue: %s", error_msg)
+        sources_gathered, modified_text, cits = [], "[SerpAPI search error suppressed] " + error_msg, []
+    # Retry with secondary (original) if no sources gathered
+    if not sources_gathered and secondary_query:
+        retry_start = time.time()
+        logger.info("[SERPAPI_LOG] [web_research] Starting secondary query at %s: '%s'", time.strftime('%H:%M:%S'), secondary_query)
+        try:
+            sources_gathered, modified_text = _run_serpapi_search(secondary_query)
+            cits = []  # SerpAPI doesn't provide citations like Google API
+            retry_elapsed = time.time() - retry_start
+            logger.info("[SERPAPI_LOG] [web_research] Secondary query completed in %.2fs: %d sources, %d chars", 
+                       retry_elapsed, len(sources_gathered), len(modified_text))
+        except Exception as e:
+            retry_elapsed = time.time() - retry_start
+            error_msg = str(e)
+            logger.error("[SERPAPI_LOG] [web_research] Secondary query failed after %.2fs: %s", retry_elapsed, error_msg)
+            # 检查是否是API限流或网络问题
+            if "400" in error_msg or "Bad Request" in error_msg:
+                logger.warning("[SERPAPI_LOG] [web_research] Secondary query also hit HTTP 400 - likely API rate limit")
+            elif "timeout" in error_msg.lower() or "connection" in error_msg.lower():
+                logger.warning("[SERPAPI_LOG] [web_research] Secondary query network issue: %s", error_msg)
+            sources_gathered, modified_text, cits = [], "[SerpAPI search error suppressed] " + error_msg, []
+
+    # 记录已派发查询，避免重复
+    dispatched_out = [original_query] if original_query else []
+    
+    # Apply local reranking to web sources if enabled
+    web_sources_reranked = sources_gathered[:] if sources_gathered else []
+    web_rerank_meta = {}
+    # 本地重排
+    if sources_gathered and getattr(configurable, 'enable_rag_rerank', True):
+        try:
+            from agent.rag_rerank import create_reranker
+            local_reranker = create_reranker(configurable)
+            
+            # Use the actual response text for reranking and map back to sources
+            # The modified_text contains the full content with citation markers
+            if modified_text and len(modified_text.strip()) > 50 and cits:  # Need citations for mapping
+                # Deduplicate sources by short_url first
+                unique_sources = []
+                seen_urls = set()
+                for source in sources_gathered:
+                    url_key = source.get('short_url', source.get('value', ''))
+                    if url_key not in seen_urls:
+                        unique_sources.append(source)
+                        seen_urls.add(url_key)
+                
+                logger.debug("[NEO_LOG] [web_research] 来源去重: %d个原始 -> %d个唯一", len(sources_gathered), len(unique_sources))
+                
+                # Split the text into sentences for reranking
+                import re
+                sentences = re.split(r'[.!?]\s+', modified_text.strip())
+                logger.debug("[NEO_LOG] [web_research] 文本分句: %d字符文本 -> %d个句子", len(modified_text), len(sentences))
+                
+                # Build sentence-to-citation mapping
+                sentence_citations = {}
+                char_pos = 0
+                
+                for i, sentence in enumerate(sentences):
+                    sentence = sentence.strip()
+                    if len(sentence) < 20:  # Skip very short sentences
+                        char_pos += len(sentence) + 1
+                        continue
+                        
+                    # Find citations that fall within this sentence's character range
+                    sentence_start = char_pos
+                    sentence_end = char_pos + len(sentence)
+                    
+                    # Find overlapping citations
+                    overlapping_citations = []
+                    for citation in cits:
+                        cit_start = citation.get('start_index', 0)
+                        cit_end = citation.get('end_index', 0)
+                        
+                        # Check if citation overlaps with sentence
+                        if (cit_start <= sentence_end and cit_end >= sentence_start):
+                            overlapping_citations.extend(citation.get('segments', []))
+                    
+                    if overlapping_citations:
+                        sentence_citations[sentence] = overlapping_citations
+                    
+                    char_pos = sentence_end + 1
+                
+                # Filter meaningful sentences for reranking
+                meaningful_sentences = [
+                    s for s in sentence_citations.keys() 
+                    if len(s) > 20 and not s.startswith('[') and not s.endswith(']')
+                ]
+                
+                # 打印所有句子的详细信息
+                logger.debug("[NEO_LOG] [web_research] 提取%d个有效句子用于重排:", len(meaningful_sentences))
+                if meaningful_sentences:
+                    for i, sentence in enumerate(meaningful_sentences):
+                        citations_count = len(sentence_citations.get(sentence, []))
+                        logger.debug("[NEO_LOG] [web_research] 有效句子 [%d] 引用%d个: %s", i+1, citations_count, sentence[:80] + ("..." if len(sentence) > 80 else ""))
+                else:
+                    logger.debug("[NEO_LOG] [web_research] 没有找到有效句子")
+                
+                if meaningful_sentences:
+                    # Apply local reranking
+                    min_keep = min(len(unique_sources), getattr(configurable, 'rag_min_keep', 3))
+                    local_result = local_reranker.rerank_rag_data(original_query, meaningful_sentences, min_keep=min_keep)
+                    
+                    # Aggregate scores by source URL
+                    source_scores = {}
+                    for sentence, score in zip(meaningful_sentences, local_result.relevance_scores):
+                        if sentence in sentence_citations:
+                            for segment in sentence_citations[sentence]:
+                                url_key = segment.get('short_url', segment.get('value', ''))
+                                if url_key:
+                                    if url_key not in source_scores:
+                                        source_scores[url_key] = []
+                                    source_scores[url_key].append(score)
+                    
+                    logger.debug("[NEO_LOG] [web_research] 句子到来源映射: %d个句子映射到%d个来源", 
+                            len([s for s in meaningful_sentences if s in sentence_citations]), len(source_scores))
+                    
+                    # Calculate aggregated scores (max score per source)
+                    source_final_scores = {}
+                    for url_key, scores in source_scores.items():
+                        source_final_scores[url_key] = max(scores) if scores else 0.0
+                    
+                    logger.debug("[NEO_LOG] [web_research] 来源最终得分: %s", 
+                            {k: f"{v:.3f}" for k, v in list(source_final_scores.items())[:5]})
+                    
+                    # Sort sources by aggregated scores
+                    scored_sources = []
+                    unscored_sources = []
+                    
+                    for source in unique_sources:
+                        url_key = source.get('short_url', source.get('value', ''))
+                        if url_key in source_final_scores:
+                            scored_sources.append((source, source_final_scores[url_key]))
+                        else:
+                            unscored_sources.append(source)
+                    
+                    # Sort by score (descending) and keep top sources
+                    scored_sources.sort(key=lambda x: x[1], reverse=True)
+                    
+                    # Build final reranked list: scored sources + unscored as fallback
+                    web_sources_reranked = [src for src, score in scored_sources]
+                    if len(web_sources_reranked) < min_keep:
+                        web_sources_reranked.extend(unscored_sources[:min_keep - len(web_sources_reranked)])
+                    
+                    # Limit to reasonable size
+                    web_sources_reranked = web_sources_reranked[:getattr(configurable, 'rag_max_segments', 10)]
+                    
+                    filtered_before_min_keep = len([score for score in source_final_scores.values() if score >= local_reranker.relevance_threshold])
+                    
+                    web_rerank_meta = {
+                        'threshold': local_reranker.relevance_threshold,
+                        'original_count': len(unique_sources),
+                        'filtered_count': len(web_sources_reranked),
+                        'avg_score': sum(source_final_scores.values()) / len(source_final_scores) if source_final_scores else 0.0,
+                        'min_keep_triggered': filtered_before_min_keep < min_keep,
+                        'content_based': True,
+                        'sentences_analyzed': len(meaningful_sentences),
+                        'sources_scored': len(scored_sources),
+                        'deduplication_applied': len(sources_gathered) != len(unique_sources)
+                    }
+                    
+                    logger.debug("[NEO_LOG] [web_research] 基于内容的来源重排: %d个句子 -> %d个来源评分 (平均分=%.3f, 保留%d个来源, 保底策略=%s)", 
+                               len(meaningful_sentences), len(scored_sources), web_rerank_meta['avg_score'], 
+                               len(web_sources_reranked), web_rerank_meta['min_keep_triggered'])
+                    
+                    # 打印最终保留的来源
+                    logger.debug("[NEO_LOG] [web_research] 最终保留的%d个来源:", len(web_sources_reranked))
+                    for i, source in enumerate(web_sources_reranked[:3]):  # 只显示前3个
+                        url_key = source.get('short_url', source.get('value', ''))
+                        score = source_final_scores.get(url_key, 0.0)
+                        logger.debug("[NEO_LOG] [web_research]   [%d] 分数=%.3f: %s", i+1, score, url_key[:60] + ("..." if len(url_key) > 60 else ""))
+                else:
+                    logger.debug("[NEO_LOG] [web_research] 未找到有效句子进行重排，使用去重后的顺序")
+                    web_sources_reranked = unique_sources
+            else:
+                logger.debug("[NEO_LOG] [web_research] 内容不足或无引用信息进行来源映射，使用原始顺序")
+            
+        except Exception as e:
+            logger.warning("[NEO_LOG] [web_research] 本地重排失败: %s，使用原始顺序", e)
+            web_sources_reranked = sources_gathered[:]
+            web_rerank_meta = {'error': str(e)}
+    
+
+    logger.info("[NEO_LOG] [web_research] Final result: %d sources_gathered, %d chars modified_text", 
+                len(sources_gathered), len(modified_text))
+    
+    return {
+        "sources_gathered": sources_gathered,
+        "web_sources_reranked": web_sources_reranked,
+        "web_rerank_meta": web_rerank_meta,
+        "search_query": [state.get("search_query", "")],
+        "web_research_result": [modified_text],
+        "dispatched_queries": dispatched_out,
+    }
+
+
 # 重点方法 搜索 Google API Gemini 2.5 Flash-Lite 0.0
 def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
     """LangGraph node that performs web research using the native Google Search API tool.
@@ -2112,7 +2486,6 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
     dispatched_out = [original_query] if original_query else []
     
     # Apply local reranking to web sources if enabled
-    # web_sources_reranked will be aggregated across parallel branches via state reducer
     # web_sources_reranked = sources_gathered[:] if sources_gathered else []
     web_sources_reranked = [{"desc": modified_text}]
     
@@ -2360,7 +2733,6 @@ def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
     return {
         "sources_gathered": segments,
         # "rag_sources_reranked": rag_sources_reranked,
-        # "rag_rerank_meta": rag_rerank_meta,
         "search_query": [state.get("search_query", "")],
         "web_research_result": rag_search_result,
         "dispatched_queries": dispatched_out,
@@ -2502,8 +2874,10 @@ def thinking_middle_stage(state: OverallState, config: RunnableConfig) -> Overal
     safe_results = []
     if sources_reranked:
         safe_results = [s for s in sources_reranked if isinstance(s, str)]
+        logger.info("[NEO_LOG] [thinking_middle_stage] top2 reflection_sources_reranked: %s", safe_results[:2])
     else:
         safe_results = [s for s in web_research_result if isinstance(s, str)]
+        logger.info("[NEO_LOG] [thinking_middle_stage] top2 web_research_result: %s", safe_results[:2])
     
     # Get research topic from messages or use a fallback
     research_topic = get_research_topic(messages) if messages else "研究主题"
@@ -2583,12 +2957,13 @@ def thinking_finalization_stage(state: OverallState, config: RunnableConfig) -> 
     web_research_result = state.get("web_research_result", [])
     insights_gathered = state.get("insights_gathered", [])
     sources_reranked = state.get("reflection_sources_reranked", [])
-    logger.info("[NEO_LOG] [thinking_finalization_stage] top3 sources_reranked: %s", sources_reranked[:3])
     safe_results = []
     if sources_reranked:
         safe_results = [s for s in sources_reranked if isinstance(s, str)]
+        # logger.info("[NEO_LOG] [thinking_finalization_stage] top2 reflection_sources_reranked: %s", safe_results[:2])
     else:
         safe_results = [s for s in web_research_result if isinstance(s, str)]
+        # logger.info("[NEO_LOG] [thinking_finalization_stage] top2 web_research_result: %s", safe_results[:2])
     
     research_topic = get_research_topic(messages) if messages else "研究主题"
     summaries = _prepare_summaries(safe_results)
@@ -2741,27 +3116,14 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
     reflection_rerank_meta = {}
     if getattr(configurable, 'enable_voyage_rerank', True):
         try:
-            # Collect sources from web and rag
-            # web_sources = state.get("web_sources_reranked", []) or []
-            # rag_sources = state.get("rag_sources_reranked", []) or []
-            # logger.info("[NEO_LOG] [reflection] 准备合并重排 web_sources count=%d, rag_sources count=%d", len(web_sources), len(rag_sources))
-            # if web_sources:
-            #     logger.info("[NEO_LOG] [reflection] web_sources 1: %s", web_sources[0])
-            # if rag_sources:
-            #     logger.info("[NEO_LOG] [reflection] rag_sources 1: %s", rag_sources[0])
-            
             # Combine and deduplicate by URL
             combined_sources = state.get("web_research_result", []) or []
             seen_urls = set()
-            
-            # for source in web_sources + rag_sources:
-            #     url = source.get("short_url", "") or source.get("value", "")
-            #     if url and url not in seen_urls:
-            #         seen_urls.add(url)
-            #         combined_sources.append(source)
-            #     elif not url:  # Keep sources without URLs (avoid over-filtering)
-            #         combined_sources.append(source)
-            
+            # 去重
+            logger.info("[NEO_LOG] [reflection] documents before deduplication: %d", len(combined_sources))
+            combined_sources = list(set(combined_sources))
+            logger.info("[NEO_LOG] [reflection] documents after deduplication: %d", len(combined_sources))
+
             # Apply final reranking if we have enough sources
             min_sources_for_rerank = getattr(configurable, 'final_rerank_top_k')
             if (len(combined_sources) >= min_sources_for_rerank and 
@@ -2778,18 +3140,18 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
                         doc_text = source # f"{source.get('title', '')} {source.get('desc', '')}".strip()
                         documents.append(doc_text)
                     # 去重
-                    # logger.debug("[NEO_LOG] [reflection] documents before deduplication: %d", len(documents))
-                    documents = list(set(documents))
-                    # logger.debug("[NEO_LOG] [reflection] documents after deduplication: %d", len(documents))
+                    # documents = list(set(documents))
 
                     # Get research topic for query
                     research_topic = get_research_topic(state.get("messages", []))
                     queries = state.get("current_queries") or state.get("search_query", [])
                     query = " ".join(queries)
+                    query = research_topic + " " + query
                     # Call VoyageAI final rerank
-                    logger.info("[NEO_LOG] [reflection] 重排前 documents=%d, query=%s, top3: %s", len(documents), query, documents[:3])
+                    logger.info("[NEO_LOG] [reflection] 重排前(去重) origin=%d, query=%s", len(documents), research_topic)
+                    # logger.info("[NEO_LOG] [reflection] 重排前(去重) query=%s, origin=%s", research_topic, documents)
                     voyage_result = voyage_reranker.rerank_documents(
-                        query=query, # research_topic
+                        query=query,
                         documents=documents,
                         top_k=getattr(configurable, 'final_rerank_top_k'),
                         relevance_threshold=getattr(configurable, 'rag_relevance_threshold')
@@ -2798,40 +3160,43 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
                     # Map back to original sources
                     reranked_sources = []
                     for idx in voyage_result.original_indices:
-                        if 0 <= idx < len(combined_sources):
-                            reranked_sources.append(combined_sources[idx])
+                        if 0 <= idx < len(documents):
+                            reranked_sources.append(documents[idx])
                     
                     reflection_sources_reranked = reranked_sources
                     reflection_rerank_meta = {
-                        # 'web_count': len(web_sources),
-                        # 'rag_count': len(rag_sources),
-                        'combined_count': len(combined_sources),
+                        'origin_count': len(documents),
                         'final_count': len(reflection_sources_reranked),
                         'avg_score': sum(voyage_result.relevance_scores) / len(voyage_result.relevance_scores) if voyage_result.relevance_scores else 0.0,
                         'tokens': voyage_result.api_usage.get('total_tokens', 0)
                     }
-                    
-                    logger.info("[NEO_LOG] [reflection] Final cross-rerank: combined=%d -> final=%d (avg_score=%.3f, tokens=%d)", 
-                               reflection_rerank_meta['combined_count'], reflection_rerank_meta['final_count'],
+                    # logger.info("[NEO_LOG] [reflection] 重排后 query=%s, origin=%d -> final=%d, rerank=%s", 
+                    #     research_topic, len(documents), len(reflection_sources_reranked), reflection_sources_reranked)
+                    logger.info("[NEO_LOG] [reflection] 重排后 query=%s, origin=%d -> final=%d (avg_score=%.3f, tokens=%d)", 
+                               research_topic, len(documents), len(reflection_sources_reranked),
                                reflection_rerank_meta['avg_score'], reflection_rerank_meta['tokens'])
+                    # RERANK 没有匹配的情况（考虑阈值0.5）使用3个原始文档
+                    if len(reranked_sources) == 0:
+                        reflection_sources_reranked = combined_sources[:3]
                 else:
                     logger.info("[NEO_LOG] [reflection] VoyageAI reranker not available for final rerank")
-                    reflection_sources_reranked = combined_sources[:20]
+                    reflection_sources_reranked = combined_sources[:3]
             else:
-                reflection_sources_reranked = combined_sources
+                logger.info("[NEO_LOG] [reflection] Not enough sources for final rerank")
+                reflection_sources_reranked = combined_sources[:3]
                 
         except Exception as e:
             logger.warning("[NEO_LOG] [reflection] Final cross-reranking failed: %s", e)
             # Fallback: use original sources
-            # web_sources = state.get("sources_gathered", [])
-            # rag_sources = state.get("rag_sources_reranked", [])
-            # reflection_sources_reranked = (web_sources + rag_sources)[:20]
-            reflection_sources_reranked = combined_sources[:20]
+            reflection_sources_reranked = combined_sources[:3]
             reflection_rerank_meta = {'error': str(e)}
+    
     if reflection_sources_reranked:
         safe_results = [s for s in reflection_sources_reranked if isinstance(s, str)]
-        logger.info("[NEO_LOG] [reflection] 重排后 -> documents=%d, query=%s, top3: %s", len(safe_results), state.get("current_queries"), safe_results[:3])
-
+        # logger.info("[NEO_LOG] [reflection] top3 reflection_sources_reranked: %s", safe_results[:3])
+    else:
+        logger.info("[NEO_LOG] [reflection] top3 web_research_result: %s", safe_results[:3])
+    
     # 3. 组装LLM提示词并调用结构化输出
     formatted_prompt = reflection_instructions.format(
         current_date=current_date,
@@ -3018,7 +3383,7 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
     # 7 返回值调试日志 - 记录最终返回给下游节点的数据
     effort = _infer_effort(state, configurable)
     completion_threshold = _effort_completion_threshold(configurable, effort)
-    # logger.info("[NEO_LOG] [reflection] reflection_sources_reranked: %s", reflection_sources_reranked)
+    logger.info("[NEO_LOG] [reflection] reflection_sources_reranked: %d", len(reflection_sources_reranked))
     return {
         # None-safe extraction to avoid AttributeError when result is None
         "reflection_sources_reranked": reflection_sources_reranked,
@@ -3123,12 +3488,13 @@ def generate_enhanced_report(state: OverallState, config: RunnableConfig) -> Ove
     
     current_date = get_current_date()
     reflection_sources_reranked = state.get("reflection_sources_reranked", [])
-    logger.info("[NEO_LOG] [generate_enhanced_report] top3 sources_reranked: %s", reflection_sources_reranked[:3])
     safe_results = []
     if reflection_sources_reranked:
         safe_results = [s for s in reflection_sources_reranked if isinstance(s, str)]
+        # logger.info("[NEO_LOG] [generate_enhanced_report] top2 reflection_sources_reranked: %s", safe_results[:2])
     else:
         safe_results = [s for s in state.get("web_research_result", []) if isinstance(s, str)]
+        # logger.info("[NEO_LOG] [generate_enhanced_report] top2 web_research_result: %s", safe_results[:2])
     
     # Extract research plan information for comprehensive context
     research_plan = state.get("research_plan", {})
@@ -3184,7 +3550,7 @@ def generate_enhanced_report(state: OverallState, config: RunnableConfig) -> Ove
         # report_outline=state.get("report_outline", {}),
     )
     logger.info("[NEO_LOG] [generate_enhanced_report] START, PROMPT LENGTH: %d", len(formatted_prompt))
-    # logger.info("[NEO_LOG] [generate_enhanced_report] START, PROMPT LENGTH: %d, %s", len(formatted_prompt), formatted_prompt)
+    # logger.info("[NEO_LOG] [generate_enhanced_report] START, PROMPT LENGTH: %d, FULL TEXT: %s", len(formatted_prompt), formatted_prompt)
     result = llm.invoke(formatted_prompt)
     
     # Process sources as before
@@ -3196,35 +3562,10 @@ def generate_enhanced_report(state: OverallState, config: RunnableConfig) -> Ove
             )
             unique_sources.append(source)
     
-    # Add thinking process section to the report
-    thinking_section = "\n\n## 研究思考过程\n\n"
-    thinking_process = state.get("thinking_process", {})
+    logger.info("[NEO_LOG] [generate_enhanced_report] END, RESULT LENGTH: %d", len(result.content))
     
-    if thinking_process:
-        timestamp = thinking_process.get("timestamp", "未知时间")
-        thinking_section += f"**时间**: {timestamp}\n\n"
-        
-        startup_thinking = thinking_process.get("startup_thinking", "")
-        if startup_thinking:
-            thinking_section += f"### 起步阶段\n"
-            thinking_section += f"**思考内容**: {startup_thinking}\n\n"
-        
-        middle_thinking = thinking_process.get("middle_thinking", "")
-        if middle_thinking:
-            thinking_section += f"### 中间阶段\n"
-            thinking_section += f"**思考内容**: {middle_thinking}\n\n"
-        
-        final_thinking = thinking_process.get("final_thinking", "")
-        if final_thinking:
-            thinking_section += f"### 收尾阶段\n"
-            thinking_section += f"**思考内容**: {final_thinking}\n\n"
-    
-    enhanced_content = result.content + thinking_section
-    
-    logger.info("[NEO_LOG] [generate_enhanced_report] FINISHED: %d", len(enhanced_content))
-
     return {
-        "messages": [AIMessage(content=enhanced_content)],
+        "messages": [AIMessage(content=result.content)],
         "sources_gathered": unique_sources,
         "reasoning_model": configurable.thinking_model,
         "previous_report": result.content,  # 设置previous_report以支持追问检测
@@ -3301,6 +3642,8 @@ builder.add_node("wait_for_human_approval", wait_for_human_approval)
 builder.add_node("thinking_startup_stage", thinking_startup_stage)
 builder.add_node("generate_query", generate_query)
 builder.add_node("web_research", web_research)
+# builder.add_node("web_research", web_research_baidu_free)
+# builder.add_node("web_research", web_research_SerpAPI)
 builder.add_node("rag_search", rag_search)
 builder.add_node("thinking_middle_stage", thinking_middle_stage)
 builder.add_node("reflection", reflection)
@@ -3313,9 +3656,6 @@ builder.add_edge(START, "detect_follow_up")
 builder.add_conditional_edges(
     "detect_follow_up", route_follow_up_detection, ["classify_intent"]
 )
-# builder.add_conditional_edges(
-#     "handle_follow_up", route_after_handle_follow_up, ["generate_query", "thinking_middle_stage", "thinking_finalization_stage", END]
-# )
 builder.add_conditional_edges(
     "classify_intent", route_after_classify, ["answer_simple_fact", "find_official_site", "clarify_intent", "generate_research_plan"]
 )
@@ -3365,3 +3705,6 @@ builder.add_edge("generate_enhanced_report", END)
 builder.add_edge("finalize_answer", END)
 
 graph = builder.compile(name="enhanced-deepresearch-agent")
+
+
+# web_research_baidu_free 方法已移动到 agent.baidu_websearch 模块
