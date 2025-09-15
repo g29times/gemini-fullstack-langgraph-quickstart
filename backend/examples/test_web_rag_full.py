@@ -20,7 +20,7 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root / "src"))
 
 
-def run_agent_test(question: str, bypass_method: str = "direct_lookup"):
+def run_agent_test(question: str, bypass_method: str = "direct_lookup", max_concurrency: int | None = None):
     """运行 Agent 测试，使用指定的绕过方法"""
     print(f"🚀 开始测试 Web + RAG 集成")
     print(f"问题: {question}")
@@ -47,7 +47,14 @@ def run_agent_test(question: str, bypass_method: str = "direct_lookup"):
         while attempt < max_attempts:
             try:
                 print(f"\n--- 尝试 {attempt + 1}/{max_attempts} ---")
-                result = graph.invoke(state)
+                # Ensure parallel branches (web_research + rag_search per query) run concurrently
+                # If not provided, compute from configuration: max_parallel_queries * (1 + enable_rag_rest)
+                from agent.configuration import Configuration
+                cfg = Configuration()
+                factor = 1 + (1 if getattr(cfg, "enable_rag_rest", False) else 0)
+                computed_mc = (getattr(cfg, "max_parallel_queries", 4) or 1) * max(1, factor)
+                mc = max_concurrency if max_concurrency is not None else computed_mc
+                result = graph.invoke(state, {"max_concurrency": mc})
                 
                 print("✅ Agent 执行成功")
                 
@@ -173,6 +180,12 @@ def main():
         help="绕过深度研究的方法"
     )
     parser.add_argument(
+        "--max-concurrency",
+        type=int,
+        default=None,
+        help="覆盖并发度（可选）。不设置时自动按 max_parallel_queries * (1 + enable_rag_rest) 计算",
+    )
+    parser.add_argument(
         "--skip-rag-preview",
         action="store_true",
         help="跳过 RAG 功能预览"
@@ -212,7 +225,7 @@ def main():
     
     # 运行完整的 Agent 测试
     try:
-        result = run_agent_test(args.question, args.bypass_method)
+        result = run_agent_test(args.question, args.bypass_method, max_concurrency=args.max_concurrency)
         if result is None:
             success = False
         else:

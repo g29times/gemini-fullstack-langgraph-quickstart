@@ -66,7 +66,7 @@ def create_config():
             "enable_intent_router": True,
             "intent_confidence_threshold": 0.7,
             "query_generator_model": "gemini-2.0-flash-lite",
-            "enable_rag": True,
+            "enable_localrag": True,
             "enable_rag_rest": True,
             "rag_rest_endpoint": None,
             "rag_rest_api_key": None,
