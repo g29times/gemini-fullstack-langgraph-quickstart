@@ -1632,7 +1632,7 @@ class QueryManager:
         """主调度入口"""
         if not queries:
             logger.info("[NEO_LOG] [QueryManager] No queries available for scheduling; finalize")
-            return "thinking_finalization_stage"
+            return "generate_enhanced_report"
         
         # 1. 查询预处理（合并、去重、过滤）
         processed = self._preprocess_queries(queries)
@@ -1778,7 +1778,7 @@ class QueryManager:
     def _apply_parallelism_control(self, queries: list) -> list:
         """简化的并行度控制逻辑"""
         if not queries:
-            return "thinking_finalization_stage"
+            return "generate_enhanced_report"
         
         progress = 0.0
         try:
@@ -1794,7 +1794,7 @@ class QueryManager:
         if progress >= threshold:
             logger.info("[NEO_LOG] [QueryManager] Completion threshold reached: effort=%s progress=%.2f >= %.2f -> finalize", 
                        effort, progress, threshold)
-            return "thinking_finalization_stage"
+            return "generate_enhanced_report"
         
         # 简化的并发控制：effort决定并发数
         if self.config.enable_parallel_research:
@@ -2747,7 +2747,7 @@ def route_thinking_stage(state: OverallState):
     elif thinking_stage == "middle":
         return "thinking_middle_stage"
     elif thinking_stage == "finalization":
-        return "thinking_finalization_stage"
+        return "generate_enhanced_report"
     else:
         return "generate_query"
 
@@ -3461,7 +3461,7 @@ def route_after_reflection(state: OverallState, config: RunnableConfig):
     )
 
     # Final routing decision
-    next_stage = "thinking_finalization_stage" if should_finalize else "thinking_middle_stage"
+    next_stage = "generate_enhanced_report" if should_finalize else "thinking_middle_stage"
     
     try:
         logger.info(
@@ -3692,12 +3692,12 @@ builder.add_edge("thinking_middle_stage", "generate_query")
 builder.add_edge("thinking_finalization_stage", "generate_enhanced_report")
 
 builder.add_conditional_edges(
-    "generate_query", route_after_generate_query, ["web_research", "rag_search", "thinking_finalization_stage"]
+    "generate_query", route_after_generate_query, ["web_research", "rag_search", "generate_enhanced_report"]
 )
 builder.add_edge("web_research", "reflection")
 builder.add_edge("rag_search", "reflection")
 builder.add_conditional_edges(
-    "reflection", route_after_reflection, ["thinking_middle_stage", "thinking_finalization_stage"]
+    "reflection", route_after_reflection, ["thinking_middle_stage", "generate_enhanced_report"]
 )
 
 # Both report paths end the flow
