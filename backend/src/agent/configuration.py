@@ -324,14 +324,14 @@ class Configuration(BaseModel):
     )
     # Final cross-source reranking configuration
     final_rerank_top_k: int = Field(
-        default=20,
+        default=10,
         metadata={
             "description": "Maximum number of sources to keep after final cross-source reranking."
         },
     )
     # RAG reranking configuration 2 相关性阈值
     rag_relevance_threshold: float = Field(
-        default=0.5,
+        default=0.3,
         metadata={
             "description": "Minimum relevance score (0-1) for RAG data to be included in results."
         },

@@ -3553,6 +3553,17 @@ def generate_enhanced_report(state: OverallState, config: RunnableConfig) -> Ove
     # logger.info("[NEO_LOG] [generate_enhanced_report] START, PROMPT LENGTH: %d, FULL TEXT: %s", len(formatted_prompt), formatted_prompt)
     result = llm.invoke(formatted_prompt)
     
+    # Post-process: collapse overly long separators to max length 100
+    try:
+        if hasattr(result, "content") and isinstance(result.content, str):
+            # Replace any run of 101 or more '-' characters with exactly 100 '-'
+            result.content = re.sub(r"-{101,}", "-" * 100, result.content)
+            # Replace any run of 101 or more spaces with exactly 100 spaces
+            result.content = re.sub(r" {101,}", " " * 100, result.content)
+    except Exception:
+        # Be resilient: if anything goes wrong, skip sanitization without failing the flow
+        pass
+    
     # Process sources as before
     unique_sources = []
     for source in state.get("sources_gathered", []):

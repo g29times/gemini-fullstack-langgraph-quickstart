@@ -428,18 +428,18 @@ simple_fact_answer_instructions = """你将直接回答一个无需联网检索�
 research_plan_instructions = """你是一位专业的全球化 多语种 研究规划专家。
 
 当前日期：{current_date}
-你将基于研究主题，制定一个详细的研究计划。
+你将基于研究主题，制定一个详细的研究计划。使用中文或与用户相同的语言。
 
 研究主题：{research_topic}
 
 任务：
-- 任务1：research_objectives 理解并分析研究主题，制定1~5个清晰的研究目标 
-- 任务2：research_methodology 规划具体的研究方法或路径 
-- 任务3：planned_queries 生成1~10个与研究主题相关的，适合搜索引擎的查询关键词或短语 
+- 任务1：research_objectives 理解并分析研究主题，制定1~5个清晰的研究目标
+- 任务2：research_methodology 规划具体的研究方法或路径
+- 任务3：planned_queries 生成1~10个与研究主题相关的，适合搜索引擎的查询关键词或短语
 
 任务指导：
-- 要求：语言（必须）：research_objectives 和 research_methodology 使用与研究主题相同的语言（主题是英文就用英文、主题是中文就用中文等，但保留专业术语）
-- 要求：语言（必须）：planned_queries 需面向搜索引擎优化，根据主题的文化背景，适当混合多种语言，生成多样化的关键搜索词（主题语言占80% + 英、中、法、日等占20%）
+- 要求：语言：research_objectives 和 research_methodology 使用与研究主题相同的语言（主题是英文就用英文、主题是中文就用中文等，但保留专业术语）
+- 要求：语言：planned_queries 需面向搜索引擎优化，根据主题的文化背景，适当混合多种语言，生成多样化的关键搜索词（主题语言占80% + 英、中、法、日等占20%）
   - 主体： 人物、组织、事件、物体、概念、理论、虚拟物等
   - 原子性： planned_queries 应体现主体的“原子性”（一个查询只包含一个主体/意图）。
   - 围绕主体扩展搜索维度，弄清主体的空间属性和时间属性，防止出现重名、过期等错误。可以酌情扩展（Who What Where When Why How）等维度，确保不重不漏。
