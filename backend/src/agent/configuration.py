@@ -1,7 +1,7 @@
 import os
 import re
 from pydantic import BaseModel, Field
-from typing import Any, Optional
+from typing import Any, Optional, List
 
 from langchain_core.runnables import RunnableConfig
 
@@ -163,12 +163,6 @@ class Configuration(BaseModel):
             "description": "Query scheduling strategy based on objectives: one of {balanced, greedy_high, greedy_low, round_robin}.",
         },
     )
-    enable_domain_dedup: bool = Field(
-        default=True,
-        metadata={
-            "description": "Enable domain-based query deduplication (one query per domain).",
-        },
-    )
     small_parallel_limit: int = Field(
         default=2,
         metadata={
@@ -185,13 +179,7 @@ class Configuration(BaseModel):
     )
 
 
-    # Web search configuration
-    enable_web_search: bool = Field(
-        default=True,
-        metadata={
-            "description": "Enable web search functionality."
-        },
-    )
+    # 1 Web search configuration
     web_search_top_k: int = Field(
         default=3,
         metadata={
@@ -238,7 +226,7 @@ class Configuration(BaseModel):
     )
 
 
-    # RAG controls
+    # 2 RAG controls
     # LOCAL RAG Mock
     enable_local_rag: bool = Field(
         default=False,
@@ -290,17 +278,37 @@ class Configuration(BaseModel):
             "description": "HTTP timeout (seconds) for RAG REST calls.",
         },
     )
+    # 3 Memory Search configuration
+    mem_timeout: int = Field(
+        default=5,
+        metadata={
+            "description": "Timeout in seconds for memory search API calls (mock delay)."
+        },
+    )
+    mem_api_endpoint: str = Field(
+        default="",
+        metadata={
+            "description": "Memory search API endpoint URL (placeholder for future implementation)."
+        },
+    )
+    mem_api_key: str = Field(
+        default="",
+        metadata={
+            "description": "Memory search API key (placeholder for future implementation)."
+        },
+    )
+
 
 
     # Reranking 重排相关配置
-    # RAG reranking configuration 1 是否启用本地重排
+    # 1 是否启用本地重排
     enable_rag_rerank: bool = Field(
         default=False,
         metadata={
             "description": "Enable RAG data reranking to filter irrelevant results and reduce noise."
         },
     )
-    # 本地重排守护策略 4 保留的最小段数
+    # 2 本地重排守护策略 保留的最小段数
     rag_min_keep: int = Field(
         default=3,
         metadata={
@@ -314,22 +322,21 @@ class Configuration(BaseModel):
             "description": "Defer VoyageAI API reranking to reflection stage instead of individual web/rag nodes."
         },
     )
-
-    # VoyageAI Rerank API configuration
+    # 3 VoyageAI Rerank API configuration
     enable_voyage_rerank: bool = Field(
         default=True,
         metadata={
             "description": "Enable VoyageAI API for advanced document reranking (requires API key)."
         },
     )
-    # Final cross-source reranking configuration
+    # 最终重排返回数量
     final_rerank_top_k: int = Field(
         default=10,
         metadata={
             "description": "Maximum number of sources to keep after final cross-source reranking."
         },
     )
-    # RAG reranking configuration 2 相关性阈值
+    # 最终重排保留的相关性阈值
     rag_relevance_threshold: float = Field(
         default=0.3,
         metadata={
@@ -369,6 +376,28 @@ class Configuration(BaseModel):
     # 重排配置结束
     
 
+    # 4 Memory Search Configuration
+    # Memory search channel selection
+    external_indicators: List[str] = Field(
+        default_factory=lambda: [
+            "最新", "新的", "推荐", "分析", "趋势", "发展", "当前", "现在", 
+            "latest", "new", "recommend", "analysis", "trends", "development", "now", "recent"
+        ],
+        metadata={
+            "description": "Indicators of external/hybrid queries"
+        },
+    )
+    memory_only_keywords: List[str] = Field(
+        default_factory=lambda: [
+            "上次", "我们聊", "我之前", "我的偏好", "历史记录", "收藏", "刚才你说", "最近我们讨论",
+            "last time", "we discussed", "we talked", "previously", "my preference", "history", 
+            "what did we", "our conversation", "earlier", "before", "previous conversation",
+            "based on our", "our previous"
+        ],
+        metadata={
+            "description": "Keywords that indicate memory-only queries (Chinese and English)"
+        },
+    )
 
     # Effort level configuration (from frontend or explicit setting)
     effort: Optional[str] = Field(

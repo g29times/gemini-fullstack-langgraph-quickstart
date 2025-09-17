@@ -67,6 +67,10 @@ class Intent(BaseModel):
         default=None,
         description="Explanation of why clarification is needed."
     )
+    mem_only: bool = Field(
+        default=False,
+        description="For RESEARCH intent: whether to query memory only (True) or use hybrid approach with mem+web+rag (False)"
+    )
 
 
 class OfficialSiteCandidates(BaseModel):

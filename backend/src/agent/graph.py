@@ -502,7 +502,6 @@ def classify_intent(state: OverallState, config: RunnableConfig) -> OverallState
                 "attribute": None,
             }
         }
-    # print("[router] enable_intent_router")
     llm = ChatGoogleGenerativeAI(
         model=configurable.query_generator_model,
         temperature=0.2,
@@ -518,6 +517,22 @@ def classify_intent(state: OverallState, config: RunnableConfig) -> OverallState
     previous_report = state.get("previous_report", "")
     
     logger.debug("[NEO_LOG] [classify_intent] topic = %s, is_follow_up = %s", topic, is_follow_up)
+    
+    # Rule-based memory-first detection with hybrid query support
+    topic_lower = topic.lower()
+    memory_keywords = configurable.memory_only_keywords
+    
+    # Check for memory keywords
+    memory_matches = [kw for kw in memory_keywords if kw.lower() in topic_lower]
+    has_memory_keywords = len(memory_matches) > 0
+    
+    # Check for external/hybrid indicators
+    external_indicators = configurable.external_indicators
+    has_external_indicators = any(indicator in topic_lower for indicator in external_indicators)
+    
+    # Determine if it's pure memory-only or hybrid
+    is_memory_only = has_memory_keywords and not has_external_indicators
+    is_hybrid_query = has_memory_keywords and has_external_indicators
     
     # Enhanced prompt with follow-up context
     if is_follow_up and previous_report:
@@ -544,6 +559,20 @@ def classify_intent(state: OverallState, config: RunnableConfig) -> OverallState
         payload.setdefault("confidence", 0.0)
         payload.setdefault("entity", None)
         payload.setdefault("attribute", None)
+        payload.setdefault("mem_only", False)
+        
+        # Rule-based memory-first override for RESEARCH intent
+        if payload.get("intent_label") == "RESEARCH":
+            if is_memory_only:
+                payload["mem_only"] = True
+                logger.info("[NEO_LOG] [classify_intent] Memory-only rule triggered: mem_only=True, keywords=%s", memory_matches)
+            elif is_hybrid_query:
+                payload["mem_only"] = False
+                logger.info("[NEO_LOG] [classify_intent] Hybrid rule triggered: mem_only=False, memory_keywords=%s + external_indicators", memory_matches)
+            else:
+                # Pure external query or LLM fallback
+                payload["mem_only"] = False
+                logger.info("[NEO_LOG] [classify_intent] External/fallback query: mem_only=False")
         
         # 基于confidence阈值判断needs_clarification，而不是依赖LLM输出
         confidence = payload.get("confidence", 0.0)
@@ -1352,11 +1381,19 @@ def generate_research_plan(state: OverallState, config: RunnableConfig) -> Overa
             "research_methodology": "",
         }
     logger.info("[NEO_LOG] [generate_research_plan] RESEARCH PLAN: %s", plan_dict)
-    return {
+    
+    # 保留intent信息，确保research_channels正确传递
+    result = {
         "research_plan": plan_dict,
         "plan_approved": False,
         "reasoning_model": configurable.query_generator_model,
     }
+    
+    # 保留intent信息
+    if "intent" in state:
+        result["intent"] = state["intent"]
+    
+    return result
 
 # 重点方法 人类审核 New HITL and Enhanced Thinking Nodes
 def wait_for_human_approval(state: OverallState, config: RunnableConfig) -> OverallState:
@@ -1366,11 +1403,15 @@ def wait_for_human_approval(state: OverallState, config: RunnableConfig) -> Over
     # 检查是否启用 HITL bypass
     if configurable.enable_hitl_bypass:
         logger.info("[NEO_LOG] [wait_for_human_approval] HITL bypass enabled, 跳过用户审核, auto-approving research plan")
-        return {
+        result = {
             "plan_approved": True,
             "human_modifications": "",
             "thinking_stage": "startup"
         }
+        # 保留intent信息
+        if "intent" in state:
+            result["intent"] = state["intent"]
+        return result
     
     # Check if the last message contains approval/modification
     messages = state.get("messages", [])
@@ -1637,7 +1678,7 @@ class QueryManager:
         # 1. 查询预处理（合并、去重、过滤）
         processed = self._preprocess_queries(queries)
         
-        # 2. 应用调度策略
+        # 2. 问题调度策略
         scheduled = self._apply_scheduling_strategy(processed)
         
         # 3. 并行度控制和派发
@@ -1682,12 +1723,11 @@ class QueryManager:
                 continue
             
             # 域名聚合（如果启用）
-            if self.config.enable_domain_dedup:
-                dom = self._extract_site_domain(q)
-                if dom and dom in seen_domains:
-                    continue
-                if dom:
-                    seen_domains.add(dom)
+            dom = self._extract_site_domain(q)
+            if dom and dom in seen_domains:
+                continue
+            if dom:
+                seen_domains.add(dom)
             
             seen_norm.add(n)
             filtered.append(q)
@@ -1808,13 +1848,40 @@ class QueryManager:
         
         return self._create_sends(batch)
     
+    # 重点方法 分发搜索路径
     def _create_sends(self, queries: list) -> list:
-        """创建Send对象列表"""
+        """创建Send对象列表，基于mem_only智能选择检索通道"""
         sends = []
+        
+        # 获取检索通道配置
+        intent = self.state.get("intent", {})
+        mem_only = intent.get("mem_only", False)
+        
+        # 基于mem_only决定检索通道
+        if mem_only:
+            research_channels = ["mem"]
+        else:
+            research_channels = ["mem", "web", "rag"]  # hybrid approach
+            
+        logger.info("[NEO_LOG] [QueryManager] mem_only=%s, research_channels=%s", mem_only, research_channels)
+        
         for i, q in enumerate(queries):
             logger.info("[NEO_LOG] [QueryManager] 子问题 id=%d: '%s'", i, q)
-            sends.append(Send("web_research", {"search_query": q, "id": int(i)}))
-            sends.append(Send("rag_search", {"search_query": q, "id": int(i)}))
+            
+            # 根据channels生成对应的Send
+            if "web" in research_channels:
+                sends.append(Send("web_research", {"search_query": q, "id": int(i)}))
+            if "rag" in research_channels:
+                sends.append(Send("rag_search", {"search_query": q, "id": int(i)}))
+            if "mem" in research_channels:
+                sends.append(Send("mem_search", {"search_query": q, "id": int(i)}))
+        
+        # 统计节点分布
+        node_counts = {}
+        for send in sends:
+            node_counts[send.node] = node_counts.get(send.node, 0) + 1
+        
+        logger.info("[NEO_LOG] [QueryManager] Send distribution: %s (total: %d)", node_counts, len(sends))
         return sends
 
 # 三种查询生成路径
@@ -1869,7 +1936,7 @@ def generate_query(state: OverallState, config: RunnableConfig) -> OverallState:
     
     # 保留关键状态字段，防止丢失
     critical_keys = ["overall_completion", "objectives_progress", "research_loop_count", 
-                     "is_sufficient", "knowledge_gap", "follow_up_queries"]
+                     "is_sufficient", "knowledge_gap", "follow_up_queries", "intent"]
     for key in critical_keys:
         if state.get(key) is not None:
             response[key] = state[key]
@@ -2631,11 +2698,7 @@ def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
             # Stage 2: VoyageAI reranking (conditional based on defer_api_rerank_to_reflection)
             defer_to_reflection = getattr(configurable, 'defer_api_rerank_to_reflection', True)
             # 如果不延迟到反思节点（默认推迟） 才在本轮进行VoyageAI重排（会增加成本）
-            if (not defer_to_reflection and 
-                getattr(configurable, 'enable_voyage_rerank', False) and 
-                getattr(configurable, 'voyage_api_key', '') and 
-                stage1_hits):
-                
+            if (not defer_to_reflection and stage1_hits):
                 try:
                     from agent.voyage_rerank import create_voyage_reranker
                     voyage_reranker = create_voyage_reranker(configurable)
@@ -2738,6 +2801,106 @@ def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
         "dispatched_queries": dispatched_out,
     }
 
+# 重点方法 记忆搜索 Memory Search
+def mem_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
+    """Memory search node: retrieve conversation history and user preferences with timeout and retry.
+
+    Returns fields compatible with downstream consumers:
+    - sources_gathered: list of memory segments (empty for mock)
+    - web_research_result: list with memory-based insights
+    - search_query: echo back dispatched query for traceability
+    - dispatched_queries: record the query to dedup in dispatcher
+    """
+    import time
+    import threading
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
+    
+    configurable = Configuration.from_runnable_config(config)
+    original_query = state.get("search_query", "")
+    node_id = state.get("id", "N/A")
+
+    _node_start = time.time()
+    logger.info("[NEO_LOG] [mem_search] 记忆搜索 START, id=%s: '%s'", node_id, original_query)
+
+    # Timeout and retry configuration
+    timeout_seconds = float(getattr(configurable, 'mem_timeout', 5.0))
+    max_retries = int(getattr(configurable, 'mem_max_retries', 2))
+    
+    mem_results = []
+    retry_count = 0
+    
+    while retry_count <= max_retries:
+        try:
+            # Use ThreadPoolExecutor for non-blocking timeout control
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_mock_mem_api_call_sync, original_query, node_id)
+                try:
+                    mem_results = future.result(timeout=timeout_seconds)
+                    break  # Success, exit retry loop
+                except TimeoutError:
+                    retry_count += 1
+                    logger.warning("[NEO_LOG] [mem_search] Timeout (attempt %d/%d), id=%s", 
+                                 retry_count, max_retries + 1, node_id)
+                    if retry_count > max_retries:
+                        mem_results = [
+                            "[mem] 记忆搜索服务超时，请稍后重试"
+                        ]
+                        
+        except Exception as e:
+            retry_count += 1
+            logger.error("[NEO_LOG] [mem_search] Error (attempt %d/%d), id=%s: %s", 
+                        retry_count, max_retries + 1, node_id, str(e))
+            if retry_count > max_retries:
+                mem_results = [
+                    "[mem] 记忆搜索服务暂时不可用"
+                ]
+
+    dispatched_out = [original_query] if original_query else []
+    _elapsed = time.time() - _node_start
+    
+    logger.info("[NEO_LOG] [mem_search] 记忆搜索 END, id=%s: '%s', 耗时=%.2fs, 重试=%d次, 结果数=%d | Preview: %s",
+                node_id, original_query, _elapsed, retry_count, len(mem_results),
+                mem_results[0][:50] + "..." if mem_results and len(mem_results[0]) > 50 else (mem_results[0] if mem_results else "无结果")
+                )
+
+    return {
+        "sources_gathered": [],  # Mock version doesn't provide real sources
+        "search_query": [state.get("search_query", "")],
+        "web_research_result": mem_results,
+        "dispatched_queries": dispatched_out,
+    }
+
+
+def _mock_mem_api_call_sync(query: str, node_id: str) -> list[str]:
+    """Mock synchronous memory API call with realistic delay."""
+    import time
+    
+    # Simulate realistic API latency (0.3-1.0s for mock)
+    time.sleep(0.5)
+    
+    query_lower = (query or "").lower()
+    
+    # Simplified categorization logic
+    if any(kw in query_lower for kw in ["招投标", "供应商", "项目", "采购"]):
+        return [
+            "[mem] 历史偏好：你经常关注招投标和供应商信息，特别是室内设计相关的项目",
+            "[mem] 用户画像：倾向于获取官方公告链接和详细的项目描述信息",
+            "[mem] 提醒：如需特定供应商的项目推荐，可在后续补充公司名称进行精准匹配"
+        ]
+    elif any(kw in query_lower for kw in ["技术", "研究", "发展", "趋势", "推荐", "分析"]):
+        return [
+            "[mem] 研究偏好：你对技术发展和行业趋势比较关注",
+            "[mem] 历史模式：通常需要深入的技术分析和行业洞察",
+            "[mem] 建议：结合最新的研究报告和专业资料进行分析"
+        ]
+    elif any(kw in query_lower for kw in ["上次", "之前", "聊", "对话", "记录"]):
+        return [
+            "[mem] 对话回忆：你之前提到你比较喜欢美食和运动",
+        ]
+    else:
+        return []
+
+
 def route_thinking_stage(state: OverallState):
     """Route to appropriate thinking stage or continue research."""
     thinking_stage = state.get("thinking_stage", "startup")
@@ -2838,7 +3001,7 @@ def thinking_startup_stage(state: OverallState, config: RunnableConfig) -> Overa
     
     # Preserve core state fields (移除不常用的历史记录)
     for key in ["research_plan", "objectives_progress", "overall_completion", "research_loop_count", 
-                "sources_gathered", "web_research_result"]:
+                "sources_gathered", "web_research_result", "intent"]:
         if key in state:
             preserved_state[key] = state[key]
 
@@ -3114,7 +3277,7 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
     # 2 重排 Web + RAG 阶段的混合信息 Apply final cross-source reranking (web + rag)
     reflection_sources_reranked = []
     reflection_rerank_meta = {}
-    if getattr(configurable, 'enable_voyage_rerank', True):
+    if getattr(configurable, 'enable_voyage_rerank', True) and getattr(configurable, 'voyage_api_key', ''):
         try:
             # Combine and deduplicate by URL
             combined_sources = state.get("web_research_result", []) or []
@@ -3126,9 +3289,7 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
 
             # Apply final reranking if we have enough sources
             min_sources_for_rerank = getattr(configurable, 'final_rerank_top_k')
-            if (len(combined_sources) >= min_sources_for_rerank and 
-                getattr(configurable, 'enable_voyage_rerank', False) and 
-                getattr(configurable, 'voyage_api_key', '')):
+            if (len(combined_sources) >= min_sources_for_rerank):
                 
                 from agent.voyage_rerank import create_voyage_reranker
                 voyage_reranker = create_voyage_reranker(configurable)
@@ -3182,11 +3343,11 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
                     logger.info("[NEO_LOG] [reflection] VoyageAI reranker not available for final rerank")
                     reflection_sources_reranked = combined_sources[:3]
             else:
-                logger.info("[NEO_LOG] [reflection] Not enough sources for final rerank")
+                logger.info("[NEO_LOG] [reflection] Not enough sources for final merge rerank")
                 reflection_sources_reranked = combined_sources[:3]
                 
         except Exception as e:
-            logger.warning("[NEO_LOG] [reflection] Final cross-reranking failed: %s", e)
+            logger.warning("[NEO_LOG] [reflection] Final merge reranking failed: %s", e)
             # Fallback: use original sources
             reflection_sources_reranked = combined_sources[:3]
             reflection_rerank_meta = {'error': str(e)}
@@ -3656,6 +3817,7 @@ builder.add_node("web_research", web_research)
 # builder.add_node("web_research", web_research_baidu_free)
 # builder.add_node("web_research", web_research_SerpAPI)
 builder.add_node("rag_search", rag_search)
+builder.add_node("mem_search", mem_search)
 builder.add_node("thinking_middle_stage", thinking_middle_stage)
 builder.add_node("reflection", reflection)
 builder.add_node("thinking_finalization_stage", thinking_finalization_stage)
@@ -3703,10 +3865,11 @@ builder.add_edge("thinking_middle_stage", "generate_query")
 builder.add_edge("thinking_finalization_stage", "generate_enhanced_report")
 
 builder.add_conditional_edges(
-    "generate_query", route_after_generate_query, ["web_research", "rag_search", "generate_enhanced_report"]
+    "generate_query", route_after_generate_query, ["web_research", "rag_search", "mem_search", "generate_enhanced_report"]
 )
 builder.add_edge("web_research", "reflection")
 builder.add_edge("rag_search", "reflection")
+builder.add_edge("mem_search", "reflection")
 builder.add_conditional_edges(
     "reflection", route_after_reflection, ["thinking_middle_stage", "generate_enhanced_report"]
 )

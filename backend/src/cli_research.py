@@ -4,8 +4,7 @@ from langchain_core.messages import HumanMessage
 from langgraph.errors import NodeInterrupt
 from agent.graph import graph
 
-# python backend/src/cli_research.py --max-concurrency 
-# 4 --max-loops 1 --auto-approve "最近有哪些招投标项目"
+# python backend/src/cli_research.py --max-concurrency 4 --max-loops 1 --auto-approve "最近有哪些招投标项目"
 def main() -> None:
     """Run the research agent from the command line."""
     parser = argparse.ArgumentParser(description="Run the LangGraph research agent")
@@ -64,7 +63,7 @@ def main() -> None:
             # If user did not override, compute from configuration
             from agent.configuration import Configuration
             cfg = Configuration()
-            factor = 1 + (1 if getattr(cfg, "enable_rag_rest", False) else 0)
+            factor = 1 + (1 if getattr(cfg, "enable_rag_rest", True) else 0)
             computed_mc = (getattr(cfg, "max_parallel_queries", 4) or 1) * max(1, factor)
             mc = args.max_concurrency if args.max_concurrency is not None else computed_mc
             result = graph.invoke(state, {"max_concurrency": mc})

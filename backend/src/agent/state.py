@@ -90,6 +90,7 @@ class Query(TypedDict):
 
 
 class QueryGenerationState(TypedDict):
+    intent: dict | None
     search_query: list[Query]
     # Non-accumulating queries for the next dispatch cycle
     current_queries: list
