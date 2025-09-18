@@ -78,16 +78,21 @@ _norm()
       可能存在多轮clarify_intent的情况 需要测试
       部分情况（如低端模型，reflection未推进进度导致）循环过多报错，"Recursion limit of 25 reached without hitting a stop condition. You can increase the limit by setting the `recursion_limit` config key. 
     开发类
+      结果缓存（query+候选集合 → rerank 结果）
       thinking_startup_stage 之后 支持直接阅读网址或文件内容
-      目标 TODO
-      查询词拆分
       Error友好
       系统提示词暴露到前端给用户
       全部提示词增加：“以用户相同的语言回答用户的问题”
       发布上线 域名
-      整合supbase登录和数据库
+      整合supbase登录和数据库 登录鉴权
       数据接口 + 其他工具接口（秘塔） + 搜索接口
     研究优化类（优先级：低）
+      追问 详细回答场景
+      final和report合并
+      web和rag分工
+      用户行为追踪
+      pdf等资源缓存
+      监测追问等 可优化
       群体智能 embedding热力图
       Agent自己决定节点，甚至运行时动态生成节点
 
