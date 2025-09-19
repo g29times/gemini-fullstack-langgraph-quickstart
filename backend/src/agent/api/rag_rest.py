@@ -216,7 +216,7 @@ def query_rag_rest(
     # 1) Try REST if endpoint is configured
     hits: List[Dict[str, Any]] = []
     if endpoint:
-        logger.info("[NEO_LOG] [query_rag_rest] 调用REST接口: %s", endpoint)
+        logger.info("[NEO_LOG] [query_rag_rest] 调用REST接口: %s %s", endpoint, api_key)
         headers = {
             "Content-Type": "application/json",
             "Accept": "*/*"
@@ -307,6 +307,78 @@ def query_rag_rest(
     return hits
 
 
+def query_user_recommend(
+    api_key: str,
+    endpoint: str,
+    timeout: int = 8,
+    top_k: int = 3,
+    institution_ids: str = "1"
+) -> List[Dict[str, Any]]:
+    """Get user project recommendations via REST API.
+    
+    Args:
+        api_key: User token for authorization
+        endpoint: API endpoint URL
+        timeout: Request timeout in seconds
+        top_k: Maximum number of recommendations to return
+    
+    Returns:
+        List of project recommendations with title and customer fields
+    """
+    if not api_key or not api_key.strip():
+        logger.warning("[NEO_LOG] [query_user_recommend] No API key provided, skipping")
+        return []
+    
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+        "institution-identification": institution_ids
+    }
+    
+    payload = {}
+    
+    try:
+        logger.info("[NEO_LOG] [query_user_recommend] 调用用户推荐接口: %s %s", endpoint, api_key)
+        resp = _http_post_json(endpoint, payload, headers, timeout)
+        
+        if isinstance(resp, dict) and resp.get("success") and resp.get("data"):
+            projects_data = resp["data"]
+            logger.info("[NEO_LOG] [query_user_recommend] 获取到 %d 个用户项目推荐", len(projects_data))
+            print(f"获取到用户项目推荐: {projects_data}，数量: {len(projects_data)}")
+            hits = []
+            for i, item in enumerate(projects_data[:top_k]):
+                try:
+                    title = item.get("title", "")
+                    customer = item.get("customer", "")
+                    
+                    # 构建标准化项目数据
+                    normalized = {
+                        "id": str(i + 1),
+                        "title": title,
+                        "date": "",  # 推荐接口不返回日期
+                        "url": "",
+                        "desc": f"客户：{customer}" if customer else "",
+                        "score": 1.0,
+                        "label": title,
+                        "value": "",
+                        # 原始字段保留
+                        "customer": customer,
+                    }
+                    hits.append(normalized)
+                except Exception as e:
+                    logger.warning("[NEO_LOG] [query_user_recommend] 处理项目 %d 时出错: %s", i, str(e))
+                    continue
+            
+            return hits
+        else:
+            logger.warning("[NEO_LOG] [query_user_recommend] API响应格式错误: success=%s", resp.get('success') if resp else 'None')
+            return []
+            
+    except Exception as e:
+        logger.error("[NEO_LOG] [query_user_recommend] 请求失败: %s", str(e))
+        return []
+
+# deprecated -> use query_user_recommend
 def query_user_projects(
     user_name: str,
     local_json: str = DEFAULT_LOCAL_JSON,
@@ -349,7 +421,7 @@ def query_user_projects(
     for i, it in enumerate(top):
         # score: 优先匹配用户则给较高分，否则为0
         base = 1.0 if it in matched else 0.0
-        hits.append(_normalize_item(it, i, base))
+        hits.append(_normalize_item(it, base))  # 修正调用签名：只传2个参数
     return hits
 
 # Backward compatibility alias
