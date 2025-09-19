@@ -6,22 +6,26 @@ from typing import Any, Optional, List
 from langchain_core.runnables import RunnableConfig
 
 # 根据环境变量动态获取RAG REST端点URL
-def _get_rag_endpoint() -> str:
+def _get_rest_endpoint(endpoint_prefix: str) -> str:
     """根据环境变量动态获取RAG REST端点URL。
     
     Returns:
         str: 根据环境配置返回RAG REST端点URL
     """
-    environment = os.environ.get("ENVIRONMENT", "local").lower()
+    if endpoint_prefix == "rag_search_endpoint":
+        return os.environ.get("RAG_SEARCH_ENDPOINT")
+    elif endpoint_prefix == "rag_recommend_endpoint":
+        return os.environ.get("RAG_RECOMMEND_ENDPOINT")
+    # environment = os.environ.get("ENVIRONMENT", "local").lower()
     
-    if environment == "local":
-        return os.environ.get("RAG_REST_LOCAL_ENDPOINT")
-    elif environment == "test":
-        return os.environ.get("RAG_REST_TEST_ENDPOINT")
-    elif environment == "prod":
-        return os.environ.get("RAG_REST_PROD_ENDPOINT")
-    else:
-        return os.environ.get("RAG_REST_ENDPOINT")
+    # if environment == "local":
+    #     return os.environ.get("RAG_REST_LOCAL_ENDPOINT")
+    # elif environment == "test":
+    #     return os.environ.get("RAG_REST_TEST_ENDPOINT")
+    # elif environment == "prod":
+    #     return os.environ.get("RAG_REST_PROD_ENDPOINT")
+    # else:
+    #     return os.environ.get("RAG_REST_ENDPOINT")
 
 class Configuration(BaseModel):
     """The configuration for the agent."""
@@ -188,7 +192,7 @@ class Configuration(BaseModel):
     )
     # 网络搜索超时时间
     web_search_timeout: int = Field(
-        default=9,
+        default=10,
         metadata={
             "description": "Timeout in seconds for LLM+tools web search calls (soft timeout using ThreadPoolExecutor)."
         },
@@ -200,10 +204,10 @@ class Configuration(BaseModel):
             "description": "Whether to dispatch multiple web_research tasks in parallel per loop."
         },
     )
-    enable_secondary_query: bool = Field(
-        default=False,
+    max_parallel_dispatches: int = Field(
+        default=20,
         metadata={
-            "description": "Whether to enable secondary query retry when primary web search fails to find sources.",
+            "description": "Maximum number of parallel query dispatches to prevent resource exhaustion.",
         },
     )
     max_grounding_chunks: int = Field(
@@ -218,15 +222,54 @@ class Configuration(BaseModel):
             "description": "Maximum number of URLs to process per query to respect tool limits.",
         },
     )
-    max_parallel_dispatches: int = Field(
-        default=20,
+    enable_secondary_query: bool = Field(
+        default=False,
         metadata={
-            "description": "Maximum number of parallel query dispatches to prevent resource exhaustion.",
+            "description": "Whether to enable secondary query retry when primary web search fails to find sources.",
         },
     )
 
-
     # 2 RAG controls
+    # RAG REST integration (mock-friendly)
+    rag_rest_api_key: str | None = Field(
+        default="",
+        metadata={
+            "description": "Optional API key for RAG REST endpoint (Authorization: Bearer).",
+        },
+    )
+    rag_rest_timeout: int = Field(
+        default=5,
+        metadata={
+            "description": "HTTP timeout (seconds) for RAG REST calls.",
+        },
+    )
+    # 8 * 4 = 32 -> RERANK -> 20
+    rag_search_top_k: int = Field(
+        default=8,
+        metadata={
+            "description": "Top-K chunks to retrieve from Mock RAG per query.",
+        },
+    )
+    rag_recommend_top_k: int = Field(
+        default=10,
+        metadata={
+            "description": "Top-K chunks to retrieve from Mock RAG per query.",
+        },
+    )
+    rag_search_endpoint: str | None = Field(
+        default_factory=lambda: _get_rest_endpoint("rag_search_endpoint"),
+        # default="http://www-test.raritag.cn/intelligence-platform/bidProject/search", # http://mock-endpoint
+        metadata={
+            "description": "RAG REST endpoint URL. If empty, client will use local JSON mock.",
+        },
+    )
+    rag_recommend_endpoint: str | None = Field(
+        default_factory=lambda: _get_rest_endpoint("rag_recommend_endpoint"),
+        # default="http://www-test.raritag.cn/intelligence-platform/bidProject/getRecommendWordByUser",
+        metadata={
+            "description": "RAG REST endpoint URL. If empty, client will use local JSON mock.",
+        },
+    )
     # LOCAL RAG Mock
     enable_local_rag: bool = Field(
         default=False,
@@ -246,43 +289,18 @@ class Configuration(BaseModel):
             "description": "Local JSON file path for mock vendor projects when no REST endpoint is configured.",
         },
     )
-    # RAG REST integration (mock-friendly)
-    enable_rag_rest: bool = Field(
-        default=True,
-        metadata={
-            "description": "Enable RAG via external REST API. If true, rag_search will call REST client instead of local TF-IDF.",
-        },
-    )
-    rag_top_k: int = Field(
-        default=8,
-        metadata={
-            "description": "Top-K chunks to retrieve from Mock RAG per query.",
-        },
-    )
-    rag_rest_endpoint: str | None = Field(
-        default_factory=lambda: _get_rag_endpoint(),
-        # default="http://www-test.raritag.cn/intelligence-platform/bidProject/search", # http://mock-endpoint
-        metadata={
-            "description": "RAG REST endpoint URL. If empty, client will use local JSON mock.",
-        },
-    )
-    rag_rest_api_key: str | None = Field(
-        default="",
-        metadata={
-            "description": "Optional API key for RAG REST endpoint (Authorization: Bearer).",
-        },
-    )
-    rag_rest_timeout: int = Field(
-        default=10,
-        metadata={
-            "description": "HTTP timeout (seconds) for RAG REST calls.",
-        },
-    )
+
     # 3 Memory Search configuration
     mem_timeout: int = Field(
         default=5,
         metadata={
             "description": "Timeout in seconds for memory search API calls (mock delay)."
+        },
+    )
+    mem_search_top_k: int = Field(
+        default=5,
+        metadata={
+            "description": "Top-K chunks to retrieve from Mock RAG per query.",
         },
     )
     mem_api_endpoint: str = Field(
@@ -297,86 +315,6 @@ class Configuration(BaseModel):
             "description": "Memory search API key (placeholder for future implementation)."
         },
     )
-
-
-
-    # Reranking 重排相关配置
-    # 1 是否启用本地重排
-    enable_rag_rerank: bool = Field(
-        default=False,
-        metadata={
-            "description": "Enable RAG data reranking to filter irrelevant results and reduce noise."
-        },
-    )
-    # 2 本地重排守护策略 保留的最小段数
-    rag_min_keep: int = Field(
-        default=3,
-        metadata={
-            "description": "Minimum number of documents to keep after local reranking (fallback to top-K if filtered count is below this)."
-        },
-    )
-    # 推迟到反思节点进行重排
-    defer_api_rerank_to_reflection: bool = Field(
-        default=True,
-        metadata={
-            "description": "Defer VoyageAI API reranking to reflection stage instead of individual web/rag nodes."
-        },
-    )
-    # 3 VoyageAI Rerank API configuration
-    enable_voyage_rerank: bool = Field(
-        default=True,
-        metadata={
-            "description": "Enable VoyageAI API for advanced document reranking (requires API key)."
-        },
-    )
-    # 最终重排返回数量
-    final_rerank_top_k: int = Field(
-        default=10,
-        metadata={
-            "description": "Maximum number of sources to keep after final cross-source reranking."
-        },
-    )
-    # 最终重排保留的相关性阈值
-    rag_relevance_threshold: float = Field(
-        default=0.3,
-        metadata={
-            "description": "Minimum relevance score (0-1) for RAG data to be included in results."
-        },
-    )
-    voyage_api_key: str = Field(
-        default="",
-        metadata={
-            "description": "VoyageAI API key for reranking service (from VOYAGE_API_KEY env var)."
-        },
-    )
-    voyage_rerank_model: str = Field(
-        default="rerank-2.5-lite",
-        metadata={
-            "description": "VoyageAI rerank model to use (rerank-2.5-lite, rerank-2.5, etc.)."
-        },
-    )
-    voyage_rerank_timeout: int = Field(
-        default=5,
-        metadata={
-            "description": "Timeout in seconds for VoyageAI API calls."
-        },
-    )
-    voyage_rerank_max_retries: int = Field(
-        default=2,
-        metadata={
-            "description": "Maximum number of retries for VoyageAI API calls."
-        },
-    )
-    voyage_rerank_top_k: Optional[int] = Field(
-        default=None,
-        metadata={
-            "description": "Number of top results to return from VoyageAI (None for all)."
-        },
-    )
-    # 重排配置结束
-    
-
-    # 4 Memory Search Configuration
     # Memory search channel selection
     external_indicators: List[str] = Field(
         default_factory=lambda: [
@@ -398,6 +336,105 @@ class Configuration(BaseModel):
             "description": "Keywords that indicate memory-only queries (Chinese and English)"
         },
     )
+
+    # 4 User personalization configuration 个性化比例
+    personalization_query_ratio: float = Field(
+        default=1,
+        metadata={
+            "description": "Ratio of personalized queries (0.0-1.0). E.g., 0.4 means 40% of queries will be personalized based on user projects.",
+        },
+    )
+    personalization_min_queries: int = Field(
+        default=1,
+        metadata={
+            "description": "Minimum number of personalized queries to generate when user projects are available.",
+        },
+    )
+    personalization_privacy_fields: list[str] = Field(
+        default_factory=lambda: ["phone", "email", "address", "price", "budget", "contact"],
+        metadata={
+            "description": "List of field keywords to exclude from personalization context for privacy protection.",
+        },
+    )
+
+
+    # Reranking 重排相关配置
+    # 最小待重排结果数量（如果小于该数量则不进行重排）
+    final_rerank_min_count: int = Field(
+        default=10, # rag_search_top_k 8 + mem_search_top_k 5 + 1 web
+        metadata={
+            "description": "Minimum number of sources to keep after final cross-source reranking."
+        },
+    )
+    # 是否启用 VoyageAI 重排
+    enable_voyage_rerank: bool = Field(
+        default=True,
+        metadata={
+            "description": "Enable VoyageAI API for advanced document reranking (requires API key)."
+        },
+    )
+    # VoyageAI 重排接口返回数量 (None for all)
+    voyage_rerank_top_k: Optional[int] = Field(
+        default=20,
+        metadata={
+            "description": "Number of top results to return from VoyageAI (None for all)."
+        },
+    )
+    # VoyageAI 重排接口相关性阈值
+    rag_relevance_threshold: float = Field(
+        default=0.5,
+        metadata={
+            "description": "Minimum relevance score (0-1) for RAG data to be included in results."
+        },
+    )
+    voyage_api_key: str = Field(
+        default="",
+        metadata={
+            "description": "VoyageAI API key for reranking service (from VOYAGE_API_KEY env var)."
+        },
+    )
+    voyage_rerank_model: str = Field(
+        default="rerank-2.5-lite",
+        metadata={
+            "description": "VoyageAI rerank model to use (rerank-2.5-lite, rerank-2.5, etc.)."
+        },
+    )
+    voyage_rerank_timeout: int = Field(
+        default=10,
+        metadata={
+            "description": "Timeout in seconds for VoyageAI API calls."
+        },
+    )
+    voyage_rerank_max_retries: int = Field(
+        default=2,
+        metadata={
+            "description": "Maximum number of retries for VoyageAI API calls."
+        },
+    )
+    # 是否启用本地重排
+    enable_rag_rerank: bool = Field(
+        default=False,
+        metadata={
+            "description": "Enable RAG data reranking to filter irrelevant results and reduce noise."
+        },
+    )
+    # 本地重排守护策略 保留的最小段数
+    rag_min_keep: int = Field(
+        default=3,
+        metadata={
+            "description": "Minimum number of documents to keep after local reranking (fallback to top-K if filtered count is below this)."
+        },
+    )
+    # 推迟到反思节点进行重排
+    defer_api_rerank_to_reflection: bool = Field(
+        default=True,
+        metadata={
+            "description": "Defer VoyageAI API reranking to reflection stage instead of individual web/rag nodes."
+        },
+    )
+    # 重排配置结束
+    
+
 
     # Effort level configuration (from frontend or explicit setting)
     effort: Optional[str] = Field(

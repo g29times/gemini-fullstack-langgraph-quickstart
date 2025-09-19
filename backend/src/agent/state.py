@@ -67,6 +67,10 @@ class OverallState(TypedDict):
     # web_rerank_meta: NotRequired[dict]  # Web reranking metadata
     reflection_sources_reranked: NotRequired[list]  # Final cross-reranked sources
     # reflection_rerank_meta: NotRequired[dict]  # Final reranking metadata
+    # User personalization fields
+    user_info: NotRequired[dict | None]  # User information from authentication
+    user_projects: NotRequired[list]  # User's project list for personalization
+    user_projects_text: NotRequired[str]  # Formatted user projects context for prompts
 
 
 class ReflectionState(TypedDict):

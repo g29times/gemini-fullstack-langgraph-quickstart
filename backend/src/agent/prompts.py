@@ -6,7 +6,6 @@ def get_current_date():
     return datetime.now().strftime("%B %d, %Y")
 
 
-
 # 快速生成初始查询 generate_query | Gemini 2.5 Flash-Lite 0.2
 query_writer_instructions = """Generate diverse, atomic web search queries for an automated research tool.
 
@@ -19,6 +18,9 @@ Rules:
 - For China-based entities, consider authority registries: site:天眼查 OR site:企查查 OR site:aiqicha.baidu.com.
 - **TIME SENSITIVITY**: current date is {current_date}.
 - MAXIMIZE coverage within {number_queries} limit; use the full quota when possible.
+- **PERSONALIZATION**: If user projects context is available, generate 1-2 personalized queries based on project materials, space types, brands, or styles mentioned. Ensure relevance to the research topic and avoid exposing private details.
+
+User Projects Context: {user_projects_context}
 
 Output JSON:
 - "rationale": brief reason
@@ -37,11 +39,13 @@ Inputs:
 - Current Date: {current_date}
 - Startup Stage Analysis: {startup_thinking}
 - Middle Stage Analysis: {middle_thinking}
+- User Projects Context: {user_projects_context}
 
 Rules:
 - Directly target the Knowledge Gap; if identity is ambiguous, FIRST do disambiguation (canonical name/aliases/geography/industry/registration IDs).
 - **CRITICAL**: Pay close attention to the Startup/Middle Stage Analysis which contains deep insights or specific keyword suggestions. Incorporate these suggestions into your query generation.
 - **PRIORITY**: If Startup/Middle Stage Analysis identifies specific entities, companies, or disambiguation needs, generate targeted queries for EACH identified entity.
+- **PERSONALIZATION**: If user projects context is available, generate 1-2 personalized queries that connect the follow-up questions with user's project experience (materials, space types, brands, styles). Ensure relevance and privacy protection.
 - **TIME SENSITIVITY**: Current date is {current_date}.
 - Prefer concise keyword-style queries; keep local proper nouns in original script; add cross-lingual variants when helpful.
 - Atomic only: one intent per query; never combine entities (avoid "vs/VS"); for comparisons, use per-entity queries and a separate metric query.
@@ -52,7 +56,7 @@ Rules:
 
 Output JSON:
 {{
-  "rationale": "Why these queries close the gap (referencing middle stage insights)",
+  "rationale": "Why these queries close the gap (referencing middle stage insights and personalization)",
   "query": ["query1", "query2", "..."]
 }}
 """

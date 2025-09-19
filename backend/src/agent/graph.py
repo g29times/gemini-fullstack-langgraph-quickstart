@@ -18,27 +18,8 @@ from google.genai import Client
 from google.genai import types
 from langchain_google_genai import ChatGoogleGenerativeAI
 
-from agent.tools_and_schemas import (
-    SearchQueryList,
-    Reflection,
-    Intent,
-    OfficialSiteCandidates,
-    ResearchPlan,
-    ThinkingStage,
-    FollowUpResponse,
-)
-from agent.rag_rest import query_rag_rest, query_user_projects
-from agent.rag_rerank import create_reranker
 from agent.configuration import Configuration
 from agent.state import OverallState, ReflectionState, QueryGenerationState, WebSearchState, FollowUpDetection, IntentClarificationResult, EntitySpecificityResult
-from agent.utils import (
-    get_citations,
-    get_research_topic,
-    insert_citation_markers,
-    resolve_urls,
-    normalize_query,
-    truncate_content
-)
 from agent.prompts import (
     get_current_date,
     query_writer_instructions,
@@ -62,6 +43,28 @@ from agent.prompts import (
     intent_clarification_instructions,
     entity_specificity_check_instructions,
     fallback_chat_mode_instructions,
+)
+
+from agent.api.voyage_rerank import create_voyage_reranker
+from agent.api.rag_rest import query_rag_rest, query_user_projects, query_user_recommend
+
+from agent.util.tools_and_schemas import (
+    SearchQueryList,
+    Reflection,
+    Intent,
+    OfficialSiteCandidates,
+    ResearchPlan,
+    ThinkingStage,
+    FollowUpResponse,
+)
+from agent.util.rag_rerank import create_reranker
+from agent.util.utils import (
+    get_citations,
+    get_research_topic,
+    insert_citation_markers,
+    resolve_urls,
+    normalize_query,
+    truncate_content
 )
 
 load_dotenv()
@@ -602,7 +605,7 @@ def route_after_classify(state: OverallState, config: RunnableConfig):
     - High confidence DIRECT_LOOKUP -> find_official_site  
     - Low confidence or insufficient info -> clarify_intent (if clarification enabled and not exhausted)
     - Follow-up questions skip clarification and go directly to research
-    - Otherwise -> generate_research_plan
+    - Otherwise RESEARCH -> generate_research_plan
     """
     configurable = Configuration.from_runnable_config(config)
     if not configurable.enable_intent_router:
@@ -1526,24 +1529,6 @@ class QueryManager:
         effort = _infer_effort(self.state, self.config)
         return _effort_max_parallel(self.config, effort)
     
-    def _is_middle_stage_followup(self, follow_ups: list) -> bool:
-        """判断是否为middle阶段的follow-up处理"""
-        research_loop_count = self.state.get("research_loop_count", 0)
-        return research_loop_count > 0 and len(follow_ups) <= 2
-    
-    def _safe_invoke_llm(self, structured_llm, prompt: str, fallback_queries: list) -> list[str]:
-        """安全的LLM调用，带有统一的错误处理"""
-        try:
-            result = structured_llm.invoke(prompt)
-            queries = list(getattr(result, "query", []) or [])
-            if not queries:
-                logger.warning("[NEO_LOG] [QueryManager] LLM returned empty queries, using fallback")
-                return _sanitize_queries(fallback_queries, self.query_count)
-            return _sanitize_queries(queries, self.query_count)
-        except Exception as e:
-            logger.error(f"[NEO_LOG] [QueryManager] LLM invocation failed: {e}, using fallback")
-            return _sanitize_queries(fallback_queries, self.query_count)
-    
     def generate_queries(self) -> QueryResult:
         """主查询生成入口"""
         follow_ups = self.state.get("follow_up_queries") or []
@@ -1560,8 +1545,255 @@ class QueryManager:
         else:
             logger.info("[NEO_LOG] [QueryManager] 分支 -> 使用初始查询")
             return self._handle_initial_queries()
+
+    def _safe_invoke_llm(self, structured_llm, prompt: str, fallback_queries: list) -> list[str]:
+        """安全的LLM调用，带有统一的错误处理"""
+        try:
+            result = structured_llm.invoke(prompt)
+            queries = list(getattr(result, "query", []) or [])
+            if not queries:
+                logger.warning("[NEO_LOG] [QueryManager] LLM returned empty queries, using fallback")
+                return _sanitize_queries(fallback_queries, self.query_count)
+            return _sanitize_queries(queries, self.query_count)
+        except Exception as e:
+            logger.error("[NEO_LOG] [QueryManager] 用户项目加载失败: %s", str(e))
+            # 设置空缓存避免重复尝试
+            self.state["user_projects"] = []
+            self.state["user_projects_text"] = ""
+            return ""
     
-    # 生成follow-up查询
+    # 调用用户推荐接口
+    def _recommend_user_projects(self) -> str:
+        """懒加载用户项目并构建个性化上下文"""
+        # 检查缓存
+        if self.state.get("user_projects_text"):
+            logger.debug("[NEO_LOG] [QueryManager] 使用缓存的推荐用户项目")
+            return self.state["user_projects_text"]
+        
+        # 获取用户信息
+        user_info = self.state.get("user_info")
+        if not user_info:
+            logger.warning("[NEO_LOG] [QueryManager] 无法获取user_info用户信息")
+        
+        # 获取用户token（用于API调用）
+        user_token = getattr(self.config, "rag_rest_api_key", None)
+        if not user_token and user_info:
+            user_token = user_info.get("token") or user_info.get("api_key") or ""
+            # user_institution_ids = user_info.get("user_institution") or ""
+        if not user_token:
+            logger.debug("[NEO_LOG] [QueryManager] 无用户token，跳过个性化")
+            return ""
+        
+        # 调用用户推荐接口
+        try:
+            endpoint = self.config.rag_recommend_endpoint
+            timeout = self.config.rag_rest_timeout
+            top_k = self.config.rag_recommend_top_k
+            
+            projects = query_user_recommend(
+                api_key=user_token,
+                endpoint=endpoint,
+                timeout=timeout,
+                top_k=top_k,
+                # institution_ids=user_institution_ids
+            )
+            
+            if not projects:
+                logger.info("[NEO_LOG] [QueryManager] 未获取到用户项目，使用通用查询")
+                self.state["user_projects"] = []
+                self.state["user_projects_text"] = ""
+                return ""
+            
+            # 构建简洁的个性化上下文
+            context_lines = []
+            privacy_fields = [field.lower() for field in self.config.personalization_privacy_fields]
+            
+            for project in projects:
+                title = project.get("title", "").strip()
+                customer = project.get("customer", "").strip()
+                
+                # 隐私过滤
+                title_clean = self._filter_privacy_content(title, privacy_fields)
+                customer_clean = self._filter_privacy_content(customer, privacy_fields)
+                
+                if title_clean:
+                    line = f"• {title_clean}"
+                    if customer_clean and customer_clean != title_clean:
+                        line += f" (客户: {customer_clean})"
+                    context_lines.append(line)
+            
+            context_text = "\n".join(context_lines) if context_lines else ""
+            
+            # 缓存结果
+            self.state["user_projects"] = projects
+            self.state["user_projects_text"] = context_text
+            
+            logger.info("[NEO_LOG] [QueryManager] 个性化上下文构建完成: %d项目, %d字符", 
+                       len(projects), len(context_text))
+            
+            return context_text
+            
+        except Exception as e:
+            logger.error("[NEO_LOG] [QueryManager] 用户项目加载失败: %s", str(e))
+            # 设置空缓存避免重复尝试
+            self.state["user_projects"] = []
+            self.state["user_projects_text"] = ""
+            return ""
+    
+    def _filter_privacy_content(self, text: str, privacy_fields: list) -> str:
+        """过滤隐私敏感内容"""
+        if not text or not privacy_fields:
+            return text
+        
+        # 简单的关键词过滤
+        text_lower = text.lower()
+        for field in privacy_fields:
+            if field in text_lower:
+                # 如果包含隐私关键词，返回部分内容或标记
+                if len(text) > 20:
+                    return text[:20] + "..."
+                return "[已脱敏]"
+        
+        return text
+    
+    def _calculate_personalization_queries(self, total_queries: int) -> int:
+        """计算个性化查询数量 个性化比例"""
+        if not self.state.get("user_projects_text"):
+            return 0
+        
+        min_personalized = self.config.personalization_min_queries
+        ratio = self.config.personalization_query_ratio
+        
+        calculated = max(min_personalized, int(total_queries * ratio))
+        return calculated # min(calculated, total_queries - 1)  # 至少保留1个通用查询
+    
+    def _enhance_queries_with_user_projects(self, queries: list[str], user_projects_context: str) -> list[str]:
+        """从用户项目中抽取关键词并融入查询生成逻辑"""
+        if not user_projects_context or not queries:
+            return queries
+        
+        try:
+            # 从推荐用户项目中提取关键词
+            project_keywords = self._extract_project_keywords(user_projects_context)
+            if not project_keywords:
+                logger.debug("[NEO_LOG] [QueryManager] 未从推荐用户项目中提取到关键词")
+                return queries
+            
+            # 计算需要个性化的查询数量
+            personalized_count = self._calculate_personalization_queries(len(queries))
+            if personalized_count == 0:
+                logger.debug("[NEO_LOG] [QueryManager] 个性化查询数量为0，跳过增强")
+                return queries
+            
+            enhanced_queries = []
+            
+            # 增强前N个查询（根据个性化比例）
+            for i, query in enumerate(queries):
+                if i < personalized_count and project_keywords:
+                    # 选择最相关的项目关键词
+                    relevant_keyword = self._select_relevant_keyword(query, project_keywords)
+                    if relevant_keyword:
+                        enhanced_query = f"{query} {relevant_keyword}"
+                        enhanced_queries.append(enhanced_query)
+                        logger.info("[NEO_LOG] [QueryManager] 个性化增强: '%s' -> '%s'", query, enhanced_query)
+                    else:
+                        enhanced_queries.append(query)
+                else:
+                    enhanced_queries.append(query)
+            
+            logger.info("[NEO_LOG] [QueryManager] 个性化增强完成: %d/%d个查询被增强", 
+                       min(personalized_count, len([kw for kw in project_keywords if kw])), len(queries))
+            
+            return enhanced_queries
+            
+        except Exception as e:
+            logger.error("[NEO_LOG] [QueryManager] 个性化增强失败: %s", str(e))
+            return queries
+    
+    def _extract_project_keywords(self, user_projects_context: str) -> list[str]:
+        """从推荐用户项目中提取关键词"""
+        try:
+            import re
+            
+            # 提取项目名称中的关键词（去除常见停用词）
+            keywords = []
+            lines = user_projects_context.split('\n')
+            
+            for line in lines:
+                if line.strip().startswith('•'):
+                    # 提取项目标题部分
+                    title_part = line.split('(')[0].replace('•', '').strip()
+                    
+                    # 使用正则提取中文词汇和英文单词
+                    chinese_words = re.findall(r'[\u4e00-\u9fff]+', title_part)
+                    english_words = re.findall(r'[A-Za-z]+', title_part)
+                    
+                    # 过滤停用词和短词
+                    stop_words = {'项目', '公司', '有限', '股份', '集团', '建设', '工程', '采购', '招标', '公告'}
+                    
+                    for word in chinese_words:
+                        if len(word) >= 2 and word not in stop_words:
+                            keywords.append(word)
+                    
+                    for word in english_words:
+                        if len(word) >= 3:
+                            keywords.append(word)
+            
+            # 去重并限制数量
+            unique_keywords = list(dict.fromkeys(keywords))[:5]  # 最多保留5个关键词
+            
+            logger.info("[NEO_LOG] [QueryManager] 提取推荐用户项目关键词: %s", unique_keywords)
+            return unique_keywords
+            
+        except Exception as e:
+            logger.error("[NEO_LOG] [QueryManager] 推荐用户项目关键词提取失败: %s", str(e))
+            return []
+    
+    def _select_relevant_keyword(self, query: str, keywords: list[str]) -> str:
+        """为查询选择最相关的项目关键词"""
+        try:
+            query_lower = query.lower()
+            
+            # 计算关键词与查询的相关性
+            scored_keywords = []
+            for keyword in keywords:
+                score = 0
+                keyword_lower = keyword.lower()
+                
+                # 直接匹配得分最高
+                if keyword_lower in query_lower:
+                    score += 10
+                
+                # 字符重叠得分
+                common_chars = set(keyword_lower) & set(query_lower)
+                score += len(common_chars)
+                
+                # 长度适中的关键词优先
+                if 2 <= len(keyword) <= 6:
+                    score += 2
+                
+                scored_keywords.append((keyword, score))
+            
+            # 选择得分最高的关键词
+            if scored_keywords:
+                best_keyword = max(scored_keywords, key=lambda x: x[1])
+                if best_keyword[1] > 0:  # 只有得分大于0才使用
+                    return best_keyword[0]
+            
+            # 如果没有相关的，随机选择第一个
+            return keywords[0] if keywords else ""
+            
+        except Exception as e:
+            logger.error("[NEO_LOG] [QueryManager] 关键词选择失败: %s", str(e))
+            return ""
+    # 个性化部分结束
+
+    def _is_middle_stage_followup(self, follow_ups: list) -> bool:
+        """判断是否为middle阶段的follow-up处理"""
+        research_loop_count = self.state.get("research_loop_count", 0)
+        return research_loop_count > 0 and len(follow_ups) <= 2
+    
+    # generate_queries 3 生成follow-up查询
     def _handle_followup_queries(self, follow_ups: list) -> QueryResult:
         """处理follow-up查询拆解"""
         llm = ChatGoogleGenerativeAI(
@@ -1584,6 +1816,18 @@ class QueryManager:
             max_queries = max(self.config.min_followup_queries, min(self.query_count, self.config.max_followup_queries))
         
         current_date = get_current_date()
+        
+        # 处理追问场景
+        if self.state.get("is_follow_up", False):
+            messages = self.state.get("messages", [])
+            if messages:
+                latest_message = messages[-1]
+                research_topic = latest_message.content if hasattr(latest_message, 'content') else str(latest_message)
+            else:
+                research_topic = "研究主题"
+        else:
+            research_topic = get_research_topic(self.state.get("messages", []))
+        
         followups_text = "\n".join(f"• {q}" for q in follow_ups)
         
         # 获取middle_thinking内容
@@ -1591,17 +1835,32 @@ class QueryManager:
         startup_thinking = thinking_process.get("startup_thinking", "") if thinking_process else "无深度分析内容"
         middle_thinking = thinking_process.get("middle_thinking", "") if thinking_process else "无深度分析内容"
         
+        # 获取推荐用户项目并进行个性化增强
+        user_projects_context = self._recommend_user_projects()
+        
         formatted_prompt = followup_decomposer_instructions.format(
-            research_topic=get_research_topic(self.state.get("messages", [])),
+            research_topic=research_topic,
             knowledge_gap=self.state.get("knowledge_gap", ""),
             follow_ups=followups_text,
             current_date=current_date,
             number_queries=max_queries,
             startup_thinking=startup_thinking,
             middle_thinking=middle_thinking,
+            user_projects_context=user_projects_context,
         )
         logger.debug("[NEO_LOG] [QueryManager] Generate follow-up prompt: %s", formatted_prompt)
         queries = self._safe_invoke_llm(structured_llm, formatted_prompt, follow_ups)
+        
+        # 进一步进行个性化增强（在LLM生成基础上再次增强）
+        if user_projects_context:
+            enhanced_queries = self._enhance_queries_with_user_projects(queries, user_projects_context)
+            queries = enhanced_queries
+        
+        # 记录个性化指标
+        personalized_count = self._calculate_personalization_queries(len(queries))
+        if user_projects_context:
+            logger.info("[NEO_LOG] [QueryManager] Follow-up查询个性化增强: %d/%d queries, context_len=%d", 
+                       personalized_count, len(queries), len(user_projects_context))
         
         logger.info(
             "[NEO_LOG] [QueryManager] Follow-up questions: %d follow-ups -> %d queries (middle_stage=%s, target=%d, middle_thinking_len=%d)",
@@ -1617,9 +1876,9 @@ class QueryManager:
             metadata={"source": "followup"}
         )
     
-    # 使用计划查询
+    # generate_queries 2 沿用计划查询
     def _handle_planned_queries(self, max_parallel_queries: int, planned_queries: list) -> QueryResult:
-        """搜索关键词"""
+        """搜索关键词 - 集成用户个性化关键词"""
         logger.info("[NEO_LOG] [QueryManager] Using %d planned queries from plan: %s for Question %s", len(planned_queries), planned_queries, self.state.get("messages", []))
         
         # 完整计划，设置backlog供后续分批查询
@@ -1627,13 +1886,21 @@ class QueryManager:
         # 首轮查询限额
         sanitized_planned = _sanitize_queries(planned_queries, max_parallel_queries)
         
+        # 获取推荐用户项目并进行个性化增强
+        user_projects_context = self._recommend_user_projects()
+        if user_projects_context:
+            enhanced_queries = self._enhance_queries_with_user_projects(sanitized_planned, user_projects_context)
+            sanitized_planned = enhanced_queries
+        else:
+            logger.info("[NEO_LOG] [QueryManager] 推荐用户项目为空，不进行个性化增强")
+        
         return QueryResult(
             queries=sanitized_planned,
             backlog=sanitized_full,  # 保留完整计划作为backlog
             metadata={"source": "planned"}
         )
     
-    # 生成初始查询（暂时未使用，在第一轮问题生成时，直接继承了research_plan中的planned_queries以加速）
+    # generate_queries 1 生成初始查询（暂时未触发，在第一轮问题生成时，直接继承了research_plan中的planned_queries以加速）
     def _handle_initial_queries(self) -> QueryResult:
         """处理初始查询生成"""
         llm = ChatGoogleGenerativeAI(
@@ -1669,6 +1936,7 @@ class QueryManager:
         
         return QueryResult(queries=queries)
     
+    # 重点方法 查询调度
     def schedule_queries(self, queries: list) -> list:
         """主调度入口"""
         if not queries:
@@ -1941,14 +2209,6 @@ def generate_query(state: OverallState, config: RunnableConfig) -> OverallState:
         if state.get(key) is not None:
             response[key] = state[key]
     
-    # 记录运行时参数
-    try:
-        logger.info("[NEO_LOG] [generate_query] 查询配置: initial_search_query_count=%d, max_research_loops=%d", 
-                   state.get("initial_search_query_count", 0), 
-                   state.get("max_research_loops", configurable.max_research_loops))
-    except Exception:
-        logger.exception("[NEO_LOG] [generate_query] Runtime params logging failed")
-    
     return response
 
 def _extract_key_terms_query(query: str) -> str:
@@ -2209,7 +2469,6 @@ def web_research_SerpAPI(state: WebSearchState, config: RunnableConfig) -> Overa
     # 本地重排
     if sources_gathered and getattr(configurable, 'enable_rag_rerank', True):
         try:
-            from agent.rag_rerank import create_reranker
             local_reranker = create_reranker(configurable)
             
             # Use the actual response text for reranking and map back to sources
@@ -2590,7 +2849,7 @@ def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
     logger.info("[NEO_LOG] [rag_search] RAG查询 START, id=%s: '%s'", state.get("id", "N/A"), original_query)
 
     try:
-        top_k = int(getattr(configurable, "rag_top_k"))
+        top_k = int(getattr(configurable, "rag_search_top_k"))
         logger.info("[NEO_LOG] [rag_search] RAG查询 top_k=%d", top_k)
     except Exception:
         top_k = 5
@@ -2602,11 +2861,12 @@ def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
     err = ""
     # 调用 REST API 获取RAG搜索结果
     try:
+        api_key = getattr(configurable, "rag_rest_api_key", None)
         hits_raw = query_rag_rest(
             original_query,
-            endpoint=getattr(configurable, "rag_rest_endpoint", None),
+            endpoint=getattr(configurable, "rag_search_endpoint", None),
             api_key=getattr(configurable, "rag_rest_api_key", None),
-            timeout=int(getattr(configurable, "rag_rest_timeout", 8) or 8),
+            timeout=int(getattr(configurable, "rag_rest_timeout", 5) or 5),
             local_json=getattr(configurable, "rag_rest_local_json", "backend/examples/vendor_projects.json"),
             top_k=top_k,
         )
@@ -2656,7 +2916,6 @@ def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
     if combined_hits and getattr(configurable, 'enable_rag_rerank'):
         try:
             # Stage 1: Local heuristic reranking (fast pre-filtering)
-            from agent.rag_rerank import create_reranker
             local_reranker = create_reranker(configurable)
             
             # Extract text content for reranking
@@ -2700,7 +2959,6 @@ def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
             # 如果不延迟到反思节点（默认推迟） 才在本轮进行VoyageAI重排（会增加成本）
             if (not defer_to_reflection and stage1_hits):
                 try:
-                    from agent.voyage_rerank import create_voyage_reranker
                     voyage_reranker = create_voyage_reranker(configurable)
                     
                     if voyage_reranker:
@@ -2714,7 +2972,7 @@ def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
                         voyage_result = voyage_reranker.rerank_documents(
                             query=original_query,
                             documents=voyage_documents,
-                            top_k=getattr(configurable, 'voyage_rerank_top_k', None),
+                            top_k=getattr(configurable, 'voyage_rerank_top_k', None), # (None for all).
                             relevance_threshold=getattr(configurable, 'rag_relevance_threshold', 0.3)
                         )
                         
@@ -3288,10 +3546,8 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
             logger.info("[NEO_LOG] [reflection] documents after deduplication: %d", len(combined_sources))
 
             # Apply final reranking if we have enough sources
-            min_sources_for_rerank = getattr(configurable, 'final_rerank_top_k')
+            min_sources_for_rerank = getattr(configurable, 'final_rerank_min_count')
             if (len(combined_sources) >= min_sources_for_rerank):
-                
-                from agent.voyage_rerank import create_voyage_reranker
                 voyage_reranker = create_voyage_reranker(configurable)
                 # Prepare documents for VoyageAI
                 if voyage_reranker:
@@ -3314,7 +3570,7 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
                     voyage_result = voyage_reranker.rerank_documents(
                         query=query,
                         documents=documents,
-                        top_k=getattr(configurable, 'final_rerank_top_k'),
+                        top_k=getattr(configurable, 'voyage_rerank_top_k'),
                         relevance_threshold=getattr(configurable, 'rag_relevance_threshold')
                     )
                     
