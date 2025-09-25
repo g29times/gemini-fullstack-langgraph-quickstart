@@ -1589,20 +1589,21 @@ class QueryManager:
             timeout = self.config.rag_rest_timeout
             top_k = self.config.rag_recommend_top_k
             
-            # projects = [
-            #     {'id': '1', 'title': '北京首都机场希尔顿酒店室内设计项目', 'customer': '客户: 希尔顿集团'},
-            #     {'id': '2', 'title': '上海浦东万豪酒店公区装修工程', 'customer': '客户: 万豪国际'},
-            #     {'id': '3', 'title': '深圳前海金融中心办公楼设计', 'customer': '客户: 招商局集团'},
-            #     {'id': '4', 'title': '广州白云机场T3航站楼商业空间', 'customer': '客户: 白云机场集团'},
-            # ]
-            projects = query_user_recommend(
-                api_key=user_token,
-                endpoint=endpoint,
-                timeout=timeout,
-                top_k=top_k,
-                # institution_ids=user_institution_ids
-            )
-            # print("[NEO_LOG] [QueryManager] 用户推荐接口返回结果: ", projects)
+            projects = [
+                {'id': '1', 'title': '北京首都机场希尔顿酒店室内设计项目', 'customer': '客户: 希尔顿集团'},
+                {'id': '2', 'title': '上海浦东万豪酒店公区装修工程', 'customer': '客户: 万豪国际'},
+                {'id': '3', 'title': '深圳前海金融中心办公楼设计', 'customer': '客户: 招商局集团'},
+                {'id': '4', 'title': '广州白云机场T3航站楼商业空间', 'customer': '客户: 白云机场集团'},
+            ]
+            print("[NEO_LOG] [QueryManager] 用户推荐接口返回结果: ", projects)
+            # TODO 1 项目清洗 2 WEB查询是基于原始10个推荐项目，而不是LLM拼组后的，需要改逻辑
+            # projects = query_user_recommend(
+            #     api_key=user_token,
+            #     endpoint=endpoint,
+            #     timeout=timeout,
+            #     top_k=top_k,
+            #     # institution_ids=user_institution_ids
+            # )
             
             if not projects:
                 logger.info("[NEO_LOG] [QueryManager] 未获取到用户项目，使用通用查询")
