@@ -344,7 +344,7 @@ def query_user_recommend(
         if isinstance(resp, dict) and resp.get("success") and resp.get("data"):
             projects_data = resp["data"]
             logger.info("[NEO_LOG] [query_user_recommend] 获取到 %d 个用户项目推荐", len(projects_data))
-            print(f"获取到用户项目推荐: {projects_data}，数量: {len(projects_data)}")
+            # print(f"获取到用户项目推荐: {projects_data}，数量: {len(projects_data)}")
             hits = []
             for i, item in enumerate(projects_data[:top_k]):
                 try:

@@ -338,22 +338,36 @@ class Configuration(BaseModel):
     )
 
     # 4 User personalization configuration 个性化比例
-    personalization_query_ratio: float = Field(
-        default=1,
-        metadata={
-            "description": "Ratio of personalized queries (0.0-1.0). E.g., 0.4 means 40% of queries will be personalized based on user projects.",
-        },
-    )
-    personalization_min_queries: int = Field(
-        default=1,
-        metadata={
-            "description": "Minimum number of personalized queries to generate when user projects are available.",
-        },
-    )
+    # personalization_query_ratio: float = Field(
+    #     default=1,
+    #     metadata={
+    #         "description": "Ratio of personalized queries (0.0-1.0). E.g., 0.4 means 40% of queries will be personalized based on user projects.",
+    #     },
+    # )
+    # personalization_min_queries: int = Field(
+    #     default=1,
+    #     metadata={
+    #         "description": "Minimum number of personalized queries to generate when user projects are available.",
+    #     },
+    # )
     personalization_privacy_fields: list[str] = Field(
         default_factory=lambda: ["phone", "email", "address", "price", "budget", "contact"],
         metadata={
             "description": "List of field keywords to exclude from personalization context for privacy protection.",
+        },
+    )
+    # LLM个性化关键词生成配置
+    llm_personalization_top_k: int = Field(
+        default=5,
+        metadata={
+            "description": "Maximum number of personalized keywords to generate from LLM based on user projects.",
+        },
+    )
+    # RAG结果不足时触发Web应急的阈值
+    rag_min_results_for_web: int = Field(
+        default=3,
+        metadata={
+            "description": "Minimum number of RAG results required, below which web search will be triggered as fallback.",
         },
     )
 

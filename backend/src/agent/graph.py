@@ -18,6 +18,7 @@ from google.genai import Client
 from google.genai import types
 from langchain_google_genai import ChatGoogleGenerativeAI
 
+from agent.personalization import PersonalizationManager
 from agent.configuration import Configuration
 from agent.state import OverallState, ReflectionState, QueryGenerationState, WebSearchState, FollowUpDetection, IntentClarificationResult, EntitySpecificityResult
 from agent.prompts import (
@@ -1337,7 +1338,7 @@ def generate_research_plan(state: OverallState, config: RunnableConfig) -> Overa
         research_topic=get_research_topic(state.get("messages", [])),
     )
     
-    # logger.info("[NEO_LOG] [generate_research_plan] prompt => %s", formatted_prompt)
+    logger.info("[NEO_LOG] [generate_research_plan] prompt => %s", formatted_prompt)
     # 优先使用结构化输出；失败则回退到非结构化并解析；最终提供安全默认
     plan_dict = None
     try:
@@ -1523,7 +1524,8 @@ class QueryManager:
         self.state = state
         self.config = configurable
         self.query_count = self._get_query_count()
-    
+        self.personalization_manager = PersonalizationManager(configurable, state)
+
     def _get_query_count(self) -> int:
         """基于effort的查询数量控制"""
         effort = _infer_effort(self.state, self.config)
@@ -1562,7 +1564,7 @@ class QueryManager:
             self.state["user_projects_text"] = ""
             return ""
     
-    # 调用用户推荐接口
+    # 个性化 调用用户推荐接口
     def _recommend_user_projects(self) -> str:
         """懒加载用户项目并构建个性化上下文"""
         # 检查缓存
@@ -1655,137 +1657,6 @@ class QueryManager:
                 return "[已脱敏]"
         
         return text
-    
-    def _calculate_personalization_queries(self, total_queries: int) -> int:
-        """计算个性化查询数量 个性化比例"""
-        if not self.state.get("user_projects_text"):
-            return 0
-        
-        min_personalized = self.config.personalization_min_queries
-        ratio = self.config.personalization_query_ratio
-        
-        calculated = max(min_personalized, int(total_queries * ratio))
-        return calculated # min(calculated, total_queries - 1)  # 至少保留1个通用查询
-    
-    def _enhance_queries_with_user_projects(self, queries: list[str], user_projects_context: str) -> list[str]:
-        """从用户项目中抽取关键词并融入查询生成逻辑"""
-        if not user_projects_context or not queries:
-            return queries
-        
-        try:
-            # 从推荐用户项目中提取关键词
-            project_keywords = self._extract_project_keywords(user_projects_context)
-            if not project_keywords:
-                logger.debug("[NEO_LOG] [QueryManager] 未从推荐用户项目中提取到关键词")
-                return queries
-            
-            # 计算需要个性化的查询数量
-            personalized_count = self._calculate_personalization_queries(len(queries))
-            if personalized_count == 0:
-                logger.debug("[NEO_LOG] [QueryManager] 个性化查询数量为0，跳过增强")
-                return queries
-            
-            enhanced_queries = []
-            
-            # 增强前N个查询（根据个性化比例）
-            for i, query in enumerate(queries):
-                if i < personalized_count and project_keywords:
-                    # 选择最相关的项目关键词
-                    relevant_keyword = self._select_relevant_keyword(query, project_keywords)
-                    if relevant_keyword:
-                        enhanced_query = f"{query} {relevant_keyword}"
-                        enhanced_queries.append(enhanced_query)
-                        logger.info("[NEO_LOG] [QueryManager] 个性化增强: '%s' -> '%s'", query, enhanced_query)
-                    else:
-                        enhanced_queries.append(query)
-                else:
-                    enhanced_queries.append(query)
-            
-            logger.info("[NEO_LOG] [QueryManager] 个性化增强完成: %d/%d个查询被增强", 
-                       min(personalized_count, len([kw for kw in project_keywords if kw])), len(queries))
-            
-            return enhanced_queries
-            
-        except Exception as e:
-            logger.error("[NEO_LOG] [QueryManager] 个性化增强失败: %s", str(e))
-            return queries
-    
-    def _extract_project_keywords(self, user_projects_context: str) -> list[str]:
-        """从推荐用户项目中提取关键词"""
-        try:
-            import re
-            
-            # 提取项目名称中的关键词（去除常见停用词）
-            keywords = []
-            lines = user_projects_context.split('\n')
-            
-            for line in lines:
-                if line.strip().startswith('•'):
-                    # 提取项目标题部分
-                    title_part = line.split('(')[0].replace('•', '').strip()
-                    
-                    # 使用正则提取中文词汇和英文单词
-                    chinese_words = re.findall(r'[\u4e00-\u9fff]+', title_part)
-                    english_words = re.findall(r'[A-Za-z]+', title_part)
-                    
-                    # 过滤停用词和短词
-                    stop_words = {'项目', '公司', '有限', '股份', '集团', '建设', '工程', '采购', '招标', '公告'}
-                    
-                    for word in chinese_words:
-                        if len(word) >= 2 and word not in stop_words:
-                            keywords.append(word)
-                    
-                    for word in english_words:
-                        if len(word) >= 3:
-                            keywords.append(word)
-            
-            # 去重并限制数量
-            unique_keywords = list(dict.fromkeys(keywords))[:5]  # 最多保留5个关键词
-            
-            logger.info("[NEO_LOG] [QueryManager] 提取推荐用户项目关键词: %s", unique_keywords)
-            return unique_keywords
-            
-        except Exception as e:
-            logger.error("[NEO_LOG] [QueryManager] 推荐用户项目关键词提取失败: %s", str(e))
-            return []
-    
-    def _select_relevant_keyword(self, query: str, keywords: list[str]) -> str:
-        """为查询选择最相关的项目关键词"""
-        try:
-            query_lower = query.lower()
-            
-            # 计算关键词与查询的相关性
-            scored_keywords = []
-            for keyword in keywords:
-                score = 0
-                keyword_lower = keyword.lower()
-                
-                # 直接匹配得分最高
-                if keyword_lower in query_lower:
-                    score += 10
-                
-                # 字符重叠得分
-                common_chars = set(keyword_lower) & set(query_lower)
-                score += len(common_chars)
-                
-                # 长度适中的关键词优先
-                if 2 <= len(keyword) <= 6:
-                    score += 2
-                
-                scored_keywords.append((keyword, score))
-            
-            # 选择得分最高的关键词
-            if scored_keywords:
-                best_keyword = max(scored_keywords, key=lambda x: x[1])
-                if best_keyword[1] > 0:  # 只有得分大于0才使用
-                    return best_keyword[0]
-            
-            # 如果没有相关的，随机选择第一个
-            return keywords[0] if keywords else ""
-            
-        except Exception as e:
-            logger.error("[NEO_LOG] [QueryManager] 关键词选择失败: %s", str(e))
-            return ""
     # 个性化部分结束
 
     def _is_middle_stage_followup(self, follow_ups: list) -> bool:
@@ -1853,7 +1724,10 @@ class QueryManager:
         
         # 进一步进行个性化增强（在LLM生成基础上再次增强）
         if user_projects_context:
-            enhanced_queries = self._enhance_queries_with_user_projects(queries, user_projects_context)
+            research_topic = get_research_topic(self.state.get("messages", []))
+            enhanced_queries = self.personalization_manager.enhance_queries_with_personalization(
+                queries, research_topic, user_projects_context
+            )
             queries = enhanced_queries
         
         # 记录个性化指标
@@ -1884,18 +1758,21 @@ class QueryManager:
         # 完整计划，设置backlog供后续分批查询
         sanitized_full = _sanitize_queries(planned_queries, None)
         # 首轮查询限额
-        sanitized_planned = _sanitize_queries(planned_queries, max_parallel_queries)
+        sanitized_queries = _sanitize_queries(planned_queries, max_parallel_queries)
         
         # 获取推荐用户项目并进行个性化增强
         user_projects_context = self._recommend_user_projects()
         if user_projects_context:
-            enhanced_queries = self._enhance_queries_with_user_projects(sanitized_planned, user_projects_context)
-            sanitized_planned = enhanced_queries
+            research_topic = get_research_topic(self.state.get("messages", []))
+            enhanced_queries = self.personalization_manager.enhance_queries_with_personalization(
+                sanitized_queries, research_topic, user_projects_context
+            )
+            sanitized_queries = enhanced_queries
         else:
             logger.info("[NEO_LOG] [QueryManager] 推荐用户项目为空，不进行个性化增强")
         
         return QueryResult(
-            queries=sanitized_planned,
+            queries=sanitized_queries,
             backlog=sanitized_full,  # 保留完整计划作为backlog
             metadata={"source": "planned"}
         )
