@@ -389,14 +389,14 @@ class Configuration(BaseModel):
     )
     # VoyageAI 重排接口返回数量 (None for all)
     voyage_rerank_top_k: Optional[int] = Field(
-        default=20,
+        default=10,
         metadata={
             "description": "Number of top results to return from VoyageAI (None for all)."
         },
     )
     # VoyageAI 重排接口相关性阈值
     rag_relevance_threshold: float = Field(
-        default=0.5,
+        default=0.3,
         metadata={
             "description": "Minimum relevance score (0-1) for RAG data to be included in results."
         },

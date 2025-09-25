@@ -184,13 +184,13 @@ class PersonalizationManager:
         try:
             # 获取LLM生成的个性化增强查询（直接返回完整的增强查询）
             enhanced_queries = self.compose_recommend_keywords_llm(user_question, user_projects_context, queries)
-            print("LLM生成的个性化关键词: ", enhanced_queries)
+            # print("LLM生成的个性化关键词: ", enhanced_queries)
             if not enhanced_queries:
                 logger.warning("[NEO_LOG] [PersonalizationManager] 未获取到个性化增强查询，使用原始查询")
                 return queries
             
             # LLM已经完成智能匹配，直接返回结果
-            logger.info("[NEO_LOG] [PersonalizationManager] LLM智能增强完成: %d个增强查询", len(enhanced_queries))
+            logger.info("[NEO_LOG] [PersonalizationManager] LLM智能增强完成: %d个（数量基于配置）增强查询", len(enhanced_queries))
             return enhanced_queries[:len(queries)]  # 限制返回数量不超过原始查询数量
             
         except Exception as e:

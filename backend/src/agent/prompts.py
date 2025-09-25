@@ -62,23 +62,6 @@ Output JSON:
 """
 
 
-# 快速信息收集 web_research | Gemini 2.0 Flash-Lite 0.1
-web_searcher_instructions = """Conduct focused Google searches for "{research_topic}" and synthesize a verifiable summary.
-
-Rules:
-- Ensure recency (current date: {current_date}); run multiple, diverse searches.
-- For entity disambiguation, prefer authoritative registries and the official site; verify identifiers (统一社会信用代码/ICP 等).
-- If the entity is already confirmed, avoid re-verification; focus on substantive content.
-- Preserve local proper nouns in original script; optionally add English alias on first mention.
-- Homepage-first when an official site likely exists; discover paths by navigation/search, do not guess.
-- Track sources per fact; include only information found in results (no fabrication).
-- URL-context cap: open/use at most 20 distinct URLs; if likely to exceed, prioritize and reduce.
-
-Research Topic:
-{research_topic}
-"""
-
-
 # 重点提示词 流程驱动反思 reflection | Gemini 2.5 Flash 0.2
 # - RAG-aware Guidance:
 #       - The Summaries may include outputs from both Web Search and RAG (including a section like "用户项目推荐"). Treat RAG items as hypotheses or hints; DO NOT increase completion scores unless corroborated by authoritative web sources.
@@ -324,7 +307,6 @@ Attribute: {attribute}
 """
 
 
-
 # detect_follow_up | Gemini 2.5 Flash-Lite (快速追问检测) 0.1
 follow_up_detection_instructions = """你是一个专业的对话分析助手，
 
@@ -489,6 +471,62 @@ planned_queries 反例：
 """
 
 
+# 快速信息收集 web_research | Gemini 2.0 Flash-Lite 0.1
+web_searcher_instructions = """Conduct focused Google searches for "{research_topic}" and synthesize a verifiable summary.
+
+Rules:
+- Ensure recency (current date: {current_date}); run multiple, diverse searches.
+- For entity disambiguation, prefer authoritative registries and the official site; verify identifiers (统一社会信用代码/ICP 等).
+- If the entity is already confirmed, avoid re-verification; focus on substantive content.
+- Preserve local proper nouns in original script; optionally add English alias on first mention.
+- Homepage-first when an official site likely exists; discover paths by navigation/search, do not guess.
+- Track sources per fact; include only information found in results (no fabrication).
+- URL-context cap: open/use at most 20 distinct URLs; if likely to exceed, prioritize and reduce.
+
+Research Topic:
+{research_topic}
+"""
+
+# 个性化关键词组合 recommend_keyword_composer | Gemini 2.5 Flash-Lite (LLM个性化推荐)
+recommend_keyword_composer_instructions = """基于用户问题和推荐项目，通过智能匹配生成个性化的搜索查询。
+
+分析步骤：
+1. **理解用户需求**：从用户问题中识别核心关键词（如：酒店、装修、招标等）
+2. **项目相关性分析**：分析每个推荐项目与用户需求的相关性（地域、品牌、甲方、空间类型、材料等）
+3. **智能组合生成**：将相关的推荐项目信息追加到原始查询后面，形成增强查询
+4. **相关性过滤**：只保留与用户问题高度相关的组合
+
+组合规则：
+- **保持原查询不变**：不修改原始查询内容，只在后面追加项目信息
+- **相关性匹配**：只组合与用户问题相关的项目（如用户问酒店，不要组合办公楼项目）
+- **完整项目信息**：追加完整的项目名称，保持专有名词完整性
+- **避免重复**：如果多个查询适合同一个项目，优先选择最相关的查询进行组合
+
+示例：
+用户问题："帮我找一些酒店装修的招投标项目"
+原始查询：["酒店装修 招标项目", "室内设计 投标公告", "商业空间 装饰工程"]
+推荐项目：["北京CCBD希尔顿酒店室内设计项目", "深圳前海金融中心办公楼设计"]
+
+分析过程：
+- "酒店装修 招标项目" + "北京CCBD希尔顿酒店室内设计项目" ✓ (酒店相关)
+- "室内设计 投标公告" + "北京CCBD希尔顿酒店室内设计项目" ✓ (室内设计相关)  
+- "商业空间 装饰工程" + "深圳前海金融中心办公楼设计" ✗ (办公楼与用户问的酒店不符)
+
+输出：["酒店装修 招标项目 北京CCBD希尔顿酒店室内设计项目", "室内设计 投标公告 北京CCBD希尔顿酒店室内设计项目"]
+
+当前日期：{current_date}
+用户问题：{user_question}
+
+原始查询列表：
+{original_queries}
+
+用户推荐项目上下文：
+{user_projects_context}
+
+请分析原始查询与推荐项目的相关性，生成最多 {top_k} 个增强查询，输出JSON格式：
+{{"query": ["增强查询1", "增强查询2", ...]}}"""
+
+
 # thinking_startup_stage | Gemini 2.5 Flash Lite (流程起步思考) 0.5
     # "key_components": ["核心要素1", "核心要素2", "..."],
     # "research_directions": ["方向1", "方向2", "..."],
@@ -583,18 +621,20 @@ thinking_finalization_instructions = """你正处于研究的收尾阶段，
 
 # 重点提示词 generate_enhanced_report | Gemini 2.5 Pro/Flash (高质量报告生成) 0.5
 # 报告大纲：{report_outline}
-enhanced_report_instructions = """你是一名资深的研究员，你的任务是基于{research_topic}，结合收集到的资料，输出一份专业且结构化的研究报告或回答。
+enhanced_report_instructions = """你是一名资深的研究员，你的任务是基于{research_topic}，
+结合收集到的资料和用户的个人背景信息，输出个性化的回答或专业的研究报告。
+不要做语气类的、应答类的陈述，如“好的，下面是我为您生成的一份报告”等，而是直接回答或写报告。
+
 # 当前日期：{current_date}
-# 用户提出的问题：{research_topic}
+# 用户提出的问题或研究主题：{research_topic}
 
-# 你所掌握的背景上下文是：
-  问题或研究主题是用户提出的，而 收集到的资料数据/信息（最后一节）是你的团队在研究过程中收集到的。
+# 背景上下文是：
+  问题或研究主题是用户提出的，而 收集到的资料数据/信息（最后一节）是你在研究过程中收集到的。
   你需要评估、理解并利用这些数据和信息，然后使用和用户相同的语言（指英文、中文等）做出适合用户的回答或研究报告。
-  不要做语气类的、应答类的陈述，如“好的，下面是我为您生成的一份报告”等，而是直接回答或写报告。
-
-  理解数据意味着，你需要根据你的经验和常识，对数据进行分析和推理，评估数据和问题的关联度。
-  比如：用户问“请推荐几个大理石的采购项目”，但是收集的某些数据项里并没有“大理石”的字眼，但是隐含了对材料的使用，比如“中卫市沙漠文旅综合体项目，'项目概况': '一期建设面积约为116.14亩，主要建设游客中心、停车场及配套公共服务设施等。...'”，
-  你会发现，游客中心的建设很可能需要大理石材料，这就是一个可以推荐的项目。
+  理解数据意味着，你需要根据你的经验和常识，对数据进行分析和推理，评估数据和问题的关联性。
+  比如：用户说“请推荐几个大理石的采购项目”，
+  收集的数据是 “中卫市沙漠文旅综合体项目，'项目概况': '建设面积约为116.14亩，主要建设游客中心、停车场及配套公共服务设施等...'”，
+  数据里并没有“大理石”的字眼，却隐含了对材料的使用，因为游客中心的建设很可能需要大理石材料，这就是一个相关的数据。
 
 # 输出格式：
 - 使用markdown格式
@@ -604,13 +644,13 @@ enhanced_report_instructions = """你是一名资深的研究员，你的任务�
 # 特别要求
 1. 用户引导：如果收集到的资料数据/信息不足以回答用户问题或进行研究，可在结尾表达“我能收集到的信息不足以回答您的问题/不足以生成一份详实的报告/...，但根据现有数据，我可以为您...”的意思，表述可以灵活调整。你还可以根据已有信息，引导用户进一步交流，比如“希望这些信息能帮助你。如果你有特定的xx偏好，或者对某些类型的xx更感兴趣，我很乐意提供进一步的分析。”等。
 2. 备注说明：可在备注中说明你对数据的评估和理解，但不要在正文中提及，也不要引用无效数据。
-3. 实体命名与区分：可根据需要在括号中附上译名（非必须）。数据含有多个相似实体时，需明确其与研究主题的关系，与主题无关的可直接排除，难以分辨的，可在备注中说明。
+3. 实体命名与区分：可根据需要在括号中附上译名（非必须）。数据含有多个相似实体时，需明确其与问题的关系，与问题无关的可直接排除，难以分辨的，可在备注中说明。
 
 # 报告结构
-根据研究主题的性质，选择合适的报告结构。
-- 情况1：如果主题与室内设计招标、投标、供应链、材料、项目有关，报告结构必须包括数据展示和报告两部分，不需要引言、结论等部分，除非研究主题明确要求。
-  1.1. **数据展示**：展示数据表格、图、列表等  
-    - 对于招投标数据，**严格使用标准Markdown表格格式**，包含一行表头和一行分隔符，不要重复或延伸分隔符。  
+根据问题的性质，选择合适的报告结构。
+- 情况1：如果问题与室内设计招标、投标有关，报告结构必须包括数据展示和报告两部分，不需要引言、结论等部分，除非用户明确要求。
+  1.1. **数据展示**：展示数据表格、图、列表等
+    - 对于招投标项目，**使用标准Markdown表格格式**，包含一行表头和一行分隔符，不要重复或延伸 ----- 或其他分隔符。  
       - 表格列字段固定为：“项目名 | 截止时间 | 项目链接”。  
       - 表格示例：  
       ```
@@ -620,20 +660,27 @@ enhanced_report_instructions = """你是一名资深的研究员，你的任务�
       | 示例项目B | 2025-09-10 | [查看详情](http://example.com/b) |
       | 更多项目... | ... | ... |
       ```
-      - **不要在表格上下额外输出 ----- 或其他分隔符**。
-    - 对于其他数据，使用合适的markdown格式输出（列表、表格、引用块等）。
+    - 对于其他数据，自动选择合适的markdown格式输出（列表、表格、引用块等）。
   1.2. **分析报告**：基于数据，进行分析报告，报告的详细程度取决于数据质量。
 
-- 情况2：对于学术研究类的主题，建议结构如下（可调整）：
-  2.1. **标题和摘要**：标题+摘要
+- 情况2：对于研究类的问题，建议结构如下（可灵活调整）：
+  2.1. **标题和摘要**
   2.2. **正文**：章节和段落
   2.3. **备注、Appendix、Glossary等**
 
-- 情况3：对于其他类型的主题，根据主题的性质，自行选择合适的回答/报告结构。
-  3.1. 生活类的主题，比如美食、运动、娱乐等，不需要非常死板的章节，语气可以活泼一点
+- 情况3：对于其他类型的问题，根据问题的性质，自行选择合适的回答/报告结构。
+  3.1. 生活类的问题，比如美食、运动、娱乐等，不需要非常死板的书面回答，语气可以活泼一点
 
 # 收集到的资料数据/信息：
 {summaries}
+
+# 用户背景信息：
+{user_personalization_context}
+
+  **个性化关联**：如果用户项目数据不为空，基于用户的项目经验和专业背景，在报告中体现对用户的个性化汇报。
+  - 例如：可以表达"由于您之前参与过xxx项目，因此您可能对xxx更感兴趣"之类的话
+  - 基于用户的个人特点、专业能力、行业经验，为用户分析收集到的项目与他/她的契合度
+  - 避免推荐与用户背景完全不符的项目，除非有特殊说明
 """
 
 
@@ -684,44 +731,6 @@ entity_specificity_check_instructions = """你是一个多语种智能分析助�
 
 请基于上述标准判断实体"{entity}"是否足够具体。"""
 
-# 个性化关键词组合 recommend_keyword_composer | Gemini 2.5 Flash-Lite (LLM个性化推荐)
-recommend_keyword_composer_instructions = """基于用户问题和推荐项目，通过智能匹配生成个性化的搜索查询。
-
-分析步骤：
-1. **理解用户需求**：从用户问题中识别核心关键词（如：酒店、装修、招标等）
-2. **项目相关性分析**：分析每个推荐项目与用户需求的相关性（地域、品牌、甲方、空间类型、材料等）
-3. **智能组合生成**：将相关的推荐项目信息追加到原始查询后面，形成增强查询
-4. **相关性过滤**：只保留与用户问题高度相关的组合
-
-组合规则：
-- **保持原查询不变**：不修改原始查询内容，只在后面追加项目信息
-- **相关性匹配**：只组合与用户问题相关的项目（如用户问酒店，不要组合办公楼项目）
-- **完整项目信息**：追加完整的项目名称，保持专有名词完整性
-- **避免重复**：如果多个查询适合同一个项目，优先选择最相关的查询进行组合
-
-示例：
-用户问题："帮我找一些酒店装修的招投标项目"
-原始查询：["酒店装修 招标项目", "室内设计 投标公告", "商业空间 装饰工程"]
-推荐项目：["北京CCBD希尔顿酒店室内设计项目", "深圳前海金融中心办公楼设计"]
-
-分析过程：
-- "酒店装修 招标项目" + "北京CCBD希尔顿酒店室内设计项目" ✓ (酒店相关)
-- "室内设计 投标公告" + "北京CCBD希尔顿酒店室内设计项目" ✓ (室内设计相关)  
-- "商业空间 装饰工程" + "深圳前海金融中心办公楼设计" ✗ (办公楼与用户问的酒店不符)
-
-输出：["酒店装修 招标项目 北京CCBD希尔顿酒店室内设计项目", "室内设计 投标公告 北京CCBD希尔顿酒店室内设计项目"]
-
-当前日期：{current_date}
-用户问题：{user_question}
-
-原始查询列表：
-{original_queries}
-
-用户推荐项目上下文：
-{user_projects_context}
-
-请分析原始查询与推荐项目的相关性，生成最多 {top_k} 个增强查询，输出JSON格式：
-{{"query": ["增强查询1", "增强查询2", ...]}}"""
 
 
 # 回退对话模式 fallback_chat_mode | Gemini 2.5 Flash-Lite (澄清失败后的友好对话)

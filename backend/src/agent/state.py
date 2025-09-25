@@ -102,6 +102,9 @@ class QueryGenerationState(TypedDict):
     planned_backlog: NotRequired[list[str]]
     # Already dispatched queries carried over so the dispatcher can filter them out
     dispatched_queries: NotRequired[list[str]]
+    user_info: NotRequired[dict | None]  # User information from authentication
+    user_projects: NotRequired[list]  # User's project list for personalization
+    user_projects_text: NotRequired[str]  # Formatted user projects context for prompts
 
 
 class WebSearchState(TypedDict):

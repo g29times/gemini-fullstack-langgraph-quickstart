@@ -4,6 +4,7 @@ import logging
 import re
 from dataclasses import dataclass
 from urllib.parse import urlparse
+import time
 
 from dotenv import load_dotenv
 from langchain_core.messages import AIMessage
@@ -494,7 +495,6 @@ def classify_intent(state: OverallState, config: RunnableConfig) -> OverallState
 
     Stores structured intent info into state["intent"]. If router disabled, set a RESEARCH intent.
     """
-    # print("[method] classify_intent")
     configurable = Configuration.from_runnable_config(config)
     if not configurable.enable_intent_router:
         return {
@@ -945,12 +945,9 @@ def answer_simple_fact(state: OverallState, config: RunnableConfig) -> OverallSt
     
     if is_fallback:
         # For fallback cases, provide more conversational response
-        print("=> fallback")
         prompt = fallback_chat_mode_instructions.format(research_topic=topic)
     else:
-        print("=> simple_fact")
         prompt = simple_fact_answer_instructions.format(research_topic=topic)
-    print(f"[NEO_LOG] [answer_simple_fact] prompt => {prompt}")
     try:
         response = llm.invoke(prompt)
         answer_text = response.content if hasattr(response, 'content') else str(response)
@@ -1338,7 +1335,7 @@ def generate_research_plan(state: OverallState, config: RunnableConfig) -> Overa
         research_topic=get_research_topic(state.get("messages", [])),
     )
     
-    logger.info("[NEO_LOG] [generate_research_plan] prompt => %s", formatted_prompt)
+    # logger.info("[NEO_LOG] [generate_research_plan] prompt => %s", formatted_prompt)
     # 优先使用结构化输出；失败则回退到非结构化并解析；最终提供安全默认
     plan_dict = None
     try:
@@ -1564,7 +1561,7 @@ class QueryManager:
             self.state["user_projects_text"] = ""
             return ""
     
-    # 个性化 调用用户推荐接口
+    # 个性化 调用用户推荐接口（支持缓存）
     def _recommend_user_projects(self) -> str:
         """懒加载用户项目并构建个性化上下文"""
         # 检查缓存
@@ -1592,6 +1589,12 @@ class QueryManager:
             timeout = self.config.rag_rest_timeout
             top_k = self.config.rag_recommend_top_k
             
+            # projects = [
+            #     {'id': '1', 'title': '北京首都机场希尔顿酒店室内设计项目', 'customer': '客户: 希尔顿集团'},
+            #     {'id': '2', 'title': '上海浦东万豪酒店公区装修工程', 'customer': '客户: 万豪国际'},
+            #     {'id': '3', 'title': '深圳前海金融中心办公楼设计', 'customer': '客户: 招商局集团'},
+            #     {'id': '4', 'title': '广州白云机场T3航站楼商业空间', 'customer': '客户: 白云机场集团'},
+            # ]
             projects = query_user_recommend(
                 api_key=user_token,
                 endpoint=endpoint,
@@ -1599,6 +1602,7 @@ class QueryManager:
                 top_k=top_k,
                 # institution_ids=user_institution_ids
             )
+            # print("[NEO_LOG] [QueryManager] 用户推荐接口返回结果: ", projects)
             
             if not projects:
                 logger.info("[NEO_LOG] [QueryManager] 未获取到用户项目，使用通用查询")
@@ -1630,10 +1634,9 @@ class QueryManager:
             self.state["user_projects"] = projects
             self.state["user_projects_text"] = context_text
             
-            logger.info("[NEO_LOG] [QueryManager] 个性化上下文构建完成: %d项目, %d字符", 
-                       len(projects), len(context_text))
-            
-            return context_text
+            logger.info("[NEO_LOG] [QueryManager] 个性化上下文构建完成: %d项目, %d字符", len(projects), len(context_text))
+
+            return projects, context_text
             
         except Exception as e:
             logger.error("[NEO_LOG] [QueryManager] 用户项目加载失败: %s", str(e))
@@ -1707,7 +1710,7 @@ class QueryManager:
         middle_thinking = thinking_process.get("middle_thinking", "") if thinking_process else "无深度分析内容"
         
         # 获取推荐用户项目并进行个性化增强
-        user_projects_context = self._recommend_user_projects()
+        projects, user_projects_context = self._recommend_user_projects()
         
         formatted_prompt = followup_decomposer_instructions.format(
             research_topic=research_topic,
@@ -1747,7 +1750,7 @@ class QueryManager:
         return QueryResult(
             queries=queries,
             backlog=existing_backlog,  # 传递现有的计划backlog
-            metadata={"source": "followup"}
+            metadata={"source": "followup", "projects": projects}
         )
     
     # generate_queries 2 沿用计划查询
@@ -1757,11 +1760,11 @@ class QueryManager:
         
         # 完整计划，设置backlog供后续分批查询
         sanitized_full = _sanitize_queries(planned_queries, None)
-        # 首轮查询限额
+        # 首轮查询限额 在此处截断为4个
         sanitized_queries = _sanitize_queries(planned_queries, max_parallel_queries)
         
         # 获取推荐用户项目并进行个性化增强
-        user_projects_context = self._recommend_user_projects()
+        projects, user_projects_context = self._recommend_user_projects()
         if user_projects_context:
             research_topic = get_research_topic(self.state.get("messages", []))
             enhanced_queries = self.personalization_manager.enhance_queries_with_personalization(
@@ -1774,7 +1777,7 @@ class QueryManager:
         return QueryResult(
             queries=sanitized_queries,
             backlog=sanitized_full,  # 保留完整计划作为backlog
-            metadata={"source": "planned"}
+            metadata={"source": "planned", "projects": projects}
         )
     
     # generate_queries 1 生成初始查询（暂时未触发，在第一轮问题生成时，直接继承了research_plan中的planned_queries以加速）
@@ -1993,11 +1996,30 @@ class QueryManager:
         
         return self._create_sends(batch)
     
+    def _get_user_project_names(self) -> list:
+        """从用户项目中提取纯项目名称（用于Web搜索）"""
+        user_projects = self.state.get("user_projects", [])
+        logger.info("[NEO_LOG] [QueryManager] user_projects: %s", user_projects)
+        if not user_projects:
+            return []
+        
+        project_names = []
+        for project in user_projects:
+            title = project.get("title", "").strip()
+            if title:
+                # 应用隐私过滤
+                privacy_fields = ["phone", "email", "address", "contact"]
+                title_clean = self._filter_privacy_content(title, privacy_fields)
+                if title_clean:
+                    project_names.append(title_clean)
+        
+        return project_names
+
     # 重点方法 分发搜索路径
     def _create_sends(self, queries: list) -> list:
-        """创建Send对象列表，基于mem_only智能选择检索通道"""
+        """创建Send对象列表，基于mem_only智能选择检索通道，并优化web和rag的搜索词分工"""
         sends = []
-        
+
         # 获取检索通道配置
         intent = self.state.get("intent", {})
         mem_only = intent.get("mem_only", False)
@@ -2010,15 +2032,20 @@ class QueryManager:
             
         logger.info("[NEO_LOG] [QueryManager] mem_only=%s, research_channels=%s", mem_only, research_channels)
         
+        # 获取原始计划查询（用于RAG搜索）
+        user_project_names = self._get_user_project_names()
+        
         for i, q in enumerate(queries):
             logger.info("[NEO_LOG] [QueryManager] 子问题 id=%d: '%s'", i, q)
             
             # 根据channels生成对应的Send
-            if "web" in research_channels:
-                sends.append(Send("web_research", {"search_query": q, "id": int(i)}))
-            if "rag" in research_channels:
+            if "web" in research_channels: # Web使用用户项目名称（具体项目名，更容易在公网搜到）
+                web_query_index = i % len(user_project_names) if user_project_names else 0
+                web_query = user_project_names[web_query_index] if user_project_names else q
+                sends.append(Send("web_research", {"search_query": web_query, "id": int(i)}))
+            if "rag" in research_channels: # RAG使用增强查询（包含关键词的完整查询，在内部数据库中查找相关项目）
                 sends.append(Send("rag_search", {"search_query": q, "id": int(i)}))
-            if "mem" in research_channels:
+            if "mem" in research_channels: # Mem使用增强查询
                 sends.append(Send("mem_search", {"search_query": q, "id": int(i)}))
         
         # 统计节点分布
@@ -2078,10 +2105,12 @@ def generate_query(state: OverallState, config: RunnableConfig) -> OverallState:
     # 如果有backlog，添加到状态中
     if result.backlog:
         response["planned_backlog"] = result.backlog
+        
+    response["user_projects"] = result.metadata.get("projects", [])
     
-    # 保留关键状态字段，防止丢失
-    critical_keys = ["overall_completion", "objectives_progress", "research_loop_count", 
-                     "is_sufficient", "knowledge_gap", "follow_up_queries", "intent"]
+    # 保留关键状态字段，防止丢失 intent: 意图， user_projects_text: 用户项目上下文
+    critical_keys = ["user_projects_text", "overall_completion", "objectives_progress", 
+        "research_loop_count", "is_sufficient", "knowledge_gap", "follow_up_queries", "intent"]
     for key in critical_keys:
         if state.get(key) is not None:
             response[key] = state[key]
@@ -2294,7 +2323,6 @@ def web_research_SerpAPI(state: WebSearchState, config: RunnableConfig) -> Overa
             return [], f"[SerpAPI search error] {error_msg}"
 
     # First attempt with primary (possibly translated) query
-    import time
     start_time = time.time()
     try:
         logger.info("[SERPAPI_LOG] [web_research] Starting primary query at %s: '%s'", time.strftime('%H:%M:%S'), primary_query)
@@ -2527,7 +2555,6 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
     configurable = Configuration.from_runnable_config(config)
     original_query = state.get("search_query", "")
     
-    import time
     _node_start = time.time()
     logger.info("[NEO_LOG] [web_research] WEB查询 START, id=%s: '%s'", state.get("id", "N/A"), original_query)
     # Translate Chinese queries to English for better coverage
@@ -2644,7 +2671,6 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
             return [], base, []
 
     # First attempt with primary (possibly translated) query
-    import time
     start_time = time.time()
     try:
         logger.debug("[NEO_LOG] [web_research] Starting primary query: '%s' at %s", primary_query, time.strftime('%H:%M:%S'))
@@ -2718,7 +2744,6 @@ def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
     - search_query: echo back dispatched query for traceability
     - dispatched_queries: record the query to dedup in dispatcher
     """
-    import time
     configurable = Configuration.from_runnable_config(config)
     original_query = state.get("search_query", "")
     
@@ -2946,7 +2971,6 @@ def mem_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
     - search_query: echo back dispatched query for traceability
     - dispatched_queries: record the query to dedup in dispatcher
     """
-    import time
     import threading
     from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
     
@@ -2968,6 +2992,7 @@ def mem_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
         try:
             # Use ThreadPoolExecutor for non-blocking timeout control
             with ThreadPoolExecutor(max_workers=1) as executor:
+                # 实际调用 _mock_mem_api_call_sync
                 future = executor.submit(_mock_mem_api_call_sync, original_query, node_id)
                 try:
                     mem_results = future.result(timeout=timeout_seconds)
@@ -3005,10 +3030,9 @@ def mem_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
         "dispatched_queries": dispatched_out,
     }
 
-
+# 记忆搜索API调用（暂时Mock）
 def _mock_mem_api_call_sync(query: str, node_id: str) -> list[str]:
     """Mock synchronous memory API call with realistic delay."""
-    import time
     
     # Simulate realistic API latency (0.3-1.0s for mock)
     time.sleep(0.5)
@@ -3018,19 +3042,19 @@ def _mock_mem_api_call_sync(query: str, node_id: str) -> list[str]:
     # Simplified categorization logic
     if any(kw in query_lower for kw in ["招投标", "供应商", "项目", "采购"]):
         return [
-            "[mem] 历史偏好：你经常关注招投标和供应商信息，特别是室内设计相关的项目",
-            "[mem] 用户画像：倾向于获取官方公告链接和详细的项目描述信息",
-            "[mem] 提醒：如需特定供应商的项目推荐，可在后续补充公司名称进行精准匹配"
+            "[记忆] 历史偏好：你经常关注招投标和供应商信息，特别是室内设计相关的项目",
+            "[记忆] 用户画像：倾向于获取官方公告链接和详细的项目描述信息",
+            "[记忆] 提醒：如需特定供应商的项目推荐，可在后续补充公司名称进行精准匹配"
         ]
     elif any(kw in query_lower for kw in ["技术", "研究", "发展", "趋势", "推荐", "分析"]):
         return [
-            "[mem] 研究偏好：你对技术发展和行业趋势比较关注",
-            "[mem] 历史模式：通常需要深入的技术分析和行业洞察",
-            "[mem] 建议：结合最新的研究报告和专业资料进行分析"
+            "[记忆] 研究偏好：你对技术发展和行业趋势比较关注",
+            "[记忆] 历史模式：通常需要深入的技术分析和行业洞察",
+            "[记忆] 建议：结合最新的研究报告和专业资料进行分析"
         ]
     elif any(kw in query_lower for kw in ["上次", "之前", "聊", "对话", "记录"]):
         return [
-            "[mem] 对话回忆：你之前提到你比较喜欢美食和运动",
+            "[记忆] 对话回忆：你之前提到你比较喜欢美食和运动",
         ]
     else:
         return []
@@ -3837,10 +3861,29 @@ def generate_enhanced_report(state: OverallState, config: RunnableConfig) -> Ove
     # Combine research results with comprehensive process context
     enhanced_summaries = _prepare_summaries(safe_results) + process_context
     
+    # 获取用户个性化信息
+    user_projects_text = state.get("user_projects_text", "")
+    user_personalization_context = ""
+    
+    if user_projects_text:
+        user_personalization_context = f"""
+## 用户项目数据
+以下是用户的历史项目和专业背景信息，请在分析和推荐时参考：
+
+{user_projects_text}
+
+请基于这些信息，在报告中体现个性化关联性。"""
+
+    else:
+        user_personalization_context = """
+## 用户项目数据
+暂无用户的历史项目信息，请基于收集到的资料进行通用分析。"""
+    
     formatted_prompt = enhanced_report_instructions.format(
         current_date=current_date,
         research_topic=get_research_topic(state.get("messages", [])),
         summaries=enhanced_summaries,
+        user_personalization_context=user_personalization_context,
         # report_outline=state.get("report_outline", {}),
     )
     logger.info("[NEO_LOG] [generate_enhanced_report] START, PROMPT LENGTH: %d", len(formatted_prompt))
