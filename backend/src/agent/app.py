@@ -1,11 +1,14 @@
 # mypy: disable - error - code = "no-untyped-def,misc"
+import json
 import os
 import pathlib
 import logging
+import httpx
 from fastapi import FastAPI, Response, HTTPException, Request, Depends
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from starlette.middleware.base import BaseHTTPMiddleware
 from typing import Optional
 # from agent.configuration import Configuration
 # from agent.rag_rest import query_user_projects, query_vendor_projects, query_rag_rest
@@ -17,8 +20,8 @@ from src.auth.token_validator import TokenValidator
 # Define the FastAPI app
 app = FastAPI()
 
-# Read authentication configuration from environment
-ENABLE_DEFAULT_USER = os.getenv("ENABLE_DEFAULT_USER", "false").lower() == "true"
+# Hardcoded authentication configuration
+ENABLE_DEFAULT_USER = False
 
 # Initialize security and token validator
 security = HTTPBearer(auto_error=False)  # 设置auto_error=False以便在认证禁用时处理
@@ -41,7 +44,7 @@ async def verify_token(credentials: Optional[HTTPAuthorizationCredentials] = Dep
     
     if token:
         user_info = await token_validator.validate_token_async(token)
-        logging.info(f"用户认证信息: {user_info}")
+        logging.info(f"用户认证信息: {json.dumps(user_info)}")
 
         if user_info:
             # 记录成功获取的用户信息（不包含敏感信息）
@@ -79,10 +82,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Authentication middleware for stream requests only
+# Custom middleware to inject user info into LangGraph configurable parameters
+class UserInfoMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        # 先处理请求，让认证中间件设置用户信息
+        response = await call_next(request)
+        return response
+
+# Add the user info middleware
+app.add_middleware(UserInfoMiddleware)
+
+# Authentication and user info injection middleware
 @app.middleware("http")
-async def auth_middleware(request: Request, call_next):
-    """认证中间件，根据环境变量控制是否启用认证"""
+async def auth_and_user_info_middleware(request: Request, call_next):
+    """认证中间件，同时处理用户信息注入到LangGraph请求"""
     # 跳过认证路由和静态文件
     if (
         request.url.path.startswith("/api/auth/") or 
@@ -95,81 +108,104 @@ async def auth_middleware(request: Request, call_next):
         response = await call_next(request)
         return response
     
-    # 只对stream相关接口进行token验证
-    if "stream" not in request.url.path.lower():
-        # 非stream接口直接通过，不进行认证
-        response = await call_next(request)
-        return response
+    # 获取用户信息（对所有请求）
+    user_id = None
+    user_name = None
     
-    # 检查Authorization头（仅对stream接口）
+    # 检查Authorization头
     auth_header = request.headers.get("authorization")
-    if not auth_header or not auth_header.startswith("Bearer "):
-        # 如果启用默认用户模式，即使没有token也继续处理请求
-        if not ENABLE_DEFAULT_USER:
-            response = await call_next(request)
-            return response
-        return Response(
-            content='{"detail":"缺少认证token"}',
-            status_code=401,
-            media_type="application/json"
-        )
+    # 当前机构id
+    request.state.user_institution = request.headers.get("institution-identification", '')
+
+    if auth_header and auth_header.startswith("Bearer "):
+        try:
+            token = auth_header.split(" ")[1]
+            # 调用token验证器获取用户信息
+            user_info = await token_validator.validate_token_async(token)
+            if user_info:
+                user_id = user_info.id
+                user_name = user_info.name
+                logging.info(f"获取到用户信息: 用户ID={user_id}, 用户名={user_name}")
+                # 将用户信息存储到request.state中
+                request.state.user_id = user_id
+                request.state.user_name = user_name
+                
+            else:
+                logging.warning("token验证失败，未获取到用户信息")
+        except Exception as e:
+            logging.warning(f"token验证异常: {str(e)}")
     
-    # 获取用户信息逻辑：调用token验证器获取用户信息
-    try:
-        token = auth_header.split(" ")[1]
-        # 调用token验证器获取用户信息
-        user_info = await token_validator.validate_token_async(token)
-        if user_info:
-            # 记录成功获取的用户信息（不包含敏感信息）
-            logging.info(f"Stream接口获取到用户信息: 用户ID={user_info.id}, 用户名={user_info.name}, 邮箱={user_info.email}")
-            # 将用户信息存储到request.state中供后续使用
-            request.state.user = user_info
-        else:
-            logging.warning(f"Stream接口token验证失败，未获取到用户信息")
-            # 根据ENABLE_DEFAULT_USER开关决定处理逻辑
+    # 如果没有获取到用户信息，使用默认用户（当ENABLE_DEFAULT_USER=False时）
+    if not user_id and not ENABLE_DEFAULT_USER:
+        user_id = "default"
+        user_name = "default_user"
+        request.state.user_id = user_id
+        request.state.user_name = user_name
+        logging.info(f"使用默认用户信息: user_id={user_id}, user_name={user_name}")
+    
+    # 检查是否是LangGraph API请求，如果是则注入用户信息
+    if (
+        request.url.path.startswith("/runs") or 
+        request.url.path.startswith("/threads") or
+        "stream" in request.url.path.lower()
+    ):
+        if user_id or user_name:
+            # 读取请求体
+            body = await request.body()
+            
+            if body:
+                try:
+                    # 解析JSON请求体
+                    data = json.loads(body.decode('utf-8'))
+                    
+                    # 注入用户信息到configurable
+                    if 'config' not in data:
+                        data['config'] = {}
+                    if 'configurable' not in data['config']:
+                        data['config']['configurable'] = {}
+                    
+                    # 添加用户信息到configurable
+                    user_info_dict = {}
+                    if user_id:
+                        user_info_dict['id'] = user_id
+                    if user_name:
+                        user_info_dict['name'] = user_name
+                    
+                    data['config']['configurable']['user_info'] = user_info_dict
+                    
+                    # 修改请求体
+                    modified_body = json.dumps(data).encode('utf-8')
+                    request._body = modified_body
+                    
+                    logging.info(f"注入用户信息到LangGraph请求: user_id={user_id}, user_name={user_name}")
+                    
+                except json.JSONDecodeError:
+                    logging.warning("无法解析LangGraph请求体JSON")
+                except Exception as e:
+                    logging.error(f"处理LangGraph请求时出错: {str(e)}")
+    
+    # 对stream接口进行额外的认证检查
+    if "stream" in request.url.path.lower():
+        if not auth_header or not auth_header.startswith("Bearer "):
             if ENABLE_DEFAULT_USER:
                 return Response(
-                    content='{"detail":"token验证失败"}',
+                    content='{"detail":"缺少认证token"}',
                     status_code=401,
                     media_type="application/json"
                 )
-            else:
-                # 启用默认用户模式，设置默认用户信息
-                default_user = {"id": "default", "username": "default_user", "email": "default@example.com"}
-                request.state.user = default_user
-                logging.info(f"启用默认用户模式，使用默认用户信息")
-    except Exception as e:
-        logging.warning(f"Stream接口token验证异常: {str(e)}")
-        # 根据ENABLE_DEFAULT_USER开关决定处理逻辑
-        if ENABLE_DEFAULT_USER:
+        
+        if not user_id and ENABLE_DEFAULT_USER:
             return Response(
-                content='{"detail":"token验证异常"}',
+                content='{"detail":"token验证失败"}',
                 status_code=401,
                 media_type="application/json"
             )
-        else:
-            # 启用默认用户模式，设置默认用户信息
-            default_user = {"id": "default", "username": "default_user", "email": "default@example.com"}
-            request.state.user = default_user
-            logging.info(f"启用默认用户模式，忽略token验证异常，使用默认用户信息")
     
     response = await call_next(request)
-    logging.info(f"Stream接口处理完成，响应状态码: {response.status_code}")
-
     return response
 
 # Register authentication routes
 app.include_router(auth_router)
-
-# User info endpoint
-@app.get("/user-info")
-async def get_user_info(user_info: dict = Depends(verify_token)):
-    """获取当前用户信息"""
-    return {
-        "success": True,
-        "data": user_info,
-        "message": "用户信息获取成功"
-    }
 
 
 def create_frontend_router(build_dir="../frontend/dist"):
@@ -326,3 +362,81 @@ app.mount(
 #         "model": (f"models/{model_for_answer}" if not str(model_for_answer).startswith("models/") else model_for_answer),
 #         "source": {"rest": endpoint or None, "local_json": local_json},
 #     }
+
+
+# 推荐API代理端点
+@app.post("/recommendations")
+async def get_recommendations(request: Request):
+    """透明代理转发推荐API请求到目标环境"""
+    try:
+        # 目标环境API地址
+        target_url = "http://113.98.240.54:8903/intelligence-platform/bidProject/searchRecommedV1"
+
+        # 获取请求体
+        request_body = await request.body()
+
+        # 获取所有请求头
+        headers = dict(request.headers)
+
+        # 移除会冲突的header
+        headers.pop('host', None)
+        headers.pop('content-length', None)
+
+        # 设置目标主机
+        headers['Host'] = '113.98.240.54:8903'
+
+        # 获取API密钥：优先从请求头获取，其次从环境变量，最后使用默认值
+        api_key = None
+
+        # 1. 从请求头获取 Authorization
+        auth_header = request.headers.get("Authorization")
+        if auth_header:
+            # 移除 Bearer 前缀
+            api_key = auth_header.replace("Bearer ", "").strip()
+
+        # 2. 从请求头获取 X-Designer-Authorization
+        # if not api_key:
+        #     designer_auth_header = request.headers.get("X-Designer-Authorization")
+        #     if designer_auth_header:
+        #         api_key = designer_auth_header.replace("Bearer ", "").strip()
+
+        # 4. 使用默认值
+        if not api_key:
+            api_key = "eyJhbGciOiJIUzUxMiJ9.eyJjcmVhdGVfdGltZSI6IjIwMjUtMDktMTYgMTc6MDE6MzQiLCJ1c2VyX2lkIjoyMDAwMTI0LCJ1c2VyX25hbWUiOiIxODY3Njc1NjU4MCIsInVzZXJfa2V5IjoiRTNqeDk5Mnhnb254elRGYk1IemJ4IiwibmV3X2ZsYWciOiJuZXdfZmxhZyJ9.rWDTuzMouFAxtXwX7xvuxpOXhwo_nebhs2j5MQQF4ypNtZ3wpPycEGZqavta2X8Xa9ruBcT2QnkXizr1MSy3hg"
+            
+        # 3. 从环境变量获取
+        if not api_key:
+            api_key = os.environ.get("RAG_REST_API_KEY")
+
+
+        print(f"DEBUG: Using API key from: {'request header' if auth_header or designer_auth_header else 'environment/default'}")
+
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        # 使用httpx发送请求到目标环境
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                target_url,
+                content=request_body,
+                headers=headers
+            )
+
+            # 返回目标环境的响应
+            return Response(
+                content=response.content,
+                status_code=response.status_code,
+                headers=dict(response.headers)
+            )
+
+    except httpx.TimeoutException:
+        print("DEBUG: 请求超时")
+        raise HTTPException(status_code=504, detail="请求超时")
+    except httpx.RequestError as e:
+        print(f"DEBUG: 请求错误: {e}")
+        raise HTTPException(status_code=502, detail="代理请求失败")
+    except Exception as e:
+        print(f"DEBUG: 其他错误: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail="服务器内部错误")
