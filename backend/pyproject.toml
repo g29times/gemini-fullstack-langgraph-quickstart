@@ -18,6 +18,11 @@ dependencies = [
     "langgraph-api",
     "fastapi",
     "google-genai",
+    "aiohttp>=3.8.0",
+    "PyJWT>=2.8.0",
+    "requests>=2.31.0",
+    "google-search-results>=2.4.2",
+    "beautifulsoup4>=4.12.0",
 ]
 
 
