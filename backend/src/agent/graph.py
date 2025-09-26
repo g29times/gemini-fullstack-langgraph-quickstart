@@ -1562,12 +1562,13 @@ class QueryManager:
             return ""
     
     # 个性化 调用用户推荐接口（支持缓存）
-    def _recommend_user_projects(self) -> str:
+    def _recommend_user_projects(self) -> tuple[list, str]:
         """懒加载用户项目并构建个性化上下文"""
+        projects = []
         # 检查缓存
         if self.state.get("user_projects_text"):
             logger.debug("[NEO_LOG] [QueryManager] 使用缓存的推荐用户项目")
-            return self.state["user_projects_text"]
+            return projects, self.state["user_projects_text"]
         
         # 获取用户信息
         user_info = self.state.get("user_info")
@@ -1581,7 +1582,7 @@ class QueryManager:
             # user_institution_ids = user_info.get("user_institution") or ""
         if not user_token:
             logger.debug("[NEO_LOG] [QueryManager] 无用户token，跳过个性化")
-            return ""
+            return projects, ""
         
         # 调用用户推荐接口
         try:
@@ -1589,27 +1590,28 @@ class QueryManager:
             timeout = self.config.rag_rest_timeout
             top_k = self.config.rag_recommend_top_k
             
-            projects = [
-                {'id': '1', 'title': '北京首都机场希尔顿酒店室内设计项目', 'customer': '客户: 希尔顿集团'},
-                {'id': '2', 'title': '上海浦东万豪酒店公区装修工程', 'customer': '客户: 万豪国际'},
-                {'id': '3', 'title': '深圳前海金融中心办公楼设计', 'customer': '客户: 招商局集团'},
-                {'id': '4', 'title': '广州白云机场T3航站楼商业空间', 'customer': '客户: 白云机场集团'},
-            ]
-            print("[NEO_LOG] [QueryManager] 用户推荐接口返回结果: ", projects)
+            projects = query_user_recommend(
+                api_key=user_token,
+                endpoint=endpoint,
+                timeout=timeout,
+                top_k=top_k,
+                # institution_ids=user_institution_ids
+            )
             # TODO 1 项目清洗 2 WEB查询是基于原始10个推荐项目，而不是LLM拼组后的，需要改逻辑
-            # projects = query_user_recommend(
-            #     api_key=user_token,
-            #     endpoint=endpoint,
-            #     timeout=timeout,
-            #     top_k=top_k,
-            #     # institution_ids=user_institution_ids
-            # )
+            if not projects or len(projects) == 0:
+                projects = [
+                    {'id': '1', 'title': '北京首都机场希尔顿酒店室内设计项目', 'customer': '客户: 希尔顿集团'},
+                    {'id': '2', 'title': '上海浦东万豪酒店公区装修工程', 'customer': '客户: 万豪国际'},
+                    {'id': '3', 'title': '深圳前海金融中心办公楼设计', 'customer': '客户: 招商局集团'},
+                    {'id': '4', 'title': '广州白云机场T3航站楼商业空间', 'customer': '客户: 白云机场集团'},
+                ]
+                print("[NEO_LOG] [QueryManager] 用户推荐接口返回结果: ", projects)
             
             if not projects:
                 logger.info("[NEO_LOG] [QueryManager] 未获取到用户项目，使用通用查询")
                 self.state["user_projects"] = []
                 self.state["user_projects_text"] = ""
-                return ""
+                return projects, ""
             
             # 构建简洁的个性化上下文
             context_lines = []
@@ -1644,7 +1646,7 @@ class QueryManager:
             # 设置空缓存避免重复尝试
             self.state["user_projects"] = []
             self.state["user_projects_text"] = ""
-            return ""
+            return [], ""
     
     def _filter_privacy_content(self, text: str, privacy_fields: list) -> str:
         """过滤隐私敏感内容"""
