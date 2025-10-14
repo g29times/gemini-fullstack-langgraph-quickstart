@@ -358,7 +358,7 @@ class Configuration(BaseModel):
     )
     # LLM个性化关键词生成配置
     llm_personalization_top_k: int = Field(
-        default=5,
+        default=10,
         metadata={
             "description": "Maximum number of personalized keywords to generate from LLM based on user projects.",
         },

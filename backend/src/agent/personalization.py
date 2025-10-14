@@ -42,6 +42,7 @@ class PersonalizationManager:
                 current_date=get_current_date(),
                 top_k=self.config.llm_personalization_top_k,
             )
+            # print("个性化prompt: ", prompt)
             
             # 使用现有的query_generator_model
             llm = ChatGoogleGenerativeAI(
@@ -184,14 +185,15 @@ class PersonalizationManager:
         try:
             # 获取LLM生成的个性化增强查询（直接返回完整的增强查询）
             enhanced_queries = self.compose_recommend_keywords_llm(user_question, user_projects_context, queries)
-            # print("LLM生成的个性化关键词: ", enhanced_queries)
+            print("LLM生成的个性化关键词: ", enhanced_queries)
             if not enhanced_queries:
                 logger.warning("[NEO_LOG] [PersonalizationManager] 未获取到个性化增强查询，使用原始查询")
                 return queries
             
             # LLM已经完成智能匹配，直接返回结果
             logger.info("[NEO_LOG] [PersonalizationManager] LLM智能增强完成: %d个（数量基于配置）增强查询", len(enhanced_queries))
-            return enhanced_queries[:len(queries)]  # 限制返回数量不超过原始查询数量
+            # 限制返回数量不超过原始查询数量
+            return enhanced_queries[:len(queries)]
             
         except Exception as e:
             logger.error("[NEO_LOG] [PersonalizationManager] 个性化增强失败: %s", str(e))
@@ -220,7 +222,6 @@ def create_rag_web_scheduling_strategy(config, state):
         enhanced_queries = personalization_manager.enhance_queries_with_personalization(
             queries, user_question, user_projects_context
         )
-        
         # 分配查询：优先RAG，Web作为补充
         rag_queries = enhanced_queries  # 所有查询都先发给RAG
         web_queries_initial = []  # 初始Web查询为空，仅在RAG不足时触发

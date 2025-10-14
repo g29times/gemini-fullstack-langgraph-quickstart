@@ -4,11 +4,19 @@ from langchain_core.messages import HumanMessage
 from langgraph.errors import NodeInterrupt
 from agent.graph import graph
 
-# python backend/src/cli_research.py --max-concurrency 4 --max-loops 1 --auto-approve "最近有哪些精品酒店招投标项目"
+# 可能失败原因：VPN，APIKEY，酒旅 餐饮 潮玩 广东 长三角
+# 查三轮 python backend/src/cli_research.py --max-concurrency 4 --auto-approve "最近有哪些广东地区的酒旅相关的项目"
+# 查一轮（优先）python backend/src/cli_research.py --max-concurrency 4 --max-loops 1 --auto-approve "最近有哪些广东地区的酒旅相关的项目"
 def main() -> None:
     """Run the research agent from the command line."""
     parser = argparse.ArgumentParser(description="Run the LangGraph research agent")
     parser.add_argument("question", help="Research question")
+    parser.add_argument(
+        "--effort",
+        type=str,
+        default="medium",
+        help="Effort level: 'low', 'medium', 'high'.",
+    )
     parser.add_argument(
         "--max-concurrency",
         type=int,
@@ -24,7 +32,7 @@ def main() -> None:
     parser.add_argument(
         "--max-loops",
         type=int,
-        default=2,
+        default=3,
         help="Maximum number of research loops",
     )
     parser.add_argument(
@@ -54,6 +62,7 @@ def main() -> None:
         "initial_search_query_count": args.initial_queries,
         "max_research_loops": args.max_loops,
         "reasoning_model": args.reasoning_model,
+        "effort": args.effort,
     }
 
     # Run graph, handling HITL NodeInterrupt by optionally auto-approving
