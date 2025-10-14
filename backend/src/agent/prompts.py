@@ -30,28 +30,23 @@ Context: {research_topic}"""
 
 
 # 快速生成跟进查询 generate_query | Gemini 2.5 Flash-Lite (跟进问题拆解为可执行关键词)
-followup_decomposer_instructions = """Transform high-level follow-up questions into executable, keyword-level queries.
+followup_decomposer_instructions = """Transform each follow-up question into an short, keyword-level query in the same language as the Research Topic.
 
-Inputs:
+keyword-level query example: '广州 白云国际机场 T3商业空间 设计项目 2025'
+
 - Research Topic: {research_topic}
 - Knowledge Gap: {knowledge_gap}
-- Follow-ups (verbatim):\n{follow_ups}
+- Follow-up questions:\n{follow_ups}
 - Current Date: {current_date}
-- Startup Stage Analysis: {startup_thinking}
-- Middle Stage Analysis: {middle_thinking}
-- User Projects Context: {user_projects_context}
 
 Rules:
+- Center queries around the Research Topic, referencing the Knowledge Gap to ensure relevance and coverage.
 - Directly target the Knowledge Gap; if identity is ambiguous, FIRST do disambiguation (canonical name/aliases/geography/industry/registration IDs).
-- **CRITICAL**: Pay close attention to the Startup/Middle Stage Analysis which contains deep insights or specific keyword suggestions. Incorporate these suggestions into your query generation.
-- **PRIORITY**: If Startup/Middle Stage Analysis identifies specific entities, companies, or disambiguation needs, generate targeted queries for EACH identified entity.
-- **PERSONALIZATION**: If user projects context is available, generate 1-2 personalized queries that connect the follow-up questions with user's project experience (materials, space types, brands, styles). Ensure relevance and privacy protection.
-- **TIME SENSITIVITY**: Current date is {current_date}.
 - Prefer concise keyword-style queries; keep local proper nouns in original script; add cross-lingual variants when helpful.
 - Atomic only: one intent per query; never combine entities (avoid "vs/VS"); for comparisons, use per-entity queries and a separate metric query.
 - Keep the canonical entity string verbatim in quotes; add aliases/transliterations as OR variants.
 - Use operators when useful: quotes, OR, site:, filetype:, intitle:, inurl:.
-- For China-based entities, consider site:天眼查 OR site:企查查 OR site:aiqicha.baidu.com；use 统一社会信用代码/工商/注册地址/法定代表人 as needed.
+- For China-based entities, consider site:天眼查 OR site:企查查 OR site:aiqicha.baidu.com; use 统一社会信用代码/工商/注册地址/法定代表人 as needed.
 - Cap total distinct queries <= {number_queries}; remove near-duplicates.
 
 Output JSON:
@@ -621,30 +616,38 @@ thinking_finalization_instructions = """你正处于研究的收尾阶段，
 
 # 重点提示词 generate_enhanced_report | Gemini 2.5 Pro/Flash (高质量报告生成) 0.5
 # 报告大纲：{report_outline}
-enhanced_report_instructions = """你是一名资深的研究员，你的任务是基于{research_topic}，
-结合收集到的资料和用户的个人背景信息，输出个性化的回答或专业的研究报告。
-不要做语气类的、应答类的陈述，如“好的，下面是我为您生成的一份报告”等，而是直接回答或写报告。
+# 输出格式：URL链接 - 暂时取消 - 引用“收集到的资料数据/信息”中的url；在相关句子后内联标注为 [n](SHORT_URL)，例如 [1](SHORT_URL)；同一来源可在多处复用同一编号；若没有数据或来源，可不添加引用
+
+enhanced_report_instructions = """你是一名资深的研究员，你的任务是对用户提出的问题或研究主题生成报告。
+结合收集到的资料和用户的个人背景信息，使用和用户相同的语言（指英文、中文等）输出，字数10000字以内。
+不要做语气类的、应答类的陈述，如“好的，下面是我为您生成的一份报告”等，直接回答或写报告。
+
+# 任务
+1. 清洗数据（清洗过程不展示在报告中）
+  1.1 删除与主题无关的数据（尤其是时间、地点等信息与主题要求明显不一致，则需要删除）
+  1.2 去重 重复的数据
+2. 展示数据
+3. 分析报告
 
 # 当前日期：{current_date}
+
 # 用户提出的问题或研究主题：{research_topic}
 
-# 背景上下文是：
-  问题或研究主题是用户提出的，而 收集到的资料数据/信息（最后一节）是你在研究过程中收集到的。
-  你需要评估、理解并利用这些数据和信息，然后使用和用户相同的语言（指英文、中文等）做出适合用户的回答或研究报告。
-  理解数据意味着，你需要根据你的经验和常识，对数据进行分析和推理，评估数据和问题的关联性。
-  比如：用户说“请推荐几个大理石的采购项目”，
-  收集的数据是 “中卫市沙漠文旅综合体项目，'项目概况': '建设面积约为116.14亩，主要建设游客中心、停车场及配套公共服务设施等...'”，
-  数据里并没有“大理石”的字眼，却隐含了对材料的使用，因为游客中心的建设很可能需要大理石材料，这就是一个相关的数据。
+# 用户背景信息：
+{user_personalization_context}
+
+  **个性化关联**：
+  - 如果用户之前做过项目，基于清洗后保留的数据与用户参与项目的相关性进行分析，如"鉴于您曾参与xxx项目，您可能对xxx更感兴趣"
+  - 否则不输出个性化关联
+
+# 分析指南：
+  评估、理解并利用数据中隐含的有效信息，比如：用户说“请推荐几个大理石的采购项目”，
+    收集到的某条数据是 “中卫市沙漠文旅综合体项目，'项目概况': '建设面积约为116.14亩，主要建设游客中心、停车场及配套公共服务设施等...'”，
+    由于游客中心的建设很可能需要大理石材料，这就是一个有效的相关数据。
 
 # 输出格式：
 - 使用markdown格式
-- 优先利用表格和图表来展示数据
-- 引用“收集到的资料数据/信息”中的url；在相关句子后内联标注为 [n](SHORT_URL)，例如 [1](SHORT_URL)；同一来源可在多处复用同一编号；若没有数据或来源，可不添加引用
-
-# 特别要求
-1. 用户引导：如果收集到的资料数据/信息不足以回答用户问题或进行研究，可在结尾表达“我能收集到的信息不足以回答您的问题/不足以生成一份详实的报告/...，但根据现有数据，我可以为您...”的意思，表述可以灵活调整。你还可以根据已有信息，引导用户进一步交流，比如“希望这些信息能帮助你。如果你有特定的xx偏好，或者对某些类型的xx更感兴趣，我很乐意提供进一步的分析。”等。
-2. 备注说明：可在备注中说明你对数据的评估和理解，但不要在正文中提及，也不要引用无效数据。
-3. 实体命名与区分：可根据需要在括号中附上译名（非必须）。数据含有多个相似实体时，需明确其与问题的关系，与问题无关的可直接排除，难以分辨的，可在备注中说明。
+- 充分利用表格、图表等可视化手段展示数据
 
 # 报告结构
 根据问题的性质，选择合适的报告结构。
@@ -661,7 +664,7 @@ enhanced_report_instructions = """你是一名资深的研究员，你的任务�
       | 更多项目... | ... | ... |
       ```
     - 对于其他数据，自动选择合适的markdown格式输出（列表、表格、引用块等）。
-  1.2. **分析报告**：基于数据，进行分析报告，报告的详细程度取决于数据质量。
+  1.2. **分析报告**：基于数据，进行分析报告，报告内容包括 个性化关联（可选）和数据解读。
 
 - 情况2：对于研究类的问题，建议结构如下（可灵活调整）：
   2.1. **标题和摘要**
@@ -674,13 +677,10 @@ enhanced_report_instructions = """你是一名资深的研究员，你的任务�
 # 收集到的资料数据/信息：
 {summaries}
 
-# 用户背景信息：
-{user_personalization_context}
-
-  **个性化关联**：如果用户项目数据不为空，基于用户的项目经验和专业背景，在报告中体现对用户的个性化汇报。
-  - 例如：可以表达"由于您之前参与过xxx项目，因此您可能对xxx更感兴趣"之类的话
-  - 基于用户的个人特点、专业能力、行业经验，为用户分析收集到的项目与他/她的契合度
-  - 避免推荐与用户背景完全不符的项目，除非有特殊说明
+# 补充要求
+1. 用户引导：如果收集到的资料数据/信息不足以回答用户问题或进行研究，可在结尾表达“我能收集到的信息不足以回答您的问题/不足以生成一份详实的报告/...，但根据现有数据，我可以为您...”的意思，表述可以灵活调整。你还可以根据已有信息，引导用户进一步交流，比如“希望这些信息能帮助你。如果你有特定的xx偏好，或者对某些类型的xx更感兴趣，我很乐意提供进一步的分析。”等。
+2. 备注说明：可在备注中说明你对数据的评估和理解，但不要在正文中提及，也不要引用无效数据。
+3. 实体命名与区分：可根据需要在括号中附上译名（非必须）。数据含有多个相似实体时，需明确其与问题的关系，与问题无关的可直接排除，难以分辨的，可在备注中说明。
 """
 
 
