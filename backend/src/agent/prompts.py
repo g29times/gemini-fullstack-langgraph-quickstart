@@ -1,11 +1,3 @@
-from datetime import datetime
-
-
-# Get current date in a readable format
-def get_current_date():
-    return datetime.now().strftime("%B %d, %Y")
-
-
 # 快速生成初始查询 generate_query | Gemini 2.5 Flash-Lite 0.2
 query_writer_instructions = """Generate diverse, atomic web search queries for an automated research tool.
 

@@ -7,6 +7,9 @@ import logging
 import os
 from typing import List, Optional
 from langchain_google_genai import ChatGoogleGenerativeAI
+from .prompts import recommend_keyword_composer_instructions
+from .util.tools_and_schemas import SearchQueryList
+from .util.utils import get_current_date
 
 logger = logging.getLogger(__name__)
 
@@ -30,8 +33,6 @@ class PersonalizationManager:
             return cache
         
         try:
-            from .prompts import recommend_keyword_composer_instructions, get_current_date
-            from .util.tools_and_schemas import SearchQueryList
             
             # 构建提示词
             original_queries_text = "\n".join([f"- {query}" for query in (original_queries or [])])

@@ -1,5 +1,11 @@
 from typing import Any, Dict, List
 from langchain_core.messages import AnyMessage, AIMessage, HumanMessage
+from datetime import datetime
+
+
+# Get current date in a readable format
+def get_current_date():
+    return datetime.now().strftime("%B %d, %Y")
 
 
 def get_research_topic(messages: List[Any]) -> str:
