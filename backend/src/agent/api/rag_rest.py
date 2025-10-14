@@ -199,11 +199,14 @@ def _normalize_item(item: Dict[str, Any], score: float) -> Dict[str, Any]:
 
 def query_rag_rest(
     query: str,
+    area: Optional[str] = "",
+    type: Optional[str] = "",
+    pids: Optional[List[str]] = [],
+    top_k: int = 8,
     endpoint: Optional[str] = None,
     api_key: Optional[str] = None,
     timeout: int = 8,
     local_json: str = DEFAULT_LOCAL_JSON,
-    top_k: int = 5,
 ) -> List[Dict[str, Any]]:
     """
     Query RAG via REST endpoint. If endpoint not provided or call fails,
@@ -212,11 +215,15 @@ def query_rag_rest(
     Expected REST response (flexible): a list of items with fields like
     { project_name, project_summary, date, url?, score?, user_name, party_a_name }.
     Unknown fields are ignored.
+
+    area: 地区
+    type: 项目类型：采购/工程
+    pids: 项目ID列表(追问时去重用)
     """
     # 1) Try REST if endpoint is configured
     hits: List[Dict[str, Any]] = []
     if endpoint:
-        logger.info("[NEO_LOG] [query_rag_rest] 调用REST接口: %s %s", endpoint, api_key)
+        logger.info("[NEO_LOG] [query_rag_rest] 调用REST接口: %s %s", query, endpoint)
         headers = {
             "Content-Type": "application/json",
             "Accept": "*/*"
@@ -225,7 +232,7 @@ def query_rag_rest(
             headers["Authorization"] = f"Bearer {api_key}"
         
         # New API format: send query as array of strings
-        payload = {"labels": [query] } # Changed from dict to array format
+        payload = { "labels": [query], "area": area, "myClassify": type, "pids": pids, "top_k": top_k } # Changed from dict to array format
         
         resp = _http_post_json(endpoint, payload, headers, timeout)
         
@@ -332,7 +339,7 @@ def query_user_recommend(
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {api_key}",
-        "institution-identification": institution_ids
+        # "institution-identification": institution_ids
     }
     
     payload = {}
@@ -340,6 +347,7 @@ def query_user_recommend(
     try:
         logger.info("[NEO_LOG] [query_user_recommend] 调用用户推荐接口: %s %s", endpoint, api_key)
         resp = _http_post_json(endpoint, payload, headers, timeout)
+        # print(f"[NEO_LOG] [query_user_recommend] 用户推荐接口返回: resp={resp}")
         
         if isinstance(resp, dict) and resp.get("success") and resp.get("data"):
             projects_data = resp["data"]

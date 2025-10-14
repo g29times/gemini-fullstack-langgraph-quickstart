@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TypedDict
+from typing import Any, TypedDict
 
 from langgraph.graph import add_messages
 from typing_extensions import Annotated, NotRequired
@@ -12,29 +12,44 @@ import operator
 
 class OverallState(TypedDict):
     messages: Annotated[list, add_messages]
-    search_query: Annotated[list, operator.add]
-    # Latest batch of queries to dispatch in this round (non-accumulating)
-    current_queries: list
-    web_research_result: Annotated[list, operator.add]
-    sources_gathered: Annotated[list, operator.add]
+    effort: NotRequired[str]
     initial_search_query_count: int
     max_research_loops: int
     research_loop_count: int
     reasoning_model: str
-    # Optional explicit effort level provided by frontend: "low" | "medium" | "high"
-    effort: NotRequired[str]
-    # Planning backlog for ensuring planned queries are covered across rounds
-    planned_backlog: NotRequired[list[str]]
-    # Track dispatched queries across web_research nodes
-    dispatched_queries: Annotated[list, operator.add]
+
     # Fields for intent routing (optional and set early in the flow)
     intent: dict | None
+    # Intent clarification support
+    clarification_count: int  # Number of clarification rounds
+    max_clarification_rounds: int  # Maximum allowed clarification rounds
+    intent_clarified: bool  # Whether intent has been successfully clarified
+    
     official_site_candidates: list[str]
     official_domain: str | None
     # HITL (Human-in-the-Loop) fields
     research_plan: dict | None  # Generated research plan for human review
     plan_approved: bool  # Whether human approved the plan
     human_modifications: str | None  # Human modifications to the plan
+    
+    # Search query management
+    search_query: Annotated[list, operator.add]
+    current_queries: list
+    # Planning backlog for ensuring planned queries are covered across rounds
+    planned_backlog: NotRequired[list[str]]
+    # Track dispatched queries across web_research nodes
+    dispatched_queries: Annotated[list, operator.add]
+    # --- Query identity infrastructure (P0: optional, fallback to string-based state) ---
+    query_id_counter: NotRequired[int]
+    query_registry: NotRequired[dict[int, QueryRecord]]
+    planned_queue_ids: NotRequired[list[int]]
+    planned_cursor: NotRequired[int]  # 新增：记录已派发的 planned 查询数量
+    dispatched_pairs: NotRequired[list[tuple[int, str]]]
+    current_query_ids: NotRequired[list[int]]
+    web_project_cursor: Annotated[int, operator.add]
+    web_research_result: Annotated[list, operator.add]
+    sources_gathered: Annotated[list, operator.add]
+
     # Structured thinking process fields
     thinking_stage: str  # "startup", "middle", "finalization"
     insights_gathered: Annotated[list, operator.add]  # Insights from each stage
@@ -45,10 +60,6 @@ class OverallState(TypedDict):
     is_follow_up: bool  # Whether this is a follow-up question
     previous_report: str | None  # Previous research report for context
     conversation_history: Annotated[list, operator.add]  # Full conversation context
-    # Intent clarification support
-    clarification_count: int  # Number of clarification rounds
-    max_clarification_rounds: int  # Maximum allowed clarification rounds
-    intent_clarified: bool  # Whether intent has been successfully clarified
     # Reflection state fields
     follow_up_queries: list  # Follow-up queries from reflection (replaced each time)
     is_sufficient: bool  # Whether current research is sufficient
@@ -73,6 +84,27 @@ class OverallState(TypedDict):
     user_projects_text: NotRequired[str]  # Formatted user projects context for prompts
 
 
+class QueryGenerationState(TypedDict):
+    intent: dict | None
+    search_query: list[Query]
+    query_registry: NotRequired[dict[int, QueryRecord]]
+    # Non-accumulating queries for the next dispatch cycle
+    current_queries: list
+    current_query_ids: NotRequired[list[int]]
+    # Carry-over planned queries backlog for dispatch scheduling
+    planned_backlog: NotRequired[list[str]]
+    # Already dispatched queries carried over so the dispatcher can filter them out
+    dispatched_queries: NotRequired[list[str]]
+    web_project_cursor: Annotated[int, operator.add]
+    user_info: NotRequired[dict | None]  # User information from authentication
+    user_projects: NotRequired[list]  # User's project list for personalization
+    user_projects_text: NotRequired[str]  # Formatted user projects context for prompts
+    # 新增：查询队列管理
+    planned_queue_ids: NotRequired[list[int]]
+    planned_cursor: NotRequired[int]  # 新增：记录已派发的 planned 查询数量
+    dispatched_pairs: NotRequired[list[tuple[int, str]]]
+
+
 class ReflectionState(TypedDict):
     is_sufficient: bool
     knowledge_gap: str
@@ -93,23 +125,19 @@ class Query(TypedDict):
     rationale: str
 
 
-class QueryGenerationState(TypedDict):
-    intent: dict | None
-    search_query: list[Query]
-    # Non-accumulating queries for the next dispatch cycle
-    current_queries: list
-    # Carry-over planned queries backlog for dispatch scheduling
-    planned_backlog: NotRequired[list[str]]
-    # Already dispatched queries carried over so the dispatcher can filter them out
-    dispatched_queries: NotRequired[list[str]]
-    user_info: NotRequired[dict | None]  # User information from authentication
-    user_projects: NotRequired[list]  # User's project list for personalization
-    user_projects_text: NotRequired[str]  # Formatted user projects context for prompts
+class QueryRecord(TypedDict, total=False):
+    """Registry entry describing a canonical query and its per-channel variants."""
+
+    canonical: str
+    source: str  # e.g. "planned" | "followup" | "adhoc"
+    personalized: dict[str, str]
+    metadata: dict[str, Any]
 
 
 class WebSearchState(TypedDict):
     search_query: str
     id: str
+    web_project_cursor: Annotated[int, operator.add]
 
 
 class ResearchPlanState(TypedDict):

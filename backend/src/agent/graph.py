@@ -1511,8 +1511,11 @@ def route_after_plan_approval(state: OverallState):
 class QueryResult:
     """查询生成结果"""
     queries: list[str]
-    backlog: list[str] = None
-    metadata: dict = None
+    query_ids: list[int] | None = None
+    backlog: list[str] | None = None
+    backlog_ids: list[int] | None = None
+    planned_cursor: int | None = None  # 新增：预计算的 cursor 值
+    metadata: dict | None = None
 
 class QueryManager:
     """统一的查询生成和调度管理器"""
@@ -1522,12 +1525,80 @@ class QueryManager:
         self.config = configurable
         self.query_count = self._get_query_count()
         self.personalization_manager = PersonalizationManager(configurable, state)
+        self._ensure_query_state()
+    
+    # --- Query ID registry helpers
+    def _ensure_query_state(self) -> None:
+        """确保查询 ID 相关的可选字段已初始化（保持对旧状态的兼容）。"""
+        if self.state.get("query_id_counter") is None:
+            self.state["query_id_counter"] = 0
 
+        if self.state.get("query_registry") is None:
+            self.state["query_registry"] = {}
+
+        if self.state.get("planned_queue_ids") is None:
+            self.state["planned_queue_ids"] = []
+
+        if self.state.get("planned_cursor") is None:
+            self.state["planned_cursor"] = 0
+
+        if self.state.get("dispatched_pairs") is None:
+            self.state["dispatched_pairs"] = []
+
+        if self.state.get("current_query_ids") is None:
+            self.state["current_query_ids"] = []
+
+    def _next_query_id(self) -> int:
+        """生成自增的查询 ID。"""
+        self.state["query_id_counter"] += 1
+        return self.state["query_id_counter"]
+
+    def _register_query(
+        self,
+        canonical: str,
+        source: str,
+        personalized: dict[str, str] | None = None,
+        metadata: dict | None = None,
+    ) -> int:
+        """
+        将查询写入注册表，返回其 ID。
+
+        Args:
+            canonical: 未做渠道个性化前的规范查询内容。
+            source: 查询来源（如 "planned" / "followup" / "initial" / "adhoc" 等）。
+            personalized: 每个渠道定制化后的字符串（P0 下可为空字典）。
+            metadata: 放置额外信息（如生成轮次、提示词参数等）。
+        """
+        qid = self._next_query_id()
+        self.state["query_registry"][qid] = {
+            "canonical": canonical,
+            "source": source,
+            "personalized": personalized or {},
+            "metadata": metadata or {},
+        }
+        return qid
+
+    def _update_personalized(self, qid: int, channel: str, value: str) -> None:
+        """
+        更新某个查询在特定渠道的派发内容，便于后续派发保持一致。
+
+        Args:
+            qid: 查询 ID。
+            channel: 渠道名称（例如 "web" / "rag" / "mem"）。
+            value: 在该渠道实际派发的字符串。
+        """
+        record = self.state["query_registry"].get(qid)
+        if not record:
+            return
+        personalized = record.setdefault("personalized", {})
+        personalized[channel] = value
+        
     def _get_query_count(self) -> int:
         """基于effort的查询数量控制"""
         effort = _infer_effort(self.state, self.config)
         return _effort_max_parallel(self.config, effort)
     
+    # 重点方法 查询生成入口
     def generate_queries(self) -> QueryResult:
         """主查询生成入口"""
         follow_ups = self.state.get("follow_up_queries") or []
@@ -1598,14 +1669,16 @@ class QueryManager:
                 # institution_ids=user_institution_ids
             )
             # TODO 1 项目清洗 2 WEB查询是基于原始10个推荐项目，而不是LLM拼组后的，需要改逻辑
-            if not projects or len(projects) == 0:
+            if not projects or len(projects) == 0 or \
+                any("test" in str(project.get("title", "")).lower() 
+                or "测试" in str(project.get("title", "")) for project in projects):
                 projects = [
-                    {'id': '1', 'title': '北京首都机场希尔顿酒店室内设计项目', 'customer': '客户: 希尔顿集团'},
-                    {'id': '2', 'title': '上海浦东万豪酒店公区装修工程', 'customer': '客户: 万豪国际'},
-                    {'id': '3', 'title': '深圳前海金融中心办公楼设计', 'customer': '客户: 招商局集团'},
-                    {'id': '4', 'title': '广州白云机场T3航站楼商业空间', 'customer': '客户: 白云机场集团'},
+                    {'id': '1', 'title': '北京首都机场希尔顿酒店室内设计项目', 'customer': '希尔顿集团'},
+                    {'id': '2', 'title': '上海浦东万豪酒店公区装修工程', 'customer': '万豪国际'},
+                    {'id': '3', 'title': '深圳前海金融中心办公楼设计', 'customer': '招商局集团'},
+                    {'id': '4', 'title': '广州白云机场T3航站楼商业空间', 'customer': '白云机场集团'},
                 ]
-                print("[NEO_LOG] [QueryManager] 用户推荐接口返回结果: ", projects)
+                logger.warning("[NEO_LOG] [QueryManager] 兜底返回 - 用户项目: %s", projects)
             
             if not projects:
                 logger.info("[NEO_LOG] [QueryManager] 未获取到用户项目，使用通用查询")
@@ -1637,7 +1710,7 @@ class QueryManager:
             self.state["user_projects"] = projects
             self.state["user_projects_text"] = context_text
             
-            logger.info("[NEO_LOG] [QueryManager] 个性化上下文构建完成: %d项目, %d字符", len(projects), len(context_text))
+            logger.info("[NEO_LOG] [QueryManager] 获得%d个用户项目: %s", len(projects), (context_text or ""))
 
             return projects, context_text
             
@@ -1664,126 +1737,8 @@ class QueryManager:
         
         return text
     # 个性化部分结束
-
-    def _is_middle_stage_followup(self, follow_ups: list) -> bool:
-        """判断是否为middle阶段的follow-up处理"""
-        research_loop_count = self.state.get("research_loop_count", 0)
-        return research_loop_count > 0 and len(follow_ups) <= 2
-    
-    # generate_queries 3 生成follow-up查询
-    def _handle_followup_queries(self, follow_ups: list) -> QueryResult:
-        """处理follow-up查询拆解"""
-        llm = ChatGoogleGenerativeAI(
-            model=self.config.query_generator_model,
-            temperature=0.2,
-            max_retries=2,
-            api_key=os.getenv("GEMINI_API_KEY"),
-        )
-        structured_llm = llm.with_structured_output(SearchQueryList)
-        
-        # 查询增强策略：在middle阶段保持查询数量连续性
-        is_middle_stage = self._is_middle_stage_followup(follow_ups)
-        
-        if is_middle_stage:
-            # Middle阶段：使用完整的初始查询数量
-            max_queries = self.query_count
-            logger.info("[NEO_LOG] [QueryManager] Middle stage follow-up enhancement: target_queries=%d", max_queries)
-        else:
-            # 其他情况：使用配置的范围
-            max_queries = max(self.config.min_followup_queries, min(self.query_count, self.config.max_followup_queries))
-        
-        current_date = get_current_date()
-        
-        # 处理追问场景
-        if self.state.get("is_follow_up", False):
-            messages = self.state.get("messages", [])
-            if messages:
-                latest_message = messages[-1]
-                research_topic = latest_message.content if hasattr(latest_message, 'content') else str(latest_message)
-            else:
-                research_topic = "研究主题"
-        else:
-            research_topic = get_research_topic(self.state.get("messages", []))
-        
-        followups_text = "\n".join(f"• {q}" for q in follow_ups)
-        
-        # 获取middle_thinking内容
-        thinking_process = self.state.get("thinking_process", {})
-        startup_thinking = thinking_process.get("startup_thinking", "") if thinking_process else "无深度分析内容"
-        middle_thinking = thinking_process.get("middle_thinking", "") if thinking_process else "无深度分析内容"
-        
-        # 获取推荐用户项目并进行个性化增强
-        projects, user_projects_context = self._recommend_user_projects()
-        
-        formatted_prompt = followup_decomposer_instructions.format(
-            research_topic=research_topic,
-            knowledge_gap=self.state.get("knowledge_gap", ""),
-            follow_ups=followups_text,
-            current_date=current_date,
-            number_queries=max_queries,
-            startup_thinking=startup_thinking,
-            middle_thinking=middle_thinking,
-            user_projects_context=user_projects_context,
-        )
-        logger.debug("[NEO_LOG] [QueryManager] Generate follow-up prompt: %s", formatted_prompt)
-        queries = self._safe_invoke_llm(structured_llm, formatted_prompt, follow_ups)
-        
-        # 进一步进行个性化增强（在LLM生成基础上再次增强）
-        if user_projects_context:
-            research_topic = get_research_topic(self.state.get("messages", []))
-            enhanced_queries = self.personalization_manager.enhance_queries_with_personalization(
-                queries, research_topic, user_projects_context
-            )
-            queries = enhanced_queries
-        
-        # 记录个性化指标
-        personalized_count = self._calculate_personalization_queries(len(queries))
-        if user_projects_context:
-            logger.info("[NEO_LOG] [QueryManager] Follow-up查询个性化增强: %d/%d queries, context_len=%d", 
-                       personalized_count, len(queries), len(user_projects_context))
-        
-        logger.info(
-            "[NEO_LOG] [QueryManager] Follow-up questions: %d follow-ups -> %d queries (middle_stage=%s, target=%d, middle_thinking_len=%d)",
-            len(follow_ups), len(queries), is_middle_stage, max_queries, len(middle_thinking),
-        )
-        
-        # 保留planned_backlog以便后续轮次继续使用
-        existing_backlog = self.state.get("planned_backlog", [])
-        
-        return QueryResult(
-            queries=queries,
-            backlog=existing_backlog,  # 传递现有的计划backlog
-            metadata={"source": "followup", "projects": projects}
-        )
-    
-    # generate_queries 2 沿用计划查询
-    def _handle_planned_queries(self, max_parallel_queries: int, planned_queries: list) -> QueryResult:
-        """搜索关键词 - 集成用户个性化关键词"""
-        logger.info("[NEO_LOG] [QueryManager] Using %d planned queries from plan: %s for Question %s", len(planned_queries), planned_queries, self.state.get("messages", []))
-        
-        # 完整计划，设置backlog供后续分批查询
-        sanitized_full = _sanitize_queries(planned_queries, None)
-        # 首轮查询限额 在此处截断为4个
-        sanitized_queries = _sanitize_queries(planned_queries, max_parallel_queries)
-        
-        # 获取推荐用户项目并进行个性化增强
-        projects, user_projects_context = self._recommend_user_projects()
-        if user_projects_context:
-            research_topic = get_research_topic(self.state.get("messages", []))
-            enhanced_queries = self.personalization_manager.enhance_queries_with_personalization(
-                sanitized_queries, research_topic, user_projects_context
-            )
-            sanitized_queries = enhanced_queries
-        else:
-            logger.info("[NEO_LOG] [QueryManager] 推荐用户项目为空，不进行个性化增强")
-        
-        return QueryResult(
-            queries=sanitized_queries,
-            backlog=sanitized_full,  # 保留完整计划作为backlog
-            metadata={"source": "planned", "projects": projects}
-        )
-    
-    # generate_queries 1 生成初始查询（暂时未触发，在第一轮问题生成时，直接继承了research_plan中的planned_queries以加速）
+ 
+    # generate_queries 1 生成初始查询（目前策略未触发，在第一轮问题生成时，直接继承了research_plan中的planned_queries以加速）
     def _handle_initial_queries(self) -> QueryResult:
         """处理初始查询生成"""
         llm = ChatGoogleGenerativeAI(
@@ -1817,80 +1772,384 @@ class QueryManager:
         
         logger.info("[QueryManager] Generated %d initial queries", len(queries))
         
-        return QueryResult(queries=queries)
+        query_ids = []
+        for query in queries:
+            qid = self._register_query(query, "initial")
+            # TODO mem
+            self._update_personalized(qid, "rag", query)
+            query_ids.append(qid)
+        
+        return QueryResult(queries=queries, query_ids=query_ids)
+
+    # generate_queries 2 沿用计划查询（默认10个）
+    def _handle_planned_queries(self, max_parallel_queries: int, planned_queries: list) -> QueryResult:
+        """搜索关键词 - 集成用户个性化关键词"""
+        logger.info("[NEO_LOG] [QueryManager] 首批 %d 个，来自总共 %d 个计划查询， Question %s", 
+            max_parallel_queries, len(planned_queries), self.state.get("messages", []))
+        
+        # 完整计划，设置backlog供后续分批查询
+        sanitized_full = _sanitize_queries(planned_queries, None)
+        # 首轮查询限额 在此处截断为4个
+        sanitized_queries = _sanitize_queries(planned_queries, max_parallel_queries)
+        
+        # 获取推荐用户项目并使用LLM进行个性化增强
+        projects, user_projects_context = self._recommend_user_projects()
+        if user_projects_context:
+            research_topic = get_research_topic(self.state.get("messages", []))
+            # 使用LLM进行个性化增强 enhance_queries_with_personalization
+            enhanced_queries = self.personalization_manager.enhance_queries_with_personalization(
+                sanitized_queries, research_topic, user_projects_context
+            )
+            sanitized_queries = enhanced_queries
+        else:
+            logger.info("[NEO_LOG] [QueryManager] 推荐用户项目为空，不进行个性化增强")
+        
+        backlog_ids = []
+        if not self.state.get("planned_queue_ids"):
+            for canonical in sanitized_full:
+                qid = self._register_query(canonical, "planned")
+                backlog_ids.append(qid)
+            self.state["planned_queue_ids"] = backlog_ids[:]
+        else:
+            backlog_ids = list(self.state["planned_queue_ids"])
+        
+        query_ids = []
+        for idx, query in enumerate(sanitized_queries):
+            if idx < len(backlog_ids):
+                qid = backlog_ids[idx]
+            else:
+                qid = self._register_query(query, "planned")
+                backlog_ids.append(qid)
+                self.state["planned_queue_ids"].append(qid)
+            query_ids.append(qid)
+            # TODO mem
+            self._update_personalized(qid, "rag", query)
+
+        # 初始化 cursor：记录本轮派发的数量（只在首次初始化时设置）
+        cursor_value = self.state.get("planned_cursor", 0)
+        if cursor_value == 0:
+            cursor_value = len(query_ids)
+            # logger.info("[NEO_LOG] [QueryManager] 初始化 planned_queue_ids: %s (总数=%d), 首次派发=%d, cursor=%d", 
+            #     backlog_ids, len(backlog_ids), len(query_ids), cursor_value)
+
+        return QueryResult(
+            queries=sanitized_queries,
+            backlog=sanitized_full,  # 保留完整计划作为backlog
+            query_ids=query_ids,
+            backlog_ids=backlog_ids,
+            planned_cursor=cursor_value,
+            metadata={"source": "planned", "projects": projects}
+        )
+   
+    # generate_queries 3 生成follow-up查询
+    def _handle_followup_queries(self, follow_ups: list) -> QueryResult:
+        """处理follow-up查询拆解"""
+        llm = ChatGoogleGenerativeAI(
+            model=self.config.query_generator_model,
+            temperature=0.2,
+            max_retries=2,
+            api_key=os.getenv("GEMINI_API_KEY"),
+        )
+        structured_llm = llm.with_structured_output(SearchQueryList)
+        
+        # 查询增强策略：在middle阶段保持查询数量连续性
+        is_middle_stage = self._is_middle_stage_followup(follow_ups)
+        
+        if is_middle_stage:
+            # Middle阶段：使用完整的初始查询数量
+            max_queries = self.query_count
+            # logger.info("[NEO_LOG] [QueryManager] Middle stage follow-up enhancement: target_queries=%d", max_queries)
+        else:
+            # 其他情况（比如追问）：使用配置的范围
+            max_queries = max(self.config.min_followup_queries, min(self.query_count, self.config.max_followup_queries))
+        
+        current_date = get_current_date()
+        
+        # 处理追问场景：对话追问需要沿用上一轮主题，而非仅使用最新一句
+        messages = self.state.get("messages", []) or []
+        conversation_history = self.state.get("conversation_history") or messages
+
+        def _first_user_message_content(msgs: list) -> str:
+            for msg in msgs or []:
+                if isinstance(msg, dict) and msg.get("role") == "user":
+                    return str(msg.get("content", "")).strip()
+                if hasattr(msg, "content"):
+                    content = str(getattr(msg, "content", "") or "").strip()
+                    if content:
+                        try:
+                            from langchain_core.messages import HumanMessage
+                            if isinstance(msg, HumanMessage):
+                                return content
+                        except Exception:
+                            pass
+                        return content
+                if isinstance(msg, str) and msg.strip():
+                    return msg.strip()
+            return ""
+
+        if self.state.get("is_follow_up", False):
+            research_topic = (
+                get_research_topic(conversation_history)
+                or get_research_topic(messages)
+                or _first_user_message_content(conversation_history)
+                or "研究主题"
+            )
+        else:
+            research_topic = get_research_topic(messages) or "研究主题"
+        
+        followups_text = "\n".join(f"• {q}" for q in follow_ups)
+        
+        # 获取middle_thinking内容
+        thinking_process = self.state.get("thinking_process", {})
+        startup_thinking = thinking_process.get("startup_thinking", "") if thinking_process else "无深度分析内容"
+        middle_thinking = thinking_process.get("middle_thinking", "") if thinking_process else "无深度分析内容"
+        
+        # 获取推荐用户项目并进行个性化增强
+        projects, user_projects_context = self._recommend_user_projects()
+        
+        formatted_prompt = followup_decomposer_instructions.format(
+            research_topic=research_topic,
+            knowledge_gap=self.state.get("knowledge_gap", ""),
+            follow_ups=followups_text,
+            current_date=current_date,
+            number_queries=max_queries,
+            # startup_thinking=startup_thinking,
+            # middle_thinking=middle_thinking,
+            # user_projects_context=user_projects_context,
+        )
+        # logger.info("[NEO_LOG] [QueryManager] Generate follow-up prompt: %s", formatted_prompt)
+        queries = self._safe_invoke_llm(structured_llm, formatted_prompt, follow_ups)
+        # logger.info("[NEO_LOG] [QueryManager] LLM Follow-up questions: %s", queries)
+
+        # 进一步进行个性化增强（在LLM生成基础上再次增强）
+        # if user_projects_context:
+        #     # 使用LLM进行个性化增强 enhance_queries_with_personalization
+        #     queries = self.personalization_manager.enhance_queries_with_personalization(
+        #         queries, research_topic, user_projects_context
+        #     )
+        logger.info("[NEO_LOG] [QueryManager] %d enhance follow-up questions -> %s", len(queries), queries)
+
+        query_ids: list[int] = []
+        is_dialog_followup = bool(self.state.get("is_follow_up"))
+        for query in queries:
+            qid = self._register_query(query, "followup")
+            query_ids.append(qid)
+
+            # RAG 通道仍然使用增强后 canonical 查询
+            self._update_personalized(qid, "rag", query)
+
+            # Web 通道根据场景生成差异化文案
+            web_query = self._build_followup_web_query(
+                canonical=query,
+                idx=self.state.get("web_project_cursor", 0),
+                is_dialog_followup=is_dialog_followup,
+            )
+            if web_query:
+                self._update_personalized(qid, "web", web_query)
+
+            # 记忆通道可以沿用 canonical，必要时可扩展定制逻辑
+            self._update_personalized(qid, "mem", query)
+
+        # 保留planned_backlog以便后续轮次继续使用
+        existing_backlog = self.state.get("planned_backlog", [])
+        
+        # 需要预估补齐数量来更新 cursor
+        current_cursor = self.state.get("planned_cursor", 0)
+        research_loop_count = self.state.get("research_loop_count", 0)
+        
+        if research_loop_count == 1:
+            new_cursor = current_cursor
+            logger.info("[NEO_LOG] [QueryManager] 第一次 Followup，保持 cursor=%d，由 _preprocess_queries 自然补齐", current_cursor)
+        else:
+            planned_ids = self.state.get("planned_queue_ids") or []
+            dispatched_pairs = set(tuple(x) for x in self.state.get("dispatched_pairs") or [])
+            
+            # 过滤已派发的 followup IDs
+            pending_count = len([qid for qid in query_ids if (qid, "rag") not in dispatched_pairs])
+            
+            # 计算可能的补齐数量
+            max_parallel = self.config.max_parallel_queries
+            remaining_slots = max(0, max_parallel - pending_count)
+            available_planned = planned_ids[current_cursor:]
+            补齐数量 = min(remaining_slots, len(available_planned))
+            
+            new_cursor = current_cursor + 补齐数量 if 补齐数量 > 0 else current_cursor
+            logger.info("[NEO_LOG] [QueryManager] Followup 预计算 cursor: %d -> %d (pending=%d, 补齐=%d)",
+                        current_cursor, new_cursor, pending_count, 补齐数量)
+
+        return QueryResult(
+            queries=queries,
+            backlog=existing_backlog,  # 传递现有的计划backlog
+            query_ids=query_ids,
+            backlog_ids=list(self.state.get("planned_queue_ids", [])),
+            planned_cursor=new_cursor,
+            metadata={"source": "followup", "projects": projects, "dialog_followup": is_dialog_followup}
+        )
     
+    def _is_middle_stage_followup(self, follow_ups: list) -> bool:
+        """判断是否为middle阶段的follow-up处理"""
+        research_loop_count = self.state.get("research_loop_count", 0)
+        return research_loop_count > 0 and len(follow_ups) <= 2
+    
+    def _build_followup_web_query(self, canonical: str, idx: int, is_dialog_followup: bool) -> str:
+        """为 Web 通道生成差异化 follow-up 查询"""
+        if is_dialog_followup:
+            return self._build_dialog_followup_web_query(canonical)
+        return self._build_workflow_followup_web_query(canonical, idx)
+
+    def _build_workflow_followup_web_query(self, canonical: str, idx: int) -> str:
+        """流程内 follow-up：优先使用用户项目名称，其次模板兜底"""
+        project_names = self._get_user_project_names()
+        if project_names:
+            return project_names[idx % len(project_names)]
+        # TODO 确认 "最新动态 2025"
+        return f"{canonical} 最新动态 2025"
+
+    def _build_dialog_followup_web_query(self, canonical: str) -> str:
+        """对话追问：结合末轮对话上下文构造桥接查询"""
+        logger.info("[NEO_LOG] [QueryManager] 构造 对话追问 查询，%s", canonical)
+        messages = self.state.get("conversation_history") or self.state.get("messages", [])
+        latest_topic = ""
+        if messages:
+            last_msg = messages[-1]
+            if hasattr(last_msg, "content"):
+                latest_topic = str(last_msg.content).strip()
+            else:
+                latest_topic = str(last_msg).strip()
+
+        research_topic = get_research_topic(self.state.get("messages", [])) or latest_topic
+        # TODO "招标 最新 资讯"这几个关键词确认
+        parts = [research_topic, canonical, "招标 最新 资讯"]
+        normalized = " ".join(p for p in parts if p)
+        return normalized.strip()
+
     # 重点方法 查询调度
-    def schedule_queries(self, queries: list) -> list:
+    def schedule_queries(self, queries: list, query_ids: list[int] | None = None) -> list:
         """主调度入口"""
-        if not queries:
+        if not queries and not query_ids:
             logger.info("[NEO_LOG] [QueryManager] No queries available for scheduling; finalize")
             return "generate_enhanced_report"
+        # if not queries:
+        #     logger.info("[NEO_LOG] [QueryManager] No queries available for scheduling; finalize")
+        #     return "generate_enhanced_report"
+        query_ids = list(query_ids or [])
         
         # 1. 查询预处理（合并、去重、过滤）
-        processed = self._preprocess_queries(queries)
+        processed_queries, processed_ids = self._preprocess_queries(queries, query_ids)
         
-        # 2. 问题调度策略
-        scheduled = self._apply_scheduling_strategy(processed)
+        # 2. 查询调度策略
+        # scheduled = self._apply_scheduling_strategy(processed)
+        scheduled_queries, scheduled_ids = self._apply_scheduling_strategy_with_ids(processed_queries, processed_ids)
         
         # 3. 并行度控制和派发
-        return self._apply_parallelism_control(scheduled)
+        # return self._apply_parallelism_control(scheduled)
+        return self._apply_parallelism_control((scheduled_queries, scheduled_ids))
+        
+    # 查询调度 阶段一：合并状态、去重、域名聚合
+    def _preprocess_queries(self, queries: list, query_ids: list[int] | None = None) -> tuple[list, list[int]]:
+        """查询预处理：合并状态、去重、补齐、域名聚合（兼容旧逻辑）"""
+        # logger.info("[NEO_LOG] [QueryManager] 调度阶段一开始：%s", queries)
+        
+        pending_ids = list(query_ids or [])
+        
+        planned_ids = self.state.get("planned_queue_ids") or []
+        planned_cursor = self.state.get("planned_cursor", 0)  # 新增：读取 cursor
+        # 添加调试日志
+        # logger.info("[NEO_LOG] [QueryManager] DEBUG: state keys = %s", list(self.state.keys()))
     
-    def _preprocess_queries(self, queries: list) -> list:
-        """查询预处理：合并状态、去重、域名聚合"""
-        # 合并计划backlog（剔除已派发）
-        try:
-            backlog = list(self.state.get("planned_backlog") or [])
-            dispatched_list = list(self.state.get("dispatched_queries") or [])
-            
-            # 规范化比较，避免因大小写/多空格/标点造成重复
-            norm_dispatched = set(normalize_query(q) for q in dispatched_list)
-            
-            # 步骤1：从当轮待选中剔除已派发
-            if queries:
-                queries = [q for q in queries if normalize_query(q) not in norm_dispatched]
-            
-            # 步骤2：追加backlog的剩余项（未派发），但要控制总数量
-            if backlog:
-                remaining = [q for q in backlog if normalize_query(q) not in norm_dispatched]
-                if remaining:
-                    # 步骤3：合并但控制总数量 计算还能添加多少查询（避免超出并发限制）
-                    current_count = len(queries)
-                    max_additional = max(0, self.config.max_parallel_queries - current_count)
-                    if max_additional > 0:
-                        queries = list(queries) + remaining[:max_additional]
-                        logger.info("[NEO_LOG] [QueryManager] Added %d remaining queries from backlog (limit: %d)", 
-                                   min(len(remaining), max_additional), self.config.max_parallel_queries)
-        except Exception:
-            pass
+        dispatched_pairs = set(tuple(x) for x in self.state.get("dispatched_pairs") or [])
         
-        # 轻量去重：规范化字符串去重 + 域名聚合
-        seen_norm = set()
-        seen_domains = set()
-        filtered = []
+        # 过滤掉已派发的 pending_ids
+        if pending_ids:
+            pending_ids = [qid for qid in pending_ids if (qid, "rag") not in dispatched_pairs]
+            # logger.info("[NEO_LOG] [QueryManager] 当前轮次传入 %d 个查询ID，过滤后剩余 %d 个", 
+            #         len(query_ids or []), len(pending_ids))
         
-        for q in queries:
-            n = normalize_query(q)
-            if n in seen_norm:
+        remaining_planned = planned_ids[planned_cursor:]  # 从 cursor 位置开始取
+        
+        logger.info("[NEO_LOG] [QueryManager] 队列状态: pending=%d, planned_pool=%d (cursor=%d, 剩余=%d)", 
+                len(pending_ids), len(planned_ids), planned_cursor, len(remaining_planned))
+
+        max_parallel = self.config.max_parallel_queries
+
+        # 从 planned 补齐到 max_parallel
+        fill_count = max_parallel - len(pending_ids)
+        if fill_count > 0 and remaining_planned:
+            take = remaining_planned[:fill_count]
+            pending_ids.extend(take)
+            # logger.info("[NEO_LOG] [QueryManager] 从 planned 补齐: %d 个查询 (IDs: %s, 总额度=%d)", 
+            #         len(take), take, max_parallel)
+        
+        logger.info("[NEO_LOG] [QueryManager] 最终 pending_ids: %s (总数=%d)", pending_ids, len(pending_ids))
+
+        # 透传回 state（planned 保持不变）
+        self.state["planned_queue_ids"] = planned_ids
+
+        if not pending_ids:
+            # 完全落回旧逻辑结果
+            # return queries, []
+            # # 旧逻辑：仅字符串可用时，保持原列表，并补齐 None 占位，避免后续越界
+            return queries, [None] * len(queries)
+        
+        # 将 ID 映射回字符串（优先从 registry 获取，确保不产生空串）
+        registry = self.state.get("query_registry") or {}
+        mapped_queries = []
+        mapped_ids = []
+        
+        for qid in pending_ids:
+            record = registry.get(qid)
+            if not record:
+                logger.warning("[NEO_LOG] [QueryManager] Query ID %d not found in registry, skipping", qid)
                 continue
             
-            # 域名聚合（如果启用）
-            dom = self._extract_site_domain(q)
+            # 优先使用 personalized.rag，其次使用 canonical
+            query = record.get("personalized", {}).get("rag") or record.get("canonical", "")
+            
+            if not query or not query.strip():
+                logger.warning("[NEO_LOG] [QueryManager] Query ID %d has empty query, skipping", qid)
+                continue
+            
+            mapped_queries.append(query)
+            mapped_ids.append(qid)
+
+        # 更新 pending_ids 为过滤后的 IDs
+        pending_ids = mapped_ids
+        
+        if not pending_ids:
+            logger.warning("[NEO_LOG] [QueryManager] All queries filtered out due to missing/empty content")
+            return [], []
+        
+        # 去重与域名聚合仍按照字符串进行（防止 channel/value 不兼容）
+        seen_norm = set()
+        seen_domains = set()
+        filtered_queries = []
+        filtered_ids = []
+        
+        for qid, query in zip(pending_ids, mapped_queries):
+            norm = normalize_query(query)
+            if norm in seen_norm:
+                continue
+            dom = self._extract_site_domain(query)
             if dom and dom in seen_domains:
                 continue
             if dom:
                 seen_domains.add(dom)
-            
-            seen_norm.add(n)
-            filtered.append(q)
+            seen_norm.add(norm)
+            filtered_queries.append(query)
+            filtered_ids.append(qid)
         
-        # 安全上限：限制一次累积可派发的候选数
-        before = len(filtered)
-        filtered = filtered[:self.config.max_parallel_dispatches]
-        if before > len(filtered):
-            logger.info("[NEO_LOG] [QueryManager] Truncated queries from %d to %d to respect tool limits", before, len(filtered))
+        before = len(filtered_queries)
+        # max_parallel_dispatches 限制并行查询数量
+        filtered_queries = filtered_queries[:self.config.max_parallel_dispatches]
+        filtered_ids = filtered_ids[:len(filtered_queries)]
+        if before > len(filtered_queries):
+            logger.info("[NEO_LOG] [QueryManager] Truncated queries from %d to %d to respect tool limits",
+                        before, len(filtered_queries))
         
-        return filtered
-    
+        # logger.info("[NEO_LOG] [QueryManager] 调度阶段一完成: %s", filtered_queries)
+        return filtered_queries, filtered_ids
+
+    # 查询调度 阶段一：内部方法
     def _extract_site_domain(self, q: str) -> str | None:
         """提取查询中的site:domain部分"""
         try:
@@ -1910,7 +2169,30 @@ class QueryManager:
         except Exception:
             return None
 
-    # round_robin等调度策略
+    # 查询调度 阶段二：调度策略
+    def _apply_scheduling_strategy_with_ids(self, queries: list[str], query_ids: list[int]) -> tuple[list[str], list[int]]:
+        if not queries:
+            return queries, query_ids
+        paired = list(zip(query_ids, queries))
+        reordered = self._apply_scheduling_strategy_pairs(paired)
+        new_ids, new_queries = zip(*reordered) if reordered else ([], [])
+        return list(new_queries), list(new_ids)
+
+    # 查询调度 阶段二：内部方法
+    def _apply_scheduling_strategy_pairs(self, pairs: list[tuple[int, str]]) -> list[tuple[int, str]]:
+        queries_only = [q for _, q in pairs]
+        reordered_queries = self._apply_scheduling_strategy(queries_only)
+        lookup = {q: [] for q in queries_only}
+        for idx, (qid, qr) in enumerate(pairs):
+            lookup[qr].append((idx, qid))
+        result = []
+        for qr in reordered_queries:
+            if lookup[qr]:
+                idx, qid = lookup[qr].pop(0)
+                result.append((qid, qr))
+        return result
+    
+    # 查询调度 阶段二：内部方法 - round_robin等调度策略
     def _apply_scheduling_strategy(self, queries: list) -> list:
         """应用调度策略：目标选择和查询排序"""
         try:
@@ -1931,8 +2213,7 @@ class QueryManager:
                     cands = sorted(research_objectives, key=lambda o: prev_obj_prog.get(o, 0.0))
                     target_objective = cands[0] if cands else ""
             
-            logger.info("[NEO_LOG] [QueryManager] Strategy=%s target_objective='%s' available=%d", 
-                       strategy, target_objective or "", len(queries))
+            logger.info("[NEO_LOG] [QueryManager] Strategy=%s 查询数=%d", strategy, len(queries))
             
             # 按目标相关性排序
             if target_objective and queries:
@@ -1965,44 +2246,68 @@ class QueryManager:
             pass
         
         return queries
-    
-    def _apply_parallelism_control(self, queries: list) -> list:
+
+    # 查询调度 阶段三：并行度控制和派发
+    def _apply_parallelism_control(self, queries_with_ids: tuple[list[str], list[int]]):
         """简化的并行度控制逻辑"""
+        queries, query_ids = queries_with_ids
+        queries = list(queries or [])
+        query_ids = list(query_ids or [])
+
         if not queries:
             return "generate_enhanced_report"
-        
-        progress = 0.0
+
+        # 将 ID 数组补齐至与查询等长（缺失时使用 None 兼容旧逻辑）
+        if len(query_ids) != len(queries):
+            padded_ids: list[int | None] = []
+            for idx in range(len(queries)):
+                padded_ids.append(query_ids[idx] if idx < len(query_ids) else None)
+            query_ids = padded_ids
+        else:
+            # mypy 友好：确保类型始终为 list[int | None]
+            query_ids = list(query_ids)
+
         try:
             progress = float(self.state.get("overall_completion") or 0.0)
         except Exception:
             progress = 0.0
-        
-        # 简化的effort控制
+
         effort = _infer_effort(self.state, self.config)
         threshold = _effort_completion_threshold(self.config, effort)
-        
-        # 简单判断：达到阈值就结束
+
         if progress >= threshold:
-            logger.info("[NEO_LOG] [QueryManager] Completion threshold reached: effort=%s progress=%.2f >= %.2f -> finalize", 
-                       effort, progress, threshold)
+            logger.info(
+                "[NEO_LOG] [QueryManager] Completion threshold reached: effort=%s progress=%.2f >= %.2f -> finalize",
+                effort,
+                progress,
+                threshold,
+            )
             return "generate_enhanced_report"
-        
-        # 简化的并发控制：effort决定并发数
+
         if self.config.enable_parallel_research:
-            batch = queries  # 执行所有生成的查询
-            logger.info("[NEO_LOG] [QueryManager] Parallel dispatch: effort=%s progress=%.2f k=%d", 
-                       effort, progress, len(batch))
+            batch_queries = queries
+            batch_ids = query_ids
+            logger.info(
+                "[NEO_LOG] [QueryManager] Parallel dispatch: effort=%s progress=%.2f k=%d",
+                effort,
+                progress,
+                len(batch_queries),
+            )
         else:
-            batch = [queries[0]]  # 顺序模式只执行第一个
-            logger.info("[NEO_LOG] [QueryManager] Sequential dispatch: effort=%s progress=%.2f k=1", 
-                       effort, progress)
-        
-        return self._create_sends(batch)
-    
+            batch_queries = [queries[0]]
+            batch_ids = [query_ids[0]] if query_ids else [None]
+            logger.info(
+                "[NEO_LOG] [QueryManager] Sequential dispatch: effort=%s progress=%.2f k=1",
+                effort,
+                progress,
+            )
+
+        return self._create_sends(batch_queries, batch_ids)
+
     def _get_user_project_names(self) -> list:
         """从用户项目中提取纯项目名称（用于Web搜索）"""
         user_projects = self.state.get("user_projects", [])
-        logger.info("[NEO_LOG] [QueryManager] user_projects: %s", user_projects)
+        # logger.info("[NEO_LOG] [QueryManager] user_projects: %s", user_projects)
         if not user_projects:
             return []
         
@@ -2018,45 +2323,165 @@ class QueryManager:
         
         return project_names
 
+    def _materialize_channel_query(self, qid: int | None, fallback_query: str, channel: str) -> str:
+        registry = self.state.get("query_registry") or {}
+        if qid is None or qid not in registry:
+            return fallback_query
+        record = registry[qid]
+        channel_key = channel.split("_")[0] if channel.endswith("_search") else channel
+        personalized = record.get("personalized", {})
+        if channel_key in personalized and personalized[channel_key]:
+            return personalized[channel_key]
+        return record.get("canonical", fallback_query)
+    
     # 重点方法 分发搜索路径
-    def _create_sends(self, queries: list) -> list:
-        """创建Send对象列表，基于mem_only智能选择检索通道，并优化web和rag的搜索词分工"""
-        sends = []
+    # def _create_sends(self, queries: list) -> list:
+    #     """创建Send对象列表，基于mem_only智能选择检索通道，并优化web和rag的搜索词分工"""
+    #     sends = []
 
-        # 获取检索通道配置
-        intent = self.state.get("intent", {})
-        mem_only = intent.get("mem_only", False)
+    #     # 获取检索通道配置
+    #     intent = self.state.get("intent", {})
+    #     mem_only = intent.get("mem_only", False)
         
-        # 基于mem_only决定检索通道
+    #     # 基于mem_only决定检索通道
+    #     if mem_only:
+    #         research_channels = ["mem"]
+    #     else:
+    #         research_channels = ["mem", "web", "rag"]  # hybrid approach
+            
+    #     logger.info("[NEO_LOG] [QueryManager] mem_only=%s, research_channels=%s", mem_only, research_channels)
+        
+    #     # 获取原始计划查询（用于RAG搜索）
+    #     user_project_names = self._get_user_project_names()
+        
+    #     for i, q in enumerate(queries):
+    #         logger.info("[NEO_LOG] [QueryManager] 子问题 id=%d: '%s'", i, q)
+            
+    #         # 根据channels生成对应的Send
+    #         if "web" in research_channels: # Web使用用户项目名称（具体项目名，更容易在公网搜到）
+    #             web_query_index = i % len(user_project_names) if user_project_names else 0
+    #             web_query = user_project_names[web_query_index] if user_project_names else q
+    #             sends.append(Send("web_research", {"search_query": web_query, "id": int(i)}))
+    #         if "rag" in research_channels: # RAG使用增强查询（包含关键词的完整查询，在内部数据库中查找相关项目）
+    #             sends.append(Send("rag_search", {"search_query": q, "id": int(i)}))
+    #         if "mem" in research_channels: # Mem使用增强查询
+    #             sends.append(Send("mem_search", {"search_query": q, "id": int(i)}))
+        
+    #     # 统计节点分布
+    #     node_counts = {}
+    #     for send in sends:
+    #         node_counts[send.node] = node_counts.get(send.node, 0) + 1
+        
+    #     logger.info("[NEO_LOG] [QueryManager] Send distribution: %s (total: %d)", node_counts, len(sends))
+    #     return sends
+    
+    # 分发设计：RAG查询词组向量匹配，获取精准项目，WEB搜索查询用户过往项目和用户问题中所需的web信息，MEM辅助获取用户行为习惯
+    def _create_sends(self, queries: list[str], query_ids: list[int | None]) -> list[Send]:
+        """按渠道创建派发指令，兼容 mem_only 策略与渠道专用文案。
+        
+        关键改动：
+        1. RAG/MEM 通道：为每个查询词派发到这两个通道
+        2. WEB 通道：独立判断，每轮最多派发 max_parallel_dispatches 个用户项目
+        """
+        if not queries:
+            return []
+
+        # 读取意图，判断是否仅限记忆通道
+        intent = self.state.get("intent", {}) or {}
+        mem_only = bool(intent.get("mem_only"))
+
+        # 已派发记录：ID 级别与字符串级别双保险
+        dispatched_pairs = {
+            tuple(item) for item in (self.state.get("dispatched_pairs") or []) if item and item[0] is not None
+        }
+        dispatched_strings = {normalize_query(s) for s in (self.state.get("dispatched_queries") or [])}
+
+        # 组装任务通道（不包含 web_research）
         if mem_only:
-            research_channels = ["mem"]
+            task_channels = ["mem_search"]
         else:
-            research_channels = ["mem", "web", "rag"]  # hybrid approach
-            
-        logger.info("[NEO_LOG] [QueryManager] mem_only=%s, research_channels=%s", mem_only, research_channels)
-        
-        # 获取原始计划查询（用于RAG搜索）
+            task_channels = ["rag_search", "mem_search"]
+
+        # Web 项目游标初始化
+        if self.state.get("web_project_cursor") is None:
+            self.state["web_project_cursor"] = 0
+
+        # 准备 Web 通道的项目名称池
         user_project_names = self._get_user_project_names()
+        project_cycle_len = len(user_project_names)
+        web_project_cursor = self.state.get("web_project_cursor", 0)
+
+        sends: list[Send] = []
         
-        for i, q in enumerate(queries):
-            logger.info("[NEO_LOG] [QueryManager] 子问题 id=%d: '%s'", i, q)
+        # ==================== 第一阶段：派发 RAG/MEM 通道 ====================
+        for idx, query in enumerate(queries):
+            qid = query_ids[idx] if idx < len(query_ids) else None
+
+            # 无 ID 的老路径：用字符串去重
+            if qid is None and normalize_query(query) in dispatched_strings:
+                continue
+
+            for channel in task_channels:
+                # ID 模式：避免重复派发到同一通道
+                if qid is not None and (qid, channel) in dispatched_pairs:
+                    continue
+
+                # rag / mem 默认沿用 registry 中的个性化（若无则退回增强查询）
+                value = self._materialize_channel_query(qid, query, channel)
+
+                payload = {"search_query": value}
+                if qid is not None:
+                    payload["id"] = str(qid)
+
+                sends.append(Send(channel, payload))
+
+                # 更新派发痕迹
+                if qid is not None:
+                    channel_key = channel.split("_")[0] if channel.endswith("_search") else channel
+                    self._update_personalized(qid, channel_key, value)
+                    dispatched_pairs.add((qid, channel))
+                else:
+                    dispatched_strings.add(normalize_query(value))
+
+        # ==================== 第二阶段：独立派发 WEB 通道 ====================
+        if not mem_only:
+            # 判断 Web 项目池是否耗尽
+            web_exhausted = (web_project_cursor >= project_cycle_len) if project_cycle_len > 0 else True
             
-            # 根据channels生成对应的Send
-            if "web" in research_channels: # Web使用用户项目名称（具体项目名，更容易在公网搜到）
-                web_query_index = i % len(user_project_names) if user_project_names else 0
-                web_query = user_project_names[web_query_index] if user_project_names else q
-                sends.append(Send("web_research", {"search_query": web_query, "id": int(i)}))
-            if "rag" in research_channels: # RAG使用增强查询（包含关键词的完整查询，在内部数据库中查找相关项目）
-                sends.append(Send("rag_search", {"search_query": q, "id": int(i)}))
-            if "mem" in research_channels: # Mem使用增强查询
-                sends.append(Send("mem_search", {"search_query": q, "id": int(i)}))
-        
-        # 统计节点分布
-        node_counts = {}
-        for send in sends:
-            node_counts[send.node] = node_counts.get(send.node, 0) + 1
-        
-        logger.info("[NEO_LOG] [QueryManager] Send distribution: %s (total: %d)", node_counts, len(sends))
+            if web_exhausted:
+                logger.info("[NEO_LOG] [QueryManager] Web 项目池已耗尽 (cursor=%d, total=%d)", 
+                        web_project_cursor, project_cycle_len)
+            else:
+                # 本轮最多派发的 Web 查询数量
+                max_parallel_dispatches = self.config.max_parallel_queries
+                web_dispatches_count = 0
+                
+                # 从游标位置开始派发用户项目
+                while web_project_cursor < project_cycle_len and web_dispatches_count < max_parallel_dispatches:
+                    project_name = user_project_names[web_project_cursor]
+                    
+                    # 构造 Web 查询 payload
+                    payload = {"search_query": project_name}
+                    
+                    # 注意：Web 通道不使用 query_id，因为它独立于查询词
+                    sends.append(Send("web_research", payload))
+                    dispatched_strings.add(normalize_query(project_name))
+                    
+                    web_project_cursor += 1
+                    web_dispatches_count += 1
+                
+                logger.info("[NEO_LOG] [QueryManager] Web 本轮派发: %d 个项目 (cursor: %d -> %d, 总池: %d)", 
+                        web_dispatches_count, 
+                        web_project_cursor - web_dispatches_count,
+                        web_project_cursor, 
+                        project_cycle_len)
+
+        # 更新 state
+        self.state["dispatched_pairs"] = list(dispatched_pairs)
+        self.state["dispatched_queries"] = list(dispatched_strings)
+        self.state["current_query_ids"] = [qid for qid in query_ids if qid is not None]
+        self.state["web_project_cursor"] = web_project_cursor if project_cycle_len else 0
+
         return sends
 
 # 三种查询生成路径
@@ -2098,22 +2523,43 @@ def generate_query(state: OverallState, config: RunnableConfig) -> OverallState:
     manager = QueryManager(state, configurable)
     result = manager.generate_queries()
     
+    # 从 QueryResult 中获取预计算的 cursor
+    cursor_value = result.planned_cursor if result.planned_cursor is not None else state.get("planned_cursor", 0)
+    
     # 构建返回状态
     response = {
+        "search_query": result.queries,
         "current_queries": result.queries,
-        # "search_query": result.queries,
+        "current_query_ids": result.query_ids,
+        "query_registry": state.get("query_registry", {}),
+        "query_id_counter": state.get("query_id_counter", 0),
+        "planned_queue_ids": manager.state.get("planned_queue_ids", []),
+        "planned_cursor": cursor_value,
+        "dispatched_pairs": manager.state.get("dispatched_pairs", []),
+        "dispatched_queries": manager.state.get("dispatched_queries", []),
+        "user_projects": (result.metadata or {}).get("projects", []),
+        # "web_project_cursor": state.get("web_project_cursor", 0),
         "reasoning_model": configurable.query_generator_model,
     }
-    
+
+    # logger.info("[NEO_LOG] [generate_query] DEBUG: planned_cursor = %s (from QueryResult: %s)", 
+    #             cursor_value, result.planned_cursor)
+
     # 如果有backlog，添加到状态中
     if result.backlog:
         response["planned_backlog"] = result.backlog
-        
-    response["user_projects"] = result.metadata.get("projects", [])
     
     # 保留关键状态字段，防止丢失 intent: 意图， user_projects_text: 用户项目上下文
-    critical_keys = ["user_projects_text", "overall_completion", "objectives_progress", 
-        "research_loop_count", "is_sufficient", "knowledge_gap", "follow_up_queries", "intent"]
+    critical_keys = [
+        "user_projects_text",
+        "overall_completion",
+        "objectives_progress",
+        "research_loop_count",
+        "is_sufficient",
+        "knowledge_gap",
+        "follow_up_queries",
+        "intent",
+    ]
     for key in critical_keys:
         if state.get(key) is not None:
             response[key] = state[key]
@@ -2149,6 +2595,7 @@ def _rephrase_query(query: str) -> str:
     except Exception:
         return query
 
+# 注意此处的state是QueryGenerationState，而不是OverallState，经常导致状态丢失
 def route_after_generate_query(state: QueryGenerationState, config: RunnableConfig):
     """LangGraph node that sends the search queries to the web research node.
     
@@ -2161,12 +2608,25 @@ def route_after_generate_query(state: QueryGenerationState, config: RunnableConf
     # 获取当前查询
     using_current = bool(state.get("current_queries"))
     queries = state.get("current_queries") or state.get("search_query", [])
-    
-    logger.info("[NEO_LOG] [route_after_generate_query] 发送 %d %s queries: %s", len(queries), "CURRENT" if using_current else "AGGREGATED", queries)
-    
-    # 使用QueryManager进行调度
+    query_ids = state.get("current_query_ids") or []
+
     manager = QueryManager(state, configurable)
-    return manager.schedule_queries(queries)
+    
+    # 若缺少查询或 ID，才兜底调用 generate_queries()
+    if not queries or len(query_ids) != len(queries):
+        logger.info("[NEO_LOG] [route_after_generate_query] 正在兜底生成查询（current_queries=%d, current_ids=%d）",
+                    len(queries), len(query_ids))
+        result = manager.generate_queries()
+        state["planned_backlog"] = result.backlog or state.get("planned_backlog", [])
+        queries = result.queries or []
+        query_ids = result.query_ids or []
+        state["current_queries"] = queries
+        state["current_query_ids"] = query_ids
+
+    logger.info("[NEO_LOG] [route_after_generate_query] 发送 %d %s queries: %s",
+                len(queries), "CURRENT" if using_current else "AGGREGATED", queries)
+    
+    return manager.schedule_queries(queries, query_ids)
 
 # 重点方法 搜索 SerpAPI Baidu 替换原Google API
 def web_research_SerpAPI(state: WebSearchState, config: RunnableConfig) -> OverallState:
@@ -2194,7 +2654,7 @@ def web_research_SerpAPI(state: WebSearchState, config: RunnableConfig) -> Overa
     configurable = Configuration.from_runnable_config(config)
     original_query = state.get("search_query", "")
     
-    logger.info("[SERPAPI_LOG] [web_research] Entry: query='%s', id=%s", original_query, state.get("id", "N/A"))
+    logger.info("[SERPAPI_LOG] [web_search] Entry: query='%s', id=%s", original_query, state.get("id", "N/A"))
     
     # Translate Chinese queries to English for better coverage
     translated_query = _translate_to_english(original_query, configurable.query_generator_model) if _contains_cjk(original_query) else ""
@@ -2217,18 +2677,18 @@ def web_research_SerpAPI(state: WebSearchState, config: RunnableConfig) -> Overa
         if translated_query:
             # 如果有翻译，备选查询可以是：原始查询的关键词提取版本
             secondary_query = _extract_key_terms_query(original_query)
-            logger.info("[SERPAPI_LOG] [web_research] Secondary strategy: key terms from original '%s' -> '%s'", 
+            logger.info("[SERPAPI_LOG] [web_search] Secondary strategy: key terms from original '%s' -> '%s'", 
                        original_query, secondary_query)
         else:
             # 如果没有翻译，备选查询可以是：重新表述的查询
             secondary_query = _rephrase_query(original_query) if len(original_query.split()) > 2 else None
             if secondary_query:
-                logger.info("[SERPAPI_LOG] [web_research] Secondary strategy: rephrase '%s' -> '%s'", 
+                logger.info("[SERPAPI_LOG] [web_search] Secondary strategy: rephrase '%s' -> '%s'", 
                            original_query, secondary_query)
             else:
-                logger.info("[SERPAPI_LOG] [web_research] No secondary query - original too short: '%s'", original_query)
+                logger.info("[SERPAPI_LOG] [web_search] No secondary query - original too short: '%s'", original_query)
     else:
-        logger.info("[SERPAPI_LOG] [web_research] Secondary query disabled by configuration")
+        logger.info("[SERPAPI_LOG] [web_search] Secondary query disabled by configuration")
 
     def _run_serpapi_search(query_text: str, num_results: int = 10) -> Tuple[list, str]:
         """Execute SerpAPI search and format results.
@@ -2242,7 +2702,7 @@ def web_research_SerpAPI(state: WebSearchState, config: RunnableConfig) -> Overa
         """
         api_start = time.time()
         try:
-            logger.debug("[SERPAPI_LOG] [web_research] API call starting for query: %s", query_text)
+            logger.debug("[SERPAPI_LOG] [web_search] API call starting for query: %s", query_text)
             
             # Configure SerpAPI search
             search_params = {
@@ -2259,16 +2719,16 @@ def web_research_SerpAPI(state: WebSearchState, config: RunnableConfig) -> Overa
             results = search.get_dict()
             
             api_elapsed = time.time() - api_start
-            logger.debug("[SERPAPI_LOG] [web_research] API call completed in %.2fs", api_elapsed)
+            logger.debug("[SERPAPI_LOG] [web_search] API call completed in %.2fs", api_elapsed)
             
             # Extract organic results
             organic_results = results.get("organic_results", [])
             
             if not organic_results:
-                logger.warning("[SERPAPI_LOG] [web_research] No organic results found")
+                logger.warning("[SERPAPI_LOG] [web_search] No organic results found")
                 return [], "[SerpAPI] No search results found."
             
-            logger.info("[SERPAPI_LOG] [web_research] Found %d organic results", len(organic_results))
+            logger.info("[SERPAPI_LOG] [web_search] Found %d organic results", len(organic_results))
             
             # Format sources for compatibility with existing system
             sources_gathered = []
@@ -2300,72 +2760,72 @@ def web_research_SerpAPI(state: WebSearchState, config: RunnableConfig) -> Overa
             # Combine all snippets into a single text response
             if formatted_snippets:
                 modified_text = "\n\n".join(formatted_snippets)
-                logger.info("[SERPAPI_LOG] [web_research] Generated response text with %d characters", len(modified_text))
+                logger.info("[SERPAPI_LOG] [web_search] Generated response text with %d characters", len(modified_text))
             else:
                 modified_text = "[SerpAPI] Search completed but no detailed snippets available."
-                logger.warning("[SERPAPI_LOG] [web_research] No snippets available for response text")
+                logger.warning("[SERPAPI_LOG] [web_search] No snippets available for response text")
             
-            logger.info("[SERPAPI_LOG] [web_research] Successfully processed %d results", len(sources_gathered))
+            logger.info("[SERPAPI_LOG] [web_search] Successfully processed %d results", len(sources_gathered))
             return sources_gathered, modified_text
             
         except Exception as e:
             api_elapsed = time.time() - api_start
             error_msg = str(e)
-            logger.error("[SERPAPI_LOG] [web_research] API call failed after %.2fs: %s", api_elapsed, error_msg)
+            logger.error("[SERPAPI_LOG] [web_search] API call failed after %.2fs: %s", api_elapsed, error_msg)
             
             # Detailed error analysis
             if "400" in error_msg or "Bad Request" in error_msg:
-                logger.warning("[SERPAPI_LOG] [web_research] HTTP 400 detected - checking for rate limit or invalid params")
+                logger.warning("[SERPAPI_LOG] [web_search] HTTP 400 detected - checking for rate limit or invalid params")
             elif "429" in error_msg or "rate limit" in error_msg.lower():
-                logger.warning("[SERPAPI_LOG] [web_research] Rate limit detected: %s", error_msg)
+                logger.warning("[SERPAPI_LOG] [web_search] Rate limit detected: %s", error_msg)
             elif "timeout" in error_msg.lower():
-                logger.warning("[SERPAPI_LOG] [web_research] Timeout detected: %s", error_msg)
+                logger.warning("[SERPAPI_LOG] [web_search] Timeout detected: %s", error_msg)
             elif "connection" in error_msg.lower():
-                logger.warning("[SERPAPI_LOG] [web_research] Connection issue: %s", error_msg)
+                logger.warning("[SERPAPI_LOG] [web_search] Connection issue: %s", error_msg)
             
             return [], f"[SerpAPI search error] {error_msg}"
 
     # First attempt with primary (possibly translated) query
     start_time = time.time()
     try:
-        logger.info("[SERPAPI_LOG] [web_research] Starting primary query at %s: '%s'", time.strftime('%H:%M:%S'), primary_query)
+        logger.info("[SERPAPI_LOG] [web_search] Starting primary query at %s: '%s'", time.strftime('%H:%M:%S'), primary_query)
         sources_gathered, modified_text = _run_serpapi_search(primary_query)
         cits = []  # SerpAPI doesn't provide citations like Google API
         elapsed = time.time() - start_time
-        logger.info("[SERPAPI_LOG] [web_research] Primary query completed in %.2fs: %d sources, %d chars", 
+        logger.info("[SERPAPI_LOG] [web_search] Primary query completed in %.2fs: %d sources, %d chars", 
                    elapsed, len(sources_gathered), len(modified_text))
-        logger.debug("[SERPAPI_LOG] [web_research] Response text preview (200 chars): %s", 
+        logger.debug("[SERPAPI_LOG] [web_search] Response text preview (200 chars): %s", 
                     (modified_text or "")[:200] + ("..." if len(modified_text or "") > 200 else ""))
     except Exception as e:
         # 兜底：任何未预期异常都不应中断流程
         elapsed = time.time() - start_time
         error_msg = str(e)
-        logger.error("[SERPAPI_LOG] [web_research] Primary query failed after %.2fs: %s", elapsed, error_msg)
+        logger.error("[SERPAPI_LOG] [web_search] Primary query failed after %.2fs: %s", elapsed, error_msg)
         # 检查是否是API限流或网络问题
         if "400" in error_msg or "Bad Request" in error_msg:
-            logger.warning("[SERPAPI_LOG] [web_research] Detected HTTP 400 - possible API rate limit or invalid request")
+            logger.warning("[SERPAPI_LOG] [web_search] Detected HTTP 400 - possible API rate limit or invalid request")
         elif "timeout" in error_msg.lower() or "connection" in error_msg.lower():
-            logger.warning("[SERPAPI_LOG] [web_research] Detected network issue: %s", error_msg)
+            logger.warning("[SERPAPI_LOG] [web_search] Detected network issue: %s", error_msg)
         sources_gathered, modified_text, cits = [], "[SerpAPI search error suppressed] " + error_msg, []
     # Retry with secondary (original) if no sources gathered
     if not sources_gathered and secondary_query:
         retry_start = time.time()
-        logger.info("[SERPAPI_LOG] [web_research] Starting secondary query at %s: '%s'", time.strftime('%H:%M:%S'), secondary_query)
+        logger.info("[SERPAPI_LOG] [web_search] Starting secondary query at %s: '%s'", time.strftime('%H:%M:%S'), secondary_query)
         try:
             sources_gathered, modified_text = _run_serpapi_search(secondary_query)
             cits = []  # SerpAPI doesn't provide citations like Google API
             retry_elapsed = time.time() - retry_start
-            logger.info("[SERPAPI_LOG] [web_research] Secondary query completed in %.2fs: %d sources, %d chars", 
+            logger.info("[SERPAPI_LOG] [web_search] Secondary query completed in %.2fs: %d sources, %d chars", 
                        retry_elapsed, len(sources_gathered), len(modified_text))
         except Exception as e:
             retry_elapsed = time.time() - retry_start
             error_msg = str(e)
-            logger.error("[SERPAPI_LOG] [web_research] Secondary query failed after %.2fs: %s", retry_elapsed, error_msg)
+            logger.error("[SERPAPI_LOG] [web_search] Secondary query failed after %.2fs: %s", retry_elapsed, error_msg)
             # 检查是否是API限流或网络问题
             if "400" in error_msg or "Bad Request" in error_msg:
-                logger.warning("[SERPAPI_LOG] [web_research] Secondary query also hit HTTP 400 - likely API rate limit")
+                logger.warning("[SERPAPI_LOG] [web_search] Secondary query also hit HTTP 400 - likely API rate limit")
             elif "timeout" in error_msg.lower() or "connection" in error_msg.lower():
-                logger.warning("[SERPAPI_LOG] [web_research] Secondary query network issue: %s", error_msg)
+                logger.warning("[SERPAPI_LOG] [web_search] Secondary query network issue: %s", error_msg)
             sources_gathered, modified_text, cits = [], "[SerpAPI search error suppressed] " + error_msg, []
 
     # 记录已派发查询，避免重复
@@ -2391,12 +2851,12 @@ def web_research_SerpAPI(state: WebSearchState, config: RunnableConfig) -> Overa
                         unique_sources.append(source)
                         seen_urls.add(url_key)
                 
-                logger.debug("[NEO_LOG] [web_research] 来源去重: %d个原始 -> %d个唯一", len(sources_gathered), len(unique_sources))
+                logger.debug("[NEO_LOG] [web_search] 来源去重: %d个原始 -> %d个唯一", len(sources_gathered), len(unique_sources))
                 
                 # Split the text into sentences for reranking
                 import re
                 sentences = re.split(r'[.!?]\s+', modified_text.strip())
-                logger.debug("[NEO_LOG] [web_research] 文本分句: %d字符文本 -> %d个句子", len(modified_text), len(sentences))
+                logger.debug("[NEO_LOG] [web_search] 文本分句: %d字符文本 -> %d个句子", len(modified_text), len(sentences))
                 
                 # Build sentence-to-citation mapping
                 sentence_citations = {}
@@ -2434,13 +2894,13 @@ def web_research_SerpAPI(state: WebSearchState, config: RunnableConfig) -> Overa
                 ]
                 
                 # 打印所有句子的详细信息
-                logger.debug("[NEO_LOG] [web_research] 提取%d个有效句子用于重排:", len(meaningful_sentences))
+                logger.debug("[NEO_LOG] [web_search] 提取%d个有效句子用于重排:", len(meaningful_sentences))
                 if meaningful_sentences:
                     for i, sentence in enumerate(meaningful_sentences):
                         citations_count = len(sentence_citations.get(sentence, []))
-                        logger.debug("[NEO_LOG] [web_research] 有效句子 [%d] 引用%d个: %s", i+1, citations_count, sentence[:80] + ("..." if len(sentence) > 80 else ""))
+                        logger.debug("[NEO_LOG] [web_search] 有效句子 [%d] 引用%d个: %s", i+1, citations_count, sentence[:80] + ("..." if len(sentence) > 80 else ""))
                 else:
-                    logger.debug("[NEO_LOG] [web_research] 没有找到有效句子")
+                    logger.debug("[NEO_LOG] [web_search] 没有找到有效句子")
                 
                 if meaningful_sentences:
                     # Apply local reranking
@@ -2458,7 +2918,7 @@ def web_research_SerpAPI(state: WebSearchState, config: RunnableConfig) -> Overa
                                         source_scores[url_key] = []
                                     source_scores[url_key].append(score)
                     
-                    logger.debug("[NEO_LOG] [web_research] 句子到来源映射: %d个句子映射到%d个来源", 
+                    logger.debug("[NEO_LOG] [web_search] 句子到来源映射: %d个句子映射到%d个来源", 
                             len([s for s in meaningful_sentences if s in sentence_citations]), len(source_scores))
                     
                     # Calculate aggregated scores (max score per source)
@@ -2466,7 +2926,7 @@ def web_research_SerpAPI(state: WebSearchState, config: RunnableConfig) -> Overa
                     for url_key, scores in source_scores.items():
                         source_final_scores[url_key] = max(scores) if scores else 0.0
                     
-                    logger.debug("[NEO_LOG] [web_research] 来源最终得分: %s", 
+                    logger.debug("[NEO_LOG] [web_search] 来源最终得分: %s", 
                             {k: f"{v:.3f}" for k, v in list(source_final_scores.items())[:5]})
                     
                     # Sort sources by aggregated scores
@@ -2505,29 +2965,28 @@ def web_research_SerpAPI(state: WebSearchState, config: RunnableConfig) -> Overa
                         'deduplication_applied': len(sources_gathered) != len(unique_sources)
                     }
                     
-                    logger.debug("[NEO_LOG] [web_research] 基于内容的来源重排: %d个句子 -> %d个来源评分 (平均分=%.3f, 保留%d个来源, 保底策略=%s)", 
+                    logger.debug("[NEO_LOG] [web_search] 基于内容的来源重排: %d个句子 -> %d个来源评分 (平均分=%.3f, 保留%d个来源, 保底策略=%s)", 
                                len(meaningful_sentences), len(scored_sources), web_rerank_meta['avg_score'], 
                                len(web_sources_reranked), web_rerank_meta['min_keep_triggered'])
                     
                     # 打印最终保留的来源
-                    logger.debug("[NEO_LOG] [web_research] 最终保留的%d个来源:", len(web_sources_reranked))
+                    logger.debug("[NEO_LOG] [web_search] 最终保留的%d个来源:", len(web_sources_reranked))
                     for i, source in enumerate(web_sources_reranked[:3]):  # 只显示前3个
                         url_key = source.get('short_url', source.get('value', ''))
                         score = source_final_scores.get(url_key, 0.0)
-                        logger.debug("[NEO_LOG] [web_research]   [%d] 分数=%.3f: %s", i+1, score, url_key[:60] + ("..." if len(url_key) > 60 else ""))
+                        logger.debug("[NEO_LOG] [web_search]   [%d] 分数=%.3f: %s", i+1, score, url_key[:60] + ("..." if len(url_key) > 60 else ""))
                 else:
-                    logger.debug("[NEO_LOG] [web_research] 未找到有效句子进行重排，使用去重后的顺序")
+                    logger.debug("[NEO_LOG] [web_search] 未找到有效句子进行重排，使用去重后的顺序")
                     web_sources_reranked = unique_sources
             else:
-                logger.debug("[NEO_LOG] [web_research] 内容不足或无引用信息进行来源映射，使用原始顺序")
+                logger.debug("[NEO_LOG] [web_search] 内容不足或无引用信息进行来源映射，使用原始顺序")
             
         except Exception as e:
-            logger.warning("[NEO_LOG] [web_research] 本地重排失败: %s，使用原始顺序", e)
+            logger.warning("[NEO_LOG] [web_search] 本地重排失败: %s，使用原始顺序", e)
             web_sources_reranked = sources_gathered[:]
             web_rerank_meta = {'error': str(e)}
     
-
-    logger.info("[NEO_LOG] [web_research] Final result: %d sources_gathered, %d chars modified_text", 
+    logger.info("[NEO_LOG] [web_search] Final result: %d sources_gathered, %d chars modified_text", 
                 len(sources_gathered), len(modified_text))
     
     return {
@@ -2559,7 +3018,7 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
     original_query = state.get("search_query", "")
     
     _node_start = time.time()
-    logger.info("[NEO_LOG] [web_research] WEB查询 START, id=%s: '%s'", state.get("id", "N/A"), original_query)
+    # logger.info("[NEO_LOG] [web_search] WEB查询 START, id=%s: '%s'", state.get("id", "N/A"), original_query)
     # Translate Chinese queries to English for better coverage
     translated_query = None # _translate_to_english(original_query, configurable.query_generator_model) if _contains_cjk(original_query) else ""
     primary_query = translated_query or original_query
@@ -2579,18 +3038,18 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
         if translated_query:
             # 如果有翻译，备选查询可以是：原始查询的关键词提取版本
             secondary_query = _extract_key_terms_query(original_query)
-            logger.debug("[NEO_LOG] [web_research] Secondary strategy: key terms from original '%s' -> '%s'", 
+            logger.debug("[NEO_LOG] [web_search] Secondary strategy: key terms from original '%s' -> '%s'", 
                        original_query, secondary_query)
         else:
             # 如果没有翻译，备选查询可以是：重新表述的查询
             secondary_query = _rephrase_query(original_query) if len(original_query.split()) > 2 else None
             if secondary_query:
-                logger.debug("[NEO_LOG] [web_research] Secondary strategy: rephrase '%s' -> '%s'", 
+                logger.debug("[NEO_LOG] [web_search] Secondary strategy: rephrase '%s' -> '%s'", 
                            original_query, secondary_query)
             else:
-                logger.debug("[NEO_LOG] [web_research] No secondary query - original too short: '%s'", original_query)
+                logger.debug("[NEO_LOG] [web_search] No secondary query - original too short: '%s'", original_query)
     else:
-        logger.debug("[NEO_LOG] [web_research] Secondary query disabled by configuration")
+        logger.debug("[NEO_LOG] [web_search] Secondary query disabled by configuration")
 
     def _call_llm_with_timeout(query_text: str, allow_url_context: bool = True):
         """Execute LLM call with timeout using ThreadPoolExecutor"""
@@ -2630,16 +3089,16 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
             return [], f"[web_search timeout] {str(e)}", []
         except Exception as e:
             msg = str(e)
-            logger.error("[NEO_LOG] [web_research] API call failed: %s", msg)
+            logger.error("[NEO_LOG] [web_search] API call failed: %s", msg)
             # 详细分析错误类型
             if "400" in msg or "Bad Request" in msg:
-                logger.warning("[NEO_LOG] [web_research] HTTP 400 detected - checking for rate limit or invalid params")
+                logger.warning("[NEO_LOG] [web_search] HTTP 400 detected - checking for rate limit or invalid params")
             elif "429" in msg or "rate limit" in msg.lower():
-                logger.warning("[NEO_LOG] [web_research] Rate limit detected: %s", msg)
+                logger.warning("[NEO_LOG] [web_search] Rate limit detected: %s", msg)
             elif "timeout" in msg.lower():
-                logger.warning("[NEO_LOG] [web_research] Timeout detected: %s", msg)
+                logger.warning("[NEO_LOG] [web_search] Timeout detected: %s", msg)
             elif "connection" in msg.lower():
-                logger.warning("[NEO_LOG] [web_research] Connection issue: %s", msg)
+                logger.warning("[NEO_LOG] [web_search] Connection issue: %s", msg)
             
             # 直接返回错误，不再尝试回退（因为已经暂时禁用了url_context）
             return [], "[web_search error suppressed] " + (msg or ""), []
@@ -2653,65 +3112,65 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
         if ch:
             # Truncate grounding chunks to respect context limit = 20
             limited_chunks = ch[:configurable.max_grounding_chunks]
-            # logger.debug("[NEO_LOG] [web_research] Limited grounding chunks %s", limited_chunks[0])
+            # logger.debug("[NEO_LOG] [web_search] Limited grounding chunks %s", limited_chunks[0])
             resolved = resolve_urls(limited_chunks, state.get("id", 0), "https://vertexaisearch.cloud.google.com/id/")
             # 构建引用列表 citations
             cits = get_citations(resp, resolved)
-            # logger.debug("[NEO_LOG] [web_research] citations: %s", cits[0])
+            # logger.debug("[NEO_LOG] [web_search] citations: %s", cits[0])
             base = resp.text or ""
             # 根据 citations 构建最终的文本
             mod = insert_citation_markers(base, cits)
-            # logger.debug("[NEO_LOG] [web_research] modified text: %s", mod[:500] + "..." if len(mod) > 500 else mod)
+            # logger.debug("[NEO_LOG] [web_search] modified text: %s", mod[:500] + "..." if len(mod) > 500 else mod)
             # 源引用列表
             srcs = [item for citation in cits for item in citation["segments"]]
-            # logger.debug("[NEO_LOG] [web_research] source list: %s", srcs[0])
+            # logger.debug("[NEO_LOG] [web_search] source list: %s", srcs[0])
             # Return citations for source mapping
             return srcs, mod, cits
         else:
             # 没有grounding_chunks时，只返回文本内容（无引用）
             base = resp.text or ""
-            logger.info("[NEO_LOG] [web_research] No grounding chunks, returning text only: %d chars", len(base))
+            logger.info("[NEO_LOG] [web_search] No grounding chunks, returning text only: %d chars", len(base))
             return [], base, []
 
     # First attempt with primary (possibly translated) query
     start_time = time.time()
     try:
-        logger.debug("[NEO_LOG] [web_research] Starting primary query: '%s' at %s", primary_query, time.strftime('%H:%M:%S'))
+        logger.debug("[NEO_LOG] [web_search] Starting primary query: '%s' at %s", primary_query, time.strftime('%H:%M:%S'))
         sources_gathered, modified_text, cits = _run_and_extract(primary_query)
         elapsed = time.time() - start_time
-        logger.debug("[NEO_LOG] [web_research] Primary query: '%s' completed in %.2fs: %d sources, %d chars", 
+        logger.debug("[NEO_LOG] [web_search] Primary query: '%s' completed in %.2fs: %d sources, %d chars", 
                    primary_query, elapsed, len(sources_gathered), len(modified_text))
-        logger.debug("[NEO_LOG] [web_research] Web搜索响应文本预览(200字): %s", 
+        logger.debug("[NEO_LOG] [web_search] Web搜索响应文本预览(200字): %s", 
                     (modified_text or "")[:200] + ("..." if len(modified_text or "") > 200 else ""))
     except Exception as e:
         # 兜底：任何未预期异常都不应中断流程
         elapsed = time.time() - start_time
         error_msg = str(e)
-        logger.error("[NEO_LOG] [web_research] Primary query: '%s' failed after %.2fs: %s", primary_query, elapsed, error_msg)
+        logger.error("[NEO_LOG] [web_search] Primary query: '%s' failed after %.2fs: %s", primary_query, elapsed, error_msg)
         # 检查是否是API限流或网络问题
         if "400" in error_msg or "Bad Request" in error_msg:
-            logger.warning("[NEO_LOG] [web_research] Detected HTTP 400 - possible API rate limit or invalid request")
+            logger.warning("[NEO_LOG] [web_search] Detected HTTP 400 - possible API rate limit or invalid request")
         elif "timeout" in error_msg.lower() or "connection" in error_msg.lower():
-            logger.warning("[NEO_LOG] [web_research] Detected network issue: %s", error_msg)
+            logger.warning("[NEO_LOG] [web_search] Detected network issue: %s", error_msg)
         sources_gathered, modified_text, cits = [], "[web_search error suppressed] " + error_msg, []
     # Retry with secondary (original) if no sources gathered
     if not sources_gathered and secondary_query:
         retry_start = time.time()
-        logger.debug("[NEO_LOG] [web_research] Starting secondary query: '%s' at %s", secondary_query, time.strftime('%H:%M:%S'))
+        logger.debug("[NEO_LOG] [web_search] Starting secondary query: '%s' at %s", secondary_query, time.strftime('%H:%M:%S'))
         try:
             sources_gathered, modified_text, cits = _run_and_extract(secondary_query)
             retry_elapsed = time.time() - retry_start
-            logger.debug("[NEO_LOG] [web_research] Secondary query: '%s' completed in %.2fs: %d sources, %d chars", 
+            logger.debug("[NEO_LOG] [web_search] Secondary query: '%s' completed in %.2fs: %d sources, %d chars", 
                        secondary_query, retry_elapsed, len(sources_gathered), len(modified_text))
         except Exception as e:
             retry_elapsed = time.time() - retry_start
             error_msg = str(e)
-            logger.error("[NEO_LOG] [web_research] Secondary query: '%s' failed after %.2fs: %s", secondary_query, retry_elapsed, error_msg)
+            logger.error("[NEO_LOG] [web_search] Secondary query: '%s' failed after %.2fs: %s", secondary_query, retry_elapsed, error_msg)
             # 检查是否是API限流或网络问题
             if "400" in error_msg or "Bad Request" in error_msg:
-                logger.warning("[NEO_LOG] [web_research] Secondary query also hit HTTP 400 - likely API rate limit")
+                logger.warning("[NEO_LOG] [web_search] Secondary query also hit HTTP 400 - likely API rate limit")
             elif "timeout" in error_msg.lower() or "connection" in error_msg.lower():
-                logger.warning("[NEO_LOG] [web_research] Secondary query network issue: %s", error_msg)
+                logger.warning("[NEO_LOG] [web_search] Secondary query network issue: %s", error_msg)
             sources_gathered, modified_text, cits = [], "[web_search error suppressed] " + error_msg, []
 
     # 记录已派发查询，避免重复
@@ -2722,19 +3181,20 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
     web_sources_reranked = [{"desc": modified_text}]
     
     _elapsed = time.time() - _node_start
-    logger.info("[NEO_LOG] [web_research] Web查询 END, id=%s: '%s', 耗时=%.2fs, 结果数: %d sources, %d chars | Preview: %s",
+    logger.info("[NEO_LOG] [web_search] Web查询 END, id=%s: '%s', 耗时=%.2fs, 结果数: %d sources, %d chars | Preview: %s",
                 state.get("id", "N/A"), original_query, _elapsed, len(sources_gathered), len(modified_text),
                 # modified_text,
                 modified_text[:100] + "..." if len(modified_text) > 100 else modified_text
                 )
     # if sources_gathered:
-    #     logger.info("[NEO_LOG] [web_research] sources_gathered: %s", sources_gathered[0])
+    #     logger.info("[NEO_LOG] [web_search] sources_gathered: %s", sources_gathered[0])
     return {
         "sources_gathered": sources_gathered,
         # "web_sources_reranked": web_sources_reranked,
         "search_query": [state.get("search_query", "")],
         "web_research_result": [modified_text],
         "dispatched_queries": dispatched_out,
+        "web_project_cursor": 1,
     }
 
 # 重点方法 RAG
@@ -2751,14 +3211,14 @@ def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
     original_query = state.get("search_query", "")
     
     _node_start = time.time()
-    logger.info("[NEO_LOG] [rag_search] RAG查询 START, id=%s: '%s'", state.get("id", "N/A"), original_query)
+    # logger.info("[NEO_LOG] [rag_search] RAG查询 START, id=%s: '%s'", state.get("id", "N/A"), original_query)
 
     try:
         top_k = int(getattr(configurable, "rag_search_top_k"))
-        logger.info("[NEO_LOG] [rag_search] RAG查询 top_k=%d", top_k)
+        # logger.debug("[NEO_LOG] [rag_search] RAG查询 top_k=%d", top_k)
     except Exception:
         top_k = 5
-        logger.info("[NEO_LOG] [rag_search] RAG查询 异常 top_k=%d", top_k)
+        logger.warning("[NEO_LOG] [rag_search] RAG查询 异常 top_k=%d", top_k)
 
     # Decide which RAG backend to use: REST (if enabled) or local TF-IDF
     hits_raw = [] # 原始主检索结果
@@ -2768,7 +3228,7 @@ def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
     try:
         api_key = getattr(configurable, "rag_rest_api_key", None)
         hits_raw = query_rag_rest(
-            original_query,
+            query=original_query,
             endpoint=getattr(configurable, "rag_search_endpoint", None),
             api_key=getattr(configurable, "rag_rest_api_key", None),
             timeout=int(getattr(configurable, "rag_rest_timeout", 5) or 5),
@@ -2982,7 +3442,7 @@ def mem_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
     node_id = state.get("id", "N/A")
 
     _node_start = time.time()
-    logger.info("[NEO_LOG] [mem_search] 记忆搜索 START, id=%s: '%s'", node_id, original_query)
+    # logger.info("[NEO_LOG] [mem_search] MEM查询 START, id=%s: '%s'", node_id, original_query)
 
     # Timeout and retry configuration
     timeout_seconds = float(getattr(configurable, 'mem_timeout', 5.0))
@@ -3021,7 +3481,7 @@ def mem_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
     dispatched_out = [original_query] if original_query else []
     _elapsed = time.time() - _node_start
     
-    logger.info("[NEO_LOG] [mem_search] 记忆搜索 END, id=%s: '%s', 耗时=%.2fs, 重试=%d次, 结果数=%d | Preview: %s",
+    logger.debug("[NEO_LOG] [mem_search] 记忆搜索 END, id=%s: '%s', 耗时=%.2fs, 重试=%d次, 结果数=%d | Preview: %s",
                 node_id, original_query, _elapsed, retry_count, len(mem_results),
                 mem_results[0][:50] + "..." if mem_results and len(mem_results[0]) > 50 else (mem_results[0] if mem_results else "无结果")
                 )
@@ -3045,9 +3505,8 @@ def _mock_mem_api_call_sync(query: str, node_id: str) -> list[str]:
     # Simplified categorization logic
     if any(kw in query_lower for kw in ["招投标", "供应商", "项目", "采购"]):
         return [
-            "[记忆] 历史偏好：你经常关注招投标和供应商信息，特别是室内设计相关的项目",
-            "[记忆] 用户画像：倾向于获取官方公告链接和详细的项目描述信息",
-            "[记忆] 提醒：如需特定供应商的项目推荐，可在后续补充公司名称进行精准匹配"
+            "[记忆] 历史画像：你经常关注招投标和供应商信息，特别是室内设计相关的项目",
+            "[记忆] 用户偏好：倾向于获取官方公告链接和详细的项目描述信息",
         ]
     elif any(kw in query_lower for kw in ["技术", "研究", "发展", "趋势", "推荐", "分析"]):
         return [
@@ -3057,7 +3516,7 @@ def _mock_mem_api_call_sync(query: str, node_id: str) -> list[str]:
         ]
     elif any(kw in query_lower for kw in ["上次", "之前", "聊", "对话", "记录"]):
         return [
-            "[记忆] 对话回忆：你之前提到你比较喜欢美食和运动",
+            "[记忆] 对话回忆：你之前提到你比较喜欢设计和艺术",
         ]
     else:
         return []
@@ -3177,8 +3636,8 @@ def thinking_middle_stage(state: OverallState, config: RunnableConfig) -> Overal
         research_loop_count = state.get("research_loop_count", 0)
         max_research_loops = state.get("max_research_loops", configurable.max_research_loops)
         followups = state.get("follow_up_queries") or []
-        logger.debug("[NEO_LOG] [thinking_middle_stage] Entry: research_loop_count=%d, max_research_loops=%d, followups_count=%d", 
-                   research_loop_count, max_research_loops, len(followups))
+        # logger.info("[NEO_LOG] [thinking_middle_stage] Entry: research_loop_count=%d, max_research_loops=%d, followups_count=%d", 
+        #            research_loop_count, max_research_loops, len(followups))
     except Exception:
         pass
     
@@ -3199,10 +3658,10 @@ def thinking_middle_stage(state: OverallState, config: RunnableConfig) -> Overal
     safe_results = []
     if sources_reranked:
         safe_results = [s for s in sources_reranked if isinstance(s, str)]
-        logger.info("[NEO_LOG] [thinking_middle_stage] top2 reflection_sources_reranked: %s", safe_results[:2])
+        # logger.info("[NEO_LOG] [thinking_middle_stage] top2 reflection_sources_reranked: %s", safe_results[:2])
     else:
         safe_results = [s for s in web_research_result if isinstance(s, str)]
-        logger.info("[NEO_LOG] [thinking_middle_stage] top2 web_research_result: %s", safe_results[:2])
+        # logger.info("[NEO_LOG] [thinking_middle_stage] top2 web_research_result: %s", safe_results[:2])
     
     # Get research topic from messages or use a fallback
     research_topic = get_research_topic(messages) if messages else "研究主题"
@@ -3224,7 +3683,7 @@ def thinking_middle_stage(state: OverallState, config: RunnableConfig) -> Overal
         research_methodology=methodology_text,
         summaries=summaries,
     )
-    logger.info("[NEO_LOG] [thinking_middle_stage] PROMPT LENGTH: %d", len(formatted_prompt))
+    # logger.info("[NEO_LOG] [thinking_middle_stage] PROMPT LENGTH: %d", len(formatted_prompt))
     
     result = structured_llm.invoke(formatted_prompt)
     thinking_record = {
@@ -3251,7 +3710,7 @@ def thinking_middle_stage(state: OverallState, config: RunnableConfig) -> Overal
         "reasoning_model": configurable.query_generator_model,
     }
     middle_thinking_value = thinking_record_updated["middle_thinking"]
-    logger.info("[NEO_LOG] [thinking_middle_stage] middle_thinking: %s", middle_thinking_value[:200])
+    logger.info("[NEO_LOG] [thinking_middle_stage] PROMPT LENGTH: %d，%s ...", len(formatted_prompt), middle_thinking_value[:200])
     
     # Keep critical state for research loop continuity
     critical_keys = ["follow_up_queries", "is_sufficient", "knowledge_gap", 
@@ -3445,9 +3904,9 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
             combined_sources = state.get("web_research_result", []) or []
             seen_urls = set()
             # 去重
-            logger.info("[NEO_LOG] [reflection] documents before deduplication: %d", len(combined_sources))
+            # logger.info("[NEO_LOG] [reflection] documents before deduplication: %d", len(combined_sources))
             combined_sources = list(set(combined_sources))
-            logger.info("[NEO_LOG] [reflection] documents after deduplication: %d", len(combined_sources))
+            # logger.info("[NEO_LOG] [reflection] documents after deduplication: %d", len(combined_sources))
 
             # Apply final reranking if we have enough sources
             min_sources_for_rerank = getattr(configurable, 'final_rerank_min_count')
@@ -3469,8 +3928,8 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
                     query = " ".join(queries)
                     query = research_topic + " " + query
                     # Call VoyageAI final rerank
-                    logger.info("[NEO_LOG] [reflection] 重排前(去重) origin=%d, query=%s", len(documents), research_topic)
-                    # logger.info("[NEO_LOG] [reflection] 重排前(去重) query=%s, origin=%s", research_topic, documents)
+                    logger.info("[NEO_LOG] [reflection] 重排前(已去重) origin=%d, query=%s", len(documents), research_topic)
+                    # logger.info("[NEO_LOG] [reflection] 重排前(已去重) query=%s, origin=%s", research_topic, documents)
                     voyage_result = voyage_reranker.rerank_documents(
                         query=query,
                         documents=documents,
@@ -3493,9 +3952,9 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
                     }
                     # logger.info("[NEO_LOG] [reflection] 重排后 query=%s, origin=%d -> final=%d, rerank=%s", 
                     #     research_topic, len(documents), len(reflection_sources_reranked), reflection_sources_reranked)
-                    logger.info("[NEO_LOG] [reflection] 重排后 query=%s, origin=%d -> final=%d (avg_score=%.3f, tokens=%d)", 
-                               research_topic, len(documents), len(reflection_sources_reranked),
-                               reflection_rerank_meta['avg_score'], reflection_rerank_meta['tokens'])
+                    logger.info("[NEO_LOG] [reflection] 重排后 origin=%d -> final=%d (avg_score=%.3f, tokens=%d) query=%s", 
+                               len(documents), len(reflection_sources_reranked),
+                               reflection_rerank_meta['avg_score'], reflection_rerank_meta['tokens'], research_topic)
                     # RERANK 没有匹配的情况（考虑阈值0.5）使用3个原始文档
                     if len(reranked_sources) == 0:
                         reflection_sources_reranked = combined_sources[:3]
@@ -3561,9 +4020,9 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
             
             parsed_json = json.loads(json_content)
             result = Reflection(**parsed_json)
-            logger.info("[NEO_LOG] [reflection] 手动解析成功: %s", result)
+            logger.info("[NEO_LOG] [reflection] 反思结果手动解析成功: %s", result)
         except Exception as parse_e:
-            logger.error("[NEO_LOG] [reflection] 手动解析失败: %s", str(parse_e))
+            logger.error("[NEO_LOG] [reflection] 反思结果手动解析失败: %s", str(parse_e))
             # 回退到结构化输出
             # result = llm.with_structured_output(Reflection).invoke(formatted_prompt)
             # logger.info("[NEO_LOG] [reflection] 回退到结构化输出: %s", result)
@@ -3609,19 +4068,19 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
         )
 
     # 【一般】增强调试日志 - 记录反思结果的详细信息
-    try:
-        followups = getattr(result, "follow_up_queries", []) or []
-        overall_completion = getattr(result, "overall_completion", 0.0)
-        logger.info(
-            "[NEO_LOG] [reflection] completion=%.1f%%, is_sufficient=%s, loop=%d, followups=%d, gap='%s'",
-            overall_completion * 100,
-            bool(getattr(result, "is_sufficient", False)),
-            state["research_loop_count"],
-            len(followups),
-            getattr(result, "knowledge_gap", ""),
-        )
-    except Exception as e:
-        logger.error("[NEO_LOG] [reflection] Error in debug logging: %s", str(e))
+    # try:
+    #     followups = getattr(result, "follow_up_queries", []) or []
+    #     overall_completion = getattr(result, "overall_completion", 0.0)
+    #     logger.info(
+    #         "[NEO_LOG] [reflection] completion=%.1f%%, is_sufficient=%s, loop=%d, followups=%d, gap='%s'",
+    #         overall_completion * 100,
+    #         bool(getattr(result, "is_sufficient", False)),
+    #         state["research_loop_count"],
+    #         len(followups),
+    #         getattr(result, "knowledge_gap", ""),
+    #     )
+    # except Exception as e:
+    #     logger.error("[NEO_LOG] [reflection] Error in debug logging: %s", str(e))
 
     # Ensure follow_up_queries is properly extracted
     follow_up_queries = getattr(result, "follow_up_queries", []) or []
@@ -3677,14 +4136,14 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
             overall_completion = max(prev_overall, 0.2)
 
     # 【一般】合并结果日志 - 记录最终的目标数量和总体完成度
-    try:
-        logger.info(
-            "[NEO_LOG] [reflection] merged objectives=%d, overall_after=%.2f",
-            len(merged_prog or {}),
-            float(overall_completion or 0.0),
-        )
-    except Exception:
-        pass
+    # try:
+    #     logger.info(
+    #         "[NEO_LOG] [reflection] merged objectives=%d, overall_after=%.2f",
+    #         len(merged_prog or {}),
+    #         float(overall_completion or 0.0),
+    #     )
+    # except Exception:
+    #     pass
 
     # 6 【一般】历史记录更新 - 维护follow-ups、知识缺口和进度的历史记录
     try:
@@ -3700,11 +4159,10 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
     new_prog_history = (state.get("objectives_progress_history", []) or []) + [merged_prog]
     new_prog_history = new_prog_history[-history_max:]
     
-
     # 7 返回值调试日志 - 记录最终返回给下游节点的数据
     effort = _infer_effort(state, configurable)
     completion_threshold = _effort_completion_threshold(configurable, effort)
-    logger.info("[NEO_LOG] [reflection] reflection_sources_reranked: %d", len(reflection_sources_reranked))
+    # logger.info("[NEO_LOG] [reflection] Sources reranked: %d, planned_cursor: %d", len(reflection_sources_reranked), state.get("planned_cursor", 0))
     return {
         # None-safe extraction to avoid AttributeError when result is None
         "reflection_sources_reranked": reflection_sources_reranked,
@@ -3723,6 +4181,7 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
         "number_of_ran_queries": len(state.get("search_query") or []),
         "objective_rr_index": state.get("objective_rr_index"),
         "reasoning_model": configurable.query_generator_model,
+        "planned_cursor": state.get("planned_cursor", 0),
     }
 
 def route_after_reflection(state: OverallState, config: RunnableConfig):
@@ -3762,11 +4221,11 @@ def route_after_reflection(state: OverallState, config: RunnableConfig):
     queries_fully_processed = planned_exhausted and followups_exhausted
 
     # Debug: enhanced query tracking summary
-    try:
-        logger.info("[NEO_LOG] [route_after_reflection] Analysis: completion=%.2f sufficient=%s loop=%d/%d followups=%d planned_remaining=%d queries_processed=%s", 
-                   completion, is_sufficient, research_loop_count, max_research_loops, len(followups), len(remaining_planned), queries_fully_processed)
-    except Exception:
-        pass
+    # try:
+    #     logger.info("[NEO_LOG] [route_after_reflection] Analysis: completion=%.2f sufficient=%s loop=%d/%d followups=%d planned_remaining=%d queries_processed=%s", 
+    #                completion, is_sufficient, research_loop_count, max_research_loops, len(followups), len(remaining_planned), queries_fully_processed)
+    # except Exception:
+    #     pass
 
     # 简化的早停逻辑：直接使用effort阈值
     effort = _infer_effort(state, configurable)
@@ -3786,8 +4245,8 @@ def route_after_reflection(state: OverallState, config: RunnableConfig):
     
     try:
         logger.info(
-            "[NEO_LOG] [route_after_reflection] Decision: => %s (effort=%s completion=%.2f/%.2f sufficient=%s queries_processed=%s)",
-            next_stage, effort, completion, completion_threshold, is_sufficient, queries_fully_processed
+            "[NEO_LOG] [route_after_reflection] Decision: => %s (effort=%s completion=%.2f/%.2f loop=%d/%d sufficient=%s queries_processed=%s)",
+            next_stage, effort, completion, completion_threshold, research_loop_count, max_research_loops, is_sufficient, queries_fully_processed
         )
     except Exception:
         pass
@@ -3798,7 +4257,7 @@ def route_after_reflection(state: OverallState, config: RunnableConfig):
 def generate_enhanced_report(state: OverallState, config: RunnableConfig) -> OverallState:
     """Generate an enhanced structured report similar to Google DeepResearch."""
     configurable = Configuration.from_runnable_config(config)
-    reasoning_model = configurable.thinking_model # pro_model
+    reasoning_model = configurable.query_generator_model # pro_model
     
     llm = ChatGoogleGenerativeAI(
         model=reasoning_model,
@@ -3809,6 +4268,7 @@ def generate_enhanced_report(state: OverallState, config: RunnableConfig) -> Ove
     
     current_date = get_current_date()
     reflection_sources_reranked = state.get("reflection_sources_reranked", [])
+    # 经过处理后的有效结果
     safe_results = []
     if reflection_sources_reranked:
         safe_results = [s for s in reflection_sources_reranked if isinstance(s, str)]
@@ -3869,18 +4329,16 @@ def generate_enhanced_report(state: OverallState, config: RunnableConfig) -> Ove
     user_personalization_context = ""
     
     if user_projects_text:
-        user_personalization_context = f"""
-## 用户项目数据
-以下是用户的历史项目和专业背景信息，请在分析和推荐时参考：
+        user_personalization_context = f"""## 用户项目数据
+    以下是用户的历史项目和专业背景信息，请在分析和推荐时参考：
 
-{user_projects_text}
+    {user_projects_text}
 
-请基于这些信息，在报告中体现个性化关联性。"""
+    请基于这些信息，在报告中体现个性化关联性。"""
 
     else:
-        user_personalization_context = """
-## 用户项目数据
-暂无用户的历史项目信息，请基于收集到的资料进行通用分析。"""
+        user_personalization_context = """## 用户项目数据
+    暂无用户的历史项目信息，请基于收集到的资料进行通用分析。"""
     
     formatted_prompt = enhanced_report_instructions.format(
         current_date=current_date,
