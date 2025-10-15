@@ -1,4 +1,4 @@
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from pydantic import BaseModel, Field, field_validator
 import json
 
@@ -96,6 +96,14 @@ class ResearchPlan(BaseModel):
     )
     research_methodology: str = Field(
         description="Detailed description of research methodology."
+    )
+    suggested_region: Optional[str] = Field(
+        default=None,
+        description="Suggested region filter (province or city, e.g., '广东', '深圳')."
+    )
+    suggested_project_type: Optional[str] = Field(
+        default=None,
+        description="Suggested project type: 'supplier' or 'designer'."
     )
 
 

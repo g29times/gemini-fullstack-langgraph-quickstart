@@ -275,7 +275,7 @@ def classify_intent(state: OverallState, config: RunnableConfig) -> OverallState
     is_memory_only = has_memory_keywords and not has_external_indicators
     is_hybrid_query = has_memory_keywords and has_external_indicators
     
-    # Enhanced prompt with follow-up context
+    # Enhanced prompt with follow-up context 追问
     if is_follow_up and previous_report:
         prompt = enhanced_intent_classifier_instructions.format(
             research_topic=topic,
@@ -1319,6 +1319,7 @@ def generate_query(state: OverallState, config: RunnableConfig) -> OverallState:
         "knowledge_gap",
         "follow_up_queries",
         "intent",
+        "research_plan",
     ]
     for key in critical_keys:
         if state.get(key) is not None:
@@ -1758,7 +1759,6 @@ def web_research_SerpAPI(state: WebSearchState, config: RunnableConfig) -> Overa
         "dispatched_queries": dispatched_out,
     }
 
-
 # 重点方法 搜索 Google API Gemini 2.5 Flash-Lite 0.0
 def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
     """LangGraph node that performs web research using the native Google Search API tool.
@@ -1967,6 +1967,7 @@ def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
     - search_query: echo back dispatched query for traceability
     - dispatched_queries: record the query to dedup in dispatcher
     """
+    # print("[rag_search] RAG查询state: ", state)
     configurable = Configuration.from_runnable_config(config)
     original_query = state.get("search_query", "")
     
@@ -1986,9 +1987,15 @@ def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
     err = ""
     # 调用 REST API 获取RAG搜索结果
     try:
-        api_key = getattr(configurable, "rag_rest_api_key", None)
+        # 从状态中读取地区和项目类型过滤条件
+        query_region = state.get("query_region")
+        query_project_type = state.get("query_project_type")
+        # logger.info("[NEO_LOG] [rag_search] RAG附加查询条件 - region: %s, project_type: %s", 
+        #             query_region, query_project_type)
         hits_raw = query_rag_rest(
             query=original_query,
+            area=query_region if query_region else "",
+            type=query_project_type if query_project_type else "",
             endpoint=getattr(configurable, "rag_search_endpoint", None),
             api_key=getattr(configurable, "rag_rest_api_key", None),
             timeout=int(getattr(configurable, "rag_rest_timeout", 5) or 5),
@@ -2586,6 +2593,10 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
         Dictionary with state update, including search_query key containing the generated follow-up query
     """
     # 1. 研究循环与环境准备 目标调度策略
+    # research_plan = state.get('research_plan')
+    # query_region = research_plan.get("suggested_region")
+    # query_project_type = research_plan.get("suggested_project_type")
+    # print("[NEO_LOG] [reflection] query_region: {}, query_project_type: {}".format(query_region, query_project_type))
     configurable = Configuration.from_runnable_config(config)
     # Increment the research loop count and get the reasoning model
     state["research_loop_count"] = state.get("research_loop_count", 0) + 1

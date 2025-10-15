@@ -59,6 +59,10 @@ class OverallState(TypedDict):
     objectives_progress_history: NotRequired[list[dict]]
     objective_rr_index: NotRequired[int]
    
+    # RAG query filters (extracted from user question and confirmed via HITL)
+    query_region: str  # Region filter: province or city (e.g., "广东", "深圳")
+    query_project_type: str  # Project type: "supplier" or "designer"
+    
     # RAG rerank fields
     # rag_sources_reranked: NotRequired[Annotated[list, operator.add]]  # RAG sources after reranking
     # rag_rerank_meta: NotRequired[dict]  # RAG reranking metadata
@@ -99,6 +103,7 @@ class OverallState(TypedDict):
 
 # generate_query → route_after_generate_query 之间传递的精简视图
 class QueryGenerationState(TypedDict):
+    research_plan: dict | None
     intent: dict | None
     search_query: list[str]
     query_registry: NotRequired[dict[int, QueryRecord]]
@@ -138,7 +143,6 @@ class Query(TypedDict):
 
 class QueryRecord(TypedDict, total=False):
     """Registry entry describing a canonical query and its per-channel variants."""
-
     canonical: str
     source: str  # e.g. "planned" | "followup" | "adhoc"
     personalized: dict[str, str]
@@ -149,7 +153,7 @@ class WebSearchState(TypedDict):
     search_query: str
     id: str
     web_project_cursor: Annotated[int, operator.add]
-
+    
 
 class ResearchPlanState(TypedDict):
     """State for research plan generation and HITL approval"""

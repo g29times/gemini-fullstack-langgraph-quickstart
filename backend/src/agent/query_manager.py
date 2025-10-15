@@ -1049,6 +1049,14 @@ class QueryManager:
                 payload = {"search_query": value}
                 if qid is not None:
                     payload["id"] = str(qid)
+                    
+                # 传递地区和项目类型过滤条件到 rag_search
+                if channel == "rag_search":
+                    research_plan = self.state.get("research_plan")
+                    print("--------------------- research_plan", research_plan)
+                    if research_plan:
+                        payload["query_region"] = research_plan.get("suggested_region")
+                        payload["query_project_type"] = research_plan.get("suggested_project_type")
 
                 sends.append(Send(channel, payload))
 
