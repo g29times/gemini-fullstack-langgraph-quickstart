@@ -23,8 +23,6 @@ from agent.query_manager import QueryManager
 from agent.configuration import Configuration
 from agent.state import OverallState, ReflectionState, QueryGenerationState, WebSearchState, FollowUpDetection, IntentClarificationResult, EntitySpecificityResult
 from agent.prompts import (
-    query_writer_instructions,
-    followup_decomposer_instructions,
     web_searcher_instructions,
     reflection_instructions,
     answer_instructions,
@@ -39,7 +37,6 @@ from agent.prompts import (
     thinking_finalization_instructions,
     enhanced_report_instructions,
     follow_up_detection_instructions,
-    follow_up_instructions,
     simple_fact_answer_instructions,
     intent_clarification_instructions,
     entity_specificity_check_instructions,
@@ -1290,26 +1287,28 @@ def generate_query(state: OverallState, config: RunnableConfig) -> OverallState:
     # 构建返回状态
     response = {
         "search_query": result.queries,
-        "current_queries": result.queries,
-        "current_query_ids": result.query_ids,
         "query_registry": state.get("query_registry", {}),
         "query_id_counter": state.get("query_id_counter", 0),
+        
         "planned_queue_ids": manager.state.get("planned_queue_ids", []),
         "planned_cursor": cursor_value,
+
+        "current_queries": result.queries,
+        "current_query_ids": result.query_ids,
+
         "dispatched_pairs": manager.state.get("dispatched_pairs", []),
         "dispatched_queries": manager.state.get("dispatched_queries", []),
+
         "user_projects": (result.metadata or {}).get("projects", []),
-        # "web_project_cursor": state.get("web_project_cursor", 0),
         "reasoning_model": configurable.query_generator_model,
     }
+    # 如果有backlog，添加到状态中
+    if result.backlog:
+        response["planned_backlog"] = result.backlog
 
     # logger.info("[NEO_LOG] [generate_query] DEBUG: planned_cursor = %s (from QueryResult: %s)", 
     #             cursor_value, result.planned_cursor)
 
-    # 如果有backlog，添加到状态中
-    if result.backlog:
-        response["planned_backlog"] = result.backlog
-    
     # 保留关键状态字段，防止丢失 intent: 意图， user_projects_text: 用户项目上下文
     critical_keys = [
         "user_projects_text",
@@ -1356,7 +1355,7 @@ def _rephrase_query(query: str) -> str:
     except Exception:
         return query
 
-# 注意此处的state是QueryGenerationState，而不是OverallState，经常导致状态丢失
+# 注意此处的state是QueryGenerationState，而不是OverallState
 def route_after_generate_query(state: QueryGenerationState, config: RunnableConfig):
     """LangGraph node that sends the search queries to the web research node.
     

@@ -5,28 +5,19 @@ from dataclasses import dataclass
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 
-from agent.api.rag_rest import query_rag_rest, query_user_projects, query_user_recommend
+from agent.api.rag_rest import query_user_recommend
 from agent.state import OverallState
 from agent.configuration import Configuration
 from agent.personalization import PersonalizationManager
 from agent.graph_utils import (
-    _prepare_summaries,
-    _contains_cjk,
-    _extract_cjk_terms,
-    _translate_to_english,
-    _repair_json_format,
     _infer_effort,
     _effort_completion_threshold,
     _effort_max_parallel,
 )
 from agent.util.utils import (
     get_current_date,
-    get_citations,
     get_research_topic,
-    insert_citation_markers,
-    resolve_urls,
     normalize_query,
-    truncate_content
 )
 from agent.util.tools_and_schemas import (
     SearchQueryList,
@@ -38,8 +29,8 @@ from agent.util.tools_and_schemas import (
     FollowUpResponse,
 )
 from agent.prompts import (
-    query_writer_instructions,
-    followup_decomposer_instructions,
+    generate_initial_query_instructions,
+    generate_followup_query_instructions,
 )
 from langgraph.types import Send
 
@@ -232,20 +223,21 @@ class QueryManager:
                 return self._sanitize_queries(fallback_queries, self.query_count)
             return self._sanitize_queries(queries, self.query_count)
         except Exception as e:
-            logger.error("[NEO_LOG] [QueryManager] 用户项目加载失败: %s", str(e))
+            logger.error("[NEO_LOG] [QueryManager] LLM调用失败: %s", str(e))
             # 设置空缓存避免重复尝试
             self.state["user_projects"] = []
             self.state["user_projects_text"] = ""
-            return ""
+            # 返回空列表而不是空字符串
+            return self._sanitize_queries(fallback_queries, self.query_count) if fallback_queries else []
     
     # 个性化 调用用户推荐接口（支持缓存）
     def _recommend_user_projects(self) -> tuple[list, str]:
         """懒加载用户项目并构建个性化上下文"""
-        projects = []
         # 检查缓存
         if self.state.get("user_projects_text"):
-            logger.debug("[NEO_LOG] [QueryManager] 使用缓存的推荐用户项目")
-            return projects, self.state["user_projects_text"]
+            cached_projects = self.state.get("user_projects", [])
+            logger.debug("[NEO_LOG] [QueryManager] 使用缓存的推荐用户项目 (共%d个)", len(cached_projects))
+            return cached_projects, self.state["user_projects_text"]
         
         # 获取用户信息
         user_info = self.state.get("user_info")
@@ -256,7 +248,6 @@ class QueryManager:
         user_token = getattr(self.config, "rag_rest_api_key", None)
         if not user_token and user_info:
             user_token = user_info.get("token") or user_info.get("api_key") or ""
-            # user_institution_ids = user_info.get("user_institution") or ""
         if not user_token:
             logger.debug("[NEO_LOG] [QueryManager] 无用户token，跳过个性化")
             return projects, ""
@@ -272,17 +263,26 @@ class QueryManager:
                 endpoint=endpoint,
                 timeout=timeout,
                 top_k=top_k,
-                # institution_ids=user_institution_ids
             )
             # TODO 1 项目清洗 2 WEB查询是基于原始10个推荐项目，而不是LLM拼组后的，需要改逻辑
-            if not projects or len(projects) == 0 or \
-                any("test" in str(project.get("title", "")).lower() 
-                or "测试" in str(project.get("title", "")) for project in projects):
+            
+            # 过滤掉包含测试字眼的项目
+            if projects:
+                original_count = len(projects)
+                filter_keywords = ["test", "测试", "归口", "新建项目", "犀照"]
                 projects = [
-                    {'id': '1', 'title': '北京首都机场希尔顿酒店室内设计项目', 'customer': '希尔顿集团'},
-                    {'id': '2', 'title': '上海浦东万豪酒店公区装修工程', 'customer': '万豪国际'},
-                    {'id': '3', 'title': '深圳前海金融中心办公楼设计', 'customer': '招商局集团'},
-                    {'id': '4', 'title': '广州白云机场T3航站楼商业空间', 'customer': '白云机场集团'},
+                    project for project in projects
+                    if not any(keyword in str(project.get("title", "")).lower() or keyword in str(project.get("title", "")) 
+                              for keyword in filter_keywords)
+                ]
+                if len(projects) < original_count:
+                    logger.info("[NEO_LOG] [QueryManager] 过滤掉 %d 个测试/无效项目，保留 %d 个有效项目", 
+                               original_count - len(projects), len(projects))
+            
+            # 如果过滤后没有项目了，使用兜底数据
+            if not projects or len(projects) == 0:
+                projects = [
+                    {'id': '1', 'title': '金融中心办公楼设计项目', 'customer': '招商局集团'},
                 ]
                 logger.warning("[NEO_LOG] [QueryManager] 兜底返回 - 用户项目: %s", projects)
             
@@ -369,10 +369,16 @@ class QueryManager:
         else:
             research_topic = get_research_topic(self.state.get("messages", []))
         
-        formatted_prompt = query_writer_instructions.format(
+        # 获取推荐用户项目上下文（与_handle_planned_queries保持一致）
+        projects, user_projects_context = self._recommend_user_projects()
+        if not user_projects_context:
+            user_projects_context = "无用户项目上下文"
+        
+        formatted_prompt = generate_initial_query_instructions.format(
             current_date=current_date,
             research_topic=research_topic,
             number_queries=self.query_count,
+            user_projects_context=user_projects_context,
         )
         
         queries = self._safe_invoke_llm(structured_llm, formatted_prompt, [research_topic])
@@ -514,7 +520,7 @@ class QueryManager:
         # 获取推荐用户项目并进行个性化增强
         projects, user_projects_context = self._recommend_user_projects()
         
-        formatted_prompt = followup_decomposer_instructions.format(
+        formatted_prompt = generate_followup_query_instructions.format(
             research_topic=research_topic,
             knowledge_gap=self.state.get("knowledge_gap", ""),
             follow_ups=followups_text,
