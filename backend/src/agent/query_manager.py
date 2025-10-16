@@ -241,30 +241,40 @@ class QueryManager:
         
         # 获取实时用户信息
         user_info = self.state.get("user_info")
-        if not user_info:
-            logger.warning("[NEO_LOG] [QueryManager] 无法获取实时user_info用户信息")
+        user_token = None
+        
+        # 优先使用实时 user_info 中的 token
+        if user_info:
+            user_token = user_info.get("token") or ""
+            if user_token:
+                logger.info("[NEO_LOG] [QueryManager] 成功从实时 user_info 获取 token")
+            else:
+                logger.warning("[NEO_LOG] [QueryManager] 实时 user_info 中无 token，尝试环境变量")
         else:
-            logger.info("[NEO_LOG] [QueryManager] 成功获取实时 user_info: %s", user_info)
-        # 通过环境变量获取兜底用户token（但有可能失效）
-        user_token = getattr(self.config, "rag_rest_api_key", None)
-        if not user_token and user_info:
-            user_token = user_info.get("token") or user_info.get("api_key") or ""
+            logger.warning("[NEO_LOG] [QueryManager] 无法获取实时 user_info，尝试环境变量")
+        
+        # 如果实时获取失败，回退到环境变量（兜底但可能失效）
         if not user_token:
-            logger.debug("[NEO_LOG] [QueryManager] 无用户token，跳过个性化")
-            return projects, ""
+            user_token = getattr(self.config, "rag_rest_api_key", None)
+            if user_token:
+                logger.info("[NEO_LOG] [QueryManager] 使用环境变量中的兜底 token")
+            else:
+                logger.debug("[NEO_LOG] [QueryManager] 无可用 token，跳过个性化")
+                return [], ""
         
         # 调用用户推荐接口
         try:
             endpoint = self.config.rag_recommend_endpoint
             timeout = self.config.rag_rest_timeout
             top_k = self.config.rag_recommend_top_k
-            
+            logger.info("[NEO_LOG] [QueryManager] 调用用户推荐接口: %s", user_token)
             projects = query_user_recommend(
                 api_key=user_token,
                 endpoint=endpoint,
                 timeout=timeout,
                 top_k=top_k,
             )
+            logger.info("[NEO_LOG] [QueryManager] 调用用户推荐接口返回: %s", projects)
             # TODO 1 项目清洗 2 WEB查询是基于原始10个推荐项目，而不是LLM拼组后的，需要改逻辑
             
             # 过滤掉包含测试字眼的项目
@@ -407,6 +417,12 @@ class QueryManager:
         sanitized_queries = self._sanitize_queries(planned_queries, max_parallel_queries)
         
         # 获取推荐用户项目并使用LLM进行个性化增强
+        user_info = self.state.get("user_info")
+        user_token = None
+        # 优先使用实时 user_info 中的 token
+        if user_info:
+            user_token = user_info.get("token") or user_info.get("api_key") or ""
+        logger.info("[NEO_LOG] [QueryManager] 获取推荐用户项目并进行个性化增强 %s", user_token)
         projects, user_projects_context = self._recommend_user_projects()
         if user_projects_context:
             research_topic = get_research_topic(self.state.get("messages", []))
