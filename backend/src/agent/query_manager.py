@@ -239,12 +239,13 @@ class QueryManager:
             logger.debug("[NEO_LOG] [QueryManager] 使用缓存的推荐用户项目 (共%d个)", len(cached_projects))
             return cached_projects, self.state["user_projects_text"]
         
-        # 获取用户信息
+        # 获取实时用户信息
         user_info = self.state.get("user_info")
         if not user_info:
-            logger.warning("[NEO_LOG] [QueryManager] 无法获取user_info用户信息")
-        
-        # 获取用户token（用于API调用）
+            logger.warning("[NEO_LOG] [QueryManager] 无法获取实时user_info用户信息")
+        else:
+            logger.info("[NEO_LOG] [QueryManager] 成功获取实时 user_info: %s", user_info)
+        # 通过环境变量获取兜底用户token（但有可能失效）
         user_token = getattr(self.config, "rag_rest_api_key", None)
         if not user_token and user_info:
             user_token = user_info.get("token") or user_info.get("api_key") or ""

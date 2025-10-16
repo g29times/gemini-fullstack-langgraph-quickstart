@@ -44,7 +44,7 @@ from agent.prompts import (
 )
 
 from agent.api.voyage_rerank import create_voyage_reranker
-from agent.api.rag_rest import query_rag_rest, query_user_projects, query_user_recommend
+from agent.api.rag_rest import query_rag_rest
 
 from agent.graph_utils import (
     _prepare_summaries,
@@ -1276,6 +1276,10 @@ def generate_query(state: OverallState, config: RunnableConfig) -> OverallState:
         Dictionary with state update, including search_query key containing the generated queries
     """
     configurable = Configuration.from_runnable_config(config)
+    user_info = configurable.user_info or {}
+    if user_info:
+        state["user_info"] = user_info
+        logger.info("[NEO_LOG][generate_query] user_info 已传递到 state: %s", user_info)
     
     # 初始化查询数量配置
     if state.get("initial_search_query_count") is None:
@@ -1315,6 +1319,7 @@ def generate_query(state: OverallState, config: RunnableConfig) -> OverallState:
 
     # 保留关键状态字段，防止丢失 intent: 意图， user_projects_text: 用户项目上下文
     critical_keys = [
+        "user_info",
         "user_projects_text",
         "overall_completion",
         "objectives_progress",

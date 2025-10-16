@@ -140,7 +140,7 @@ async def auth_and_user_info_middleware(request: Request, call_next):
     if not user_id and not ENABLE_DEFAULT_USER:
         user_id = "default"
         user_name = "default_user"
-        token = "default_token"
+        token = os.getenv("RAG_REST_API_KEY")
         request.state.user_id = user_id
         request.state.user_name = user_name
         request.state.token = token
