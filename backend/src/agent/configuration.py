@@ -487,6 +487,11 @@ class Configuration(BaseModel):
         metadata={"description": "Override for max parallel queries when effort=high."},
     )
 
+    # User information for message tracking
+    user_info: Optional[dict] = Field(
+        default=None,
+        metadata={"description": "User information containing id, username, token for message tracking."},
+    )
 
 
     @classmethod
@@ -503,6 +508,9 @@ class Configuration(BaseModel):
             name: os.environ.get(name.upper(), configurable.get(name))
             for name in cls.model_fields.keys()
         }
+        # Special handling for user_info - it should come from configurable only, not environment
+        if "user_info" in configurable:
+            raw_values["user_info"] = configurable["user_info"]
 
         # Filter out None values
         values = {k: v for k, v in raw_values.items() if v is not None}

@@ -128,7 +128,9 @@ def detect_follow_up(state: OverallState, config: RunnableConfig) -> OverallStat
     
     # 使用LLM进行智能追问检测
     configurable = Configuration.from_runnable_config(config)
-    
+    # user_info = configurable.user_info or {}
+    # logger.info("[detect_follow_up] - user_info: %s", user_info)
+
     llm = ChatGoogleGenerativeAI(
         model=configurable.query_generator_model,  # 使用gemini-2.5-flash-lite
         temperature=0.1,
@@ -188,7 +190,7 @@ def detect_follow_up(state: OverallState, config: RunnableConfig) -> OverallStat
         has_previous_report = bool(state.get("previous_report"))
         return {"is_follow_up": has_previous_report}
 
-def route_follow_up_detection(state: OverallState) -> str:
+def route_follow_up_detection(state: OverallState, config: RunnableConfig) -> str:
     """Route based on follow-up detection with HITL support.
     
     Can route directly to three main branches:
@@ -220,7 +222,9 @@ def route_follow_up_detection(state: OverallState) -> str:
     #     return "find_official_site"
     
     # 兜底路由到classify_intent处理追问
-    logger.info("[NEO_LOG][route_follow_up_detection] To classify_intent")
+    configurable = Configuration.from_runnable_config(config)
+    user_info = configurable.user_info or {}
+    logger.info("[NEO_LOG][route_follow_up_detection] user_info: %s -> To classify_intent", user_info)
     return "classify_intent"
 
 
@@ -1990,8 +1994,8 @@ def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
         # 从状态中读取地区和项目类型过滤条件
         query_region = state.get("query_region")
         query_project_type = state.get("query_project_type")
-        # logger.info("[NEO_LOG] [rag_search] RAG附加查询条件 - region: %s, project_type: %s", 
-        #             query_region, query_project_type)
+        logger.info("[NEO_LOG] [rag_search] RAG附加查询条件 - region: %s, project_type: %s", 
+                    query_region, query_project_type)
         hits_raw = query_rag_rest(
             query=original_query,
             area=query_region if query_region else "",

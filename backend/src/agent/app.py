@@ -22,6 +22,7 @@ app = FastAPI()
 
 # Hardcoded authentication configuration
 ENABLE_DEFAULT_USER = False
+DEFAULT_INSTITUTION_ID = 0
 
 # Initialize security and token validator
 security = HTTPBearer(auto_error=False)  # 设置auto_error=False以便在认证禁用时处理
@@ -32,7 +33,7 @@ async def verify_token(credentials: Optional[HTTPAuthorizationCredentials] = Dep
     """验证token的依赖函数"""
     # 默认用户信息
     default_user = {
-        "user_id": "default_user",
+        "user_id": "anonymous",
         "username": "anonymous",
         "email": "anonymous@example.com"
     }
@@ -115,7 +116,7 @@ async def auth_and_user_info_middleware(request: Request, call_next):
     # 检查Authorization头
     auth_header = request.headers.get("authorization")
     # 当前机构id
-    request.state.user_institution = request.headers.get("institution-identification", '')
+    request.state.user_institution = request.headers.get("institution-identification", DEFAULT_INSTITUTION_ID)
 
     if auth_header and auth_header.startswith("Bearer "):
         try:
@@ -125,11 +126,11 @@ async def auth_and_user_info_middleware(request: Request, call_next):
             if user_info:
                 user_id = user_info.id
                 user_name = user_info.name
-                logging.info(f"获取到用户信息: 用户ID={user_id}, 用户名={user_name}")
+                logging.info(f"获取到用户信息: token={token}, 用户ID={user_id}, 用户名={user_name}")
                 # 将用户信息存储到request.state中
                 request.state.user_id = user_id
                 request.state.user_name = user_name
-                
+                request.state.token = token
             else:
                 logging.warning("token验证失败，未获取到用户信息")
         except Exception as e:
@@ -139,9 +140,11 @@ async def auth_and_user_info_middleware(request: Request, call_next):
     if not user_id and not ENABLE_DEFAULT_USER:
         user_id = "default"
         user_name = "default_user"
+        token = "default_token"
         request.state.user_id = user_id
         request.state.user_name = user_name
-        logging.info(f"使用默认用户信息: user_id={user_id}, user_name={user_name}")
+        request.state.token = token
+        logging.info(f"使用默认用户信息: token={token}, user_id={user_id}, user_name={user_name}")
     
     # 检查是否是LangGraph API请求，如果是则注入用户信息
     if (
@@ -166,6 +169,8 @@ async def auth_and_user_info_middleware(request: Request, call_next):
                     
                     # 添加用户信息到configurable
                     user_info_dict = {}
+                    if token:
+                        user_info_dict['token'] = token
                     if user_id:
                         user_info_dict['id'] = user_id
                     if user_name:
@@ -177,7 +182,7 @@ async def auth_and_user_info_middleware(request: Request, call_next):
                     modified_body = json.dumps(data).encode('utf-8')
                     request._body = modified_body
                     
-                    logging.info(f"注入用户信息到LangGraph请求: user_id={user_id}, user_name={user_name}")
+                    logging.info(f"注入用户信息到LangGraph请求: token={token}, user_id={user_id}, user_name={user_name}")
                     
                 except json.JSONDecodeError:
                     logging.warning("无法解析LangGraph请求体JSON")
@@ -402,14 +407,15 @@ async def get_recommendations(request: Request):
 
         # 4. 使用默认值
         if not api_key:
-            api_key = "eyJhbGciOiJIUzUxMiJ9.eyJjcmVhdGVfdGltZSI6IjIwMjUtMDktMTYgMTc6MDE6MzQiLCJ1c2VyX2lkIjoyMDAwMTI0LCJ1c2VyX25hbWUiOiIxODY3Njc1NjU4MCIsInVzZXJfa2V5IjoiRTNqeDk5Mnhnb254elRGYk1IemJ4IiwibmV3X2ZsYWciOiJuZXdfZmxhZyJ9.rWDTuzMouFAxtXwX7xvuxpOXhwo_nebhs2j5MQQF4ypNtZ3wpPycEGZqavta2X8Xa9ruBcT2QnkXizr1MSy3hg"
+            api_key = "eyJhbGciOiJIUzUxMiJ9.eyJjcmVhdGVfdGltZSI6IjIwMjUtMTAtMDkgMTQ6NTQ6MjMiLCJ1c2VyX2lkIjoxNTk2MDQxNzE0NDQ0MTg1NjAxLCJ1c2VyX25hbWUiOiLpgpPlrrbmmI4gIDEzNzEzNTUxMzQ0IiwidXNlcl9rZXkiOiI1OWE1OGVjNS04MTgyLTRlNWEtYTg4Zi1hZjRjYmJiZDA3YjkiLCJuZXdfZmxhZyI6Im5ld19mbGFnIn0.puE07vMVstoN0RmBivXg9jFuJ-tY-UJ_waJasaUuZP1qVYX3r_Z9Qa7Aqi2w1m3jnZyEjUxGhUFxBMxq9-xLEg"
             
         # 3. 从环境变量获取
         if not api_key:
             api_key = os.environ.get("RAG_REST_API_KEY")
 
 
-        print(f"DEBUG: Using API key from: {'request header' if auth_header or designer_auth_header else 'environment/default'}")
+        print(f"DEBUG: Using API key from: {'request header' if auth_header else 'environment/default'}")
+        print(f"DEBUG: Using API key from: {api_key}")
 
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
@@ -422,11 +428,22 @@ async def get_recommendations(request: Request):
                 headers=headers
             )
 
-            # 返回目标环境的响应
+            # 过滤响应头，避免Content-Length和Transfer-Encoding冲突
+            filtered_headers = {}            
+            for key, value in response.headers.items():
+                key_lower = key.lower()
+                # 完全移除可能冲突的头部，让FastAPI自动处理
+                if key_lower in ['content-length', 'transfer-encoding', 'connection']:
+                    continue
+                else:
+                    filtered_headers[key] = value
+
+            # 返回目标环境的响应，让FastAPI自动设置正确的头部
             return Response(
                 content=response.content,
                 status_code=response.status_code,
-                headers=dict(response.headers)
+                headers=filtered_headers,
+                media_type="application/json"
             )
 
     except httpx.TimeoutException:
