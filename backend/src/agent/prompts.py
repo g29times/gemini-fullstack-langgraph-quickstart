@@ -65,8 +65,8 @@ Instructions:
 - **Key Element Completeness Check**: Verify the presence of all essential elements:
   * **Time Element**: Is the time range specified (e.g., "today", "now", "latest", etc.)?
   * **Location Element**: Is the geographic location clearly defined (especially for weather, traffic, or local service queries)?
-  * **Subject/Entity Element**: Is the subject of the query clearly identified (company, product, person, etc.)?
-  * **Event/Attribute Element**: Is the specific event or attribute being asked about explicit?
+  * **Entity（Subject） Element**: Is the subject of the query clearly identified (company, product, person, etc.)?
+  * **Attribute（Event） Element**: Is the specific event or attribute being asked about explicit?
 - **Missing Elements Assessment**: If any key element is missing, list them in `missing_elements` and provide reasoning in `clarification_reason`.
 - **Memory Query Detection** (for RESEARCH intent only): Determine if the query is memory-only or hybrid:
   * **Memory-only queries**: Personal/contextual questions like "上次我们聊了什么？", "我之前收藏的xx", "What did we discuss last time?" → mem_only: true
@@ -74,17 +74,17 @@ Instructions:
 - Provide a confidence score between 0 and 1.
 
 Examples:
-- "今天北京天气怎么样？" → entity: "北京", attribute: "天气", intent_label: "DIRECT_LOOKUP"
-- "What's the weather like in New York today?" → entity: "New York", attribute: "weather", intent_label: "DIRECT_LOOKUP"
 - "你好" → entity: null, attribute: null, intent_label: "SIMPLE_FACT"
 - "What is machine learning?" → entity: null, attribute: null, intent_label: "SIMPLE_FACT"
-- "Product Hunt的最新功能" → entity: "Product Hunt", attribute: "最新功能", intent_label: "DIRECT_LOOKUP"
+- "What's the weather like in New York today?" → entity: "New York", attribute: "weather", intent_label: "DIRECT_LOOKUP"
+- "Product Hunt的最新产品" → entity: "Product Hunt", attribute: "最新产品", intent_label: "DIRECT_LOOKUP"
 - "What are the latest features of GitHub?" → entity: "GitHub", attribute: "latest features", intent_label: "DIRECT_LOOKUP"
-- "AI行业发展趋势分析" → entity: "AI行业", attribute: "发展趋势", intent_label: "RESEARCH", mem_only: false
-- "Analysis of blockchain technology trends" → entity: "blockchain technology", attribute: "trends analysis", intent_label: "RESEARCH", mem_only: false
-- "上次我们聊了什么？" → entity: null, attribute: "对话历史", intent_label: "RESEARCH", mem_only: true
-- "What did we discuss last time?" → entity: null, attribute: "conversation history", intent_label: "RESEARCH", mem_only: true
-- "基于我们上次的结论，推荐最新的技术方案" → entity: "技术方案", attribute: "推荐", intent_label: "RESEARCH", mem_only: false
+
+- "上次我们聊了什么？" → entity: "我们", attribute: "聊", intent_label: "RESEARCH", mem_only: true
+- "最近上海有哪些酒店项目机会" → entity: "上海", attribute: "酒店项目机会", intent_label: "RESEARCH", mem_only: false
+- "给我推荐两个招投标项目" → entity: "用户", attribute: "招投标项目", intent_label: "RESEARCH", mem_only: false
+- "Analysis of blockchain technology trends" → entity: "blockchain technology", attribute: "trends", intent_label: "RESEARCH", mem_only: false
+- "基于我们上次的讨论，推荐最新的技术方案" → entity: "上次讨论", attribute: "推荐技术方案", intent_label: "RESEARCH", mem_only: false
 
 Output Format (JSON):
 {{
@@ -329,14 +329,14 @@ research_plan_instructions = """你是一位专业的全球化、多语种研究
     "research_objectives": ["目标1", "目标2", "...", "目标5"],
     "research_methodology": "研究方法、步骤",
     "planned_queries": ["查询1", "查询2", "...", "查询10"],
-    "suggested_region": "问题中提到的地区（省或市，如'广东省'、'深圳市'），如无明确地区则为''",
-    "suggested_project_type": "招投标的项目类型，如问题涉及项目招投标且与供应商相关则为'采购'，如问题涉及项目招投标且与设计施工相关则为'工程'，如不涉及项目招投标或难以判断则为''"
+    "suggested_region": "问题中明确提到的地区（范围仅限省市，如'广东省'、'深圳市'），如范围不对或未提及地区则输出''",
+    "suggested_project_type": "指招投标项目类型，如问题涉及项目招投标，且与供应商相关则为'采购'，与设计施工相关则为'工程'，如不涉及项目招投标或难以判断则输出''"
 }}
 suggested_project_type 例子：
-  “这次招投标付款方式、付款条件和付款周期是怎样的” -> "采购" （原因：供应商比较关心招投标的付款信息）
-  “帮我找下广东省橱柜衣柜相关的招投标项目” -> "采购" (原因：供应商比较关心招投标的具体品类，材料的信息)
+  “这次招投标付款方式、付款条件和付款周期是怎样的” -> "采购" （原因：供应商关心招投标的付款信息）
+  “帮我找下广东省橱柜衣柜相关的招投标项目” -> "采购" (原因：供应商关心招投标项目的品类信息，如橱柜衣柜)
   “这个项目招的材料，是否有产地或特定的技术认证（如防火等级、环保认证、节能标识）要求？” -> "采购"
-  “杰恩设计今年中标多少个办公业态的项目” -> "工程"（原因：设计机构比较关心招投标的项目中标等情况）
+  “杰恩设计今年中标多少个办公业态的项目” -> "工程"（原因：设计机构关心招投标的项目中标等情况）
   “广东省近三年的四五星级酒店开发项目会有哪些，有哪些是带有国资背景的投资项目” -> "工程" （原因：隐含招投标机会）
   “最近有哪些上海地区的酒旅相关的项目” -> "工程" （原因：项目意味着工程施工机会（优先）和采购机会（次之））
   “这个单体项目预计涉及那些材料品类的使用” -> "" （原因：主要关注点是如何使用材料，而不是项目招投标）
