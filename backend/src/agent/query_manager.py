@@ -274,7 +274,7 @@ class QueryManager:
                 timeout=timeout,
                 top_k=top_k,
             )
-            logger.info("[NEO_LOG] [QueryManager] 调用用户推荐接口返回: %s", projects)
+            logger.info("[NEO_LOG] [QueryManager] 调用用户推荐接口返回: %d", len(projects))
             # TODO 1 项目清洗 2 WEB查询是基于原始10个推荐项目，而不是LLM拼组后的，需要改逻辑
             
             # 过滤掉包含测试字眼的项目
@@ -422,7 +422,7 @@ class QueryManager:
         # 优先使用实时 user_info 中的 token
         if user_info:
             user_token = user_info.get("token") or user_info.get("api_key") or ""
-        logger.info("[NEO_LOG] [QueryManager] 获取推荐用户项目并进行个性化增强 %s", user_token)
+        # logger.info("[NEO_LOG] [QueryManager] 获取推荐用户项目并进行个性化增强 %s", user_token)
         projects, user_projects_context = self._recommend_user_projects()
         if user_projects_context:
             research_topic = get_research_topic(self.state.get("messages", []))

@@ -1279,7 +1279,7 @@ def generate_query(state: OverallState, config: RunnableConfig) -> OverallState:
     user_info = configurable.user_info or {}
     if user_info:
         state["user_info"] = user_info
-        logger.info("[NEO_LOG][generate_query] user_info 已传递到 state: %s", user_info)
+        # logger.info("[NEO_LOG][generate_query] user_info 已传递到 state: %s", user_info)
     
     # 初始化查询数量配置
     if state.get("initial_search_query_count") is None:
@@ -3151,7 +3151,8 @@ def generate_enhanced_report(state: OverallState, config: RunnableConfig) -> Ove
             )
             unique_sources.append(source)
     
-    logger.info("[NEO_LOG] [generate_enhanced_report] END, RESULT LENGTH: %d", len(result.content))
+    logger.info("[NEO_LOG] [generate_enhanced_report] END, RESULT PREVIEW: %s", result.content[:300])
+    # logger.info("[NEO_LOG] [generate_enhanced_report] END, RESULT LENGTH: %d", len(result.content))
     
     return {
         "messages": [AIMessage(content=result.content)],
