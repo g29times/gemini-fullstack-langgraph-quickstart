@@ -68,14 +68,15 @@ class OverallState(TypedDict):
     # rag_rerank_meta: NotRequired[dict]  # RAG reranking metadata
     # web_sources_reranked: NotRequired[Annotated[list, operator.add]]  # Web sources after reranking  
     # web_rerank_meta: NotRequired[dict]  # Web reranking metadata
-    reflection_sources_reranked: NotRequired[list]  # Final cross-reranked sources
+    sources_reranked: NotRequired[list]  # Final cross-reranked sources
     # reflection_rerank_meta: NotRequired[dict]  # Final reranking metadata
     
     # User personalization fields
     user_info: NotRequired[dict | None]  # User information from authentication
     user_projects: NotRequired[list]  # User's project list for personalization
     user_projects_text: NotRequired[str]  # Formatted user projects context for prompts
-    
+    messages: NotRequired[list]  # 用户消息历史，用于在查询管理器中获取研究主题
+
     # Search query management
     # 累积所有生成过的查询，供任何节点回退使用
     search_query: Annotated[list, operator.add]
@@ -119,7 +120,7 @@ class QueryGenerationState(TypedDict):
     user_info: NotRequired[dict | None]  # User information from authentication
     user_projects: NotRequired[list]  # User's project list for personalization
     user_projects_text: NotRequired[str]  # Formatted user projects context for prompts
-    
+    messages: NotRequired[list]  # 用户消息历史，用于在查询管理器中获取研究主题
 
 class ReflectionState(TypedDict):
     is_sufficient: bool

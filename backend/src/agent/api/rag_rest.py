@@ -207,6 +207,7 @@ def query_rag_rest(
     api_key: Optional[str] = None,
     timeout: int = 8,
     local_json: str = DEFAULT_LOCAL_JSON,
+    messages: Optional[List[str]] = [""]
 ) -> List[Dict[str, Any]]:
     """
     Query RAG via REST endpoint. If endpoint not provided or call fails,
@@ -223,6 +224,8 @@ def query_rag_rest(
     # 1) Try REST if endpoint is configured
     hits: List[Dict[str, Any]] = []
     if endpoint:
+        if not messages:
+            messages = [""]
         logger.info("[NEO_LOG] [query_rag_rest] 调用REST接口: %s %s", query, endpoint)
         headers = {
             "Content-Type": "application/json",
@@ -232,7 +235,17 @@ def query_rag_rest(
             headers["Authorization"] = f"Bearer {api_key}"
         
         # New API format: send query as array of strings
-        payload = { "labels": [query], "area": area, "myClassify": type, "pids": pids, "top_k": top_k } # Changed from dict to array format
+        payload = { "labels": [query], "area": "", "myClassify": type, "pids": pids, "top_k": top_k, "question": messages[-1] or "" } # Changed from dict to array format
+        
+        # Debug: 打印 payload 内容
+        # print(f"[DEBUG] RAG REST API Payload:")
+        # print(f"  - labels: {payload.get('labels')}")
+        # print(f"  - area: {payload.get('area')}")
+        # print(f"  - myClassify: {payload.get('myClassify')}")
+        # print(f"  - pids: {payload.get('pids')}")
+        # print(f"  - top_k: {payload.get('top_k')}")
+        # print(f"  - question: {payload.get('question')}")
+        # print(f"  - 完整 payload: {payload}")
         
         resp = _http_post_json(endpoint, payload, headers, timeout)
         
@@ -351,7 +364,7 @@ def query_user_recommend(
         
         if isinstance(resp, dict) and resp.get("success") and resp.get("data"):
             projects_data = resp["data"]
-            logger.info("[NEO_LOG] [query_user_recommend] 获取到 %d 个用户项目推荐", len(projects_data))
+            logger.info("[NEO_LOG] [query_user_recommend] 获取到用户项目推荐 %d 个", len(projects_data))
             # print(f"获取到用户项目推荐: {projects_data}，数量: {len(projects_data)}")
             hits = []
             for i, item in enumerate(projects_data[:top_k]):

@@ -102,8 +102,8 @@ def main() -> None:
             return
 
     messages = result.get("messages", [])
-    if messages:
-        print("\n报告：\n" + messages[-1].content)
+    # if messages:
+        # print("\n报告：\n" + messages[-1].content)
 
 
 if __name__ == "__main__":

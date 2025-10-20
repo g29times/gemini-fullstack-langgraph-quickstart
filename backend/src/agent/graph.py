@@ -697,15 +697,23 @@ def answer_simple_fact(state: OverallState, config: RunnableConfig) -> OverallSt
         if is_fallback:
             answer_text += "\n\n💬 Feel free to ask more questions or provide additional details. I'm here to help!"
         
+        # 获取现有消息并追加新的AI回复
+        existing_messages = state.get("messages", [])
+        new_messages = existing_messages + [AIMessage(content=answer_text)]
+        
         return {
-            "messages": [AIMessage(content=answer_text)],
+            "messages": new_messages,
             "chat_mode": is_fallback,  # Flag to indicate chat mode
             "continue_conversation": True,  # Allow continuation
         }
     except Exception as e:
         logger.error("[simple_fact] answer generation failed: %s", e)
+        # 获取现有消息并追加新的AI回复
+        existing_messages = state.get("messages", [])
+        new_messages = existing_messages + [AIMessage(content="Sorry, I'm unable to answer this question at the moment.")]
+        
         return {
-            "messages": [AIMessage(content="Sorry, I'm unable to answer this question at the moment.")],
+            "messages": new_messages,
             "chat_mode": is_fallback,
             "continue_conversation": True,
         }
@@ -1050,8 +1058,12 @@ def finalize_answer(state: OverallState, config: RunnableConfig):
             )
             unique_sources.append(source)
 
+    # 获取现有消息并追加新的AI回复，而不是替换整个数组
+    existing_messages = state.get("messages", [])
+    new_messages = existing_messages + [AIMessage(content=result.content)]
+    
     return {
-        "messages": [AIMessage(content=result.content)],
+        "messages": new_messages,
         "sources_gathered": unique_sources,
     }
 
@@ -1306,6 +1318,7 @@ def generate_query(state: OverallState, config: RunnableConfig) -> OverallState:
 
         "dispatched_pairs": manager.state.get("dispatched_pairs", []),
         "dispatched_queries": manager.state.get("dispatched_queries", []),
+        "web_project_cursor": manager.state.get("web_project_cursor", 0),
 
         "user_projects": (result.metadata or {}).get("projects", []),
         "reasoning_model": configurable.query_generator_model,
@@ -1329,6 +1342,7 @@ def generate_query(state: OverallState, config: RunnableConfig) -> OverallState:
         "follow_up_queries",
         "intent",
         "research_plan",
+        "messages",  # 添加 messages 字段，确保传递到 QueryGenerationState
     ]
     for key in critical_keys:
         if state.get(key) is not None:
@@ -1761,11 +1775,11 @@ def web_research_SerpAPI(state: WebSearchState, config: RunnableConfig) -> Overa
     
     return {
         "sources_gathered": sources_gathered,
-        "web_sources_reranked": web_sources_reranked,
-        "web_rerank_meta": web_rerank_meta,
         "search_query": [state.get("search_query", "")],
         "web_research_result": [modified_text],
         "dispatched_queries": dispatched_out,
+        "web_sources_reranked": web_sources_reranked,
+        "web_rerank_meta": web_rerank_meta,
     }
 
 # 重点方法 搜索 Google API Gemini 2.5 Flash-Lite 0.0
@@ -1959,11 +1973,9 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
     #     logger.info("[NEO_LOG] [web_search] sources_gathered: %s", sources_gathered[0])
     return {
         "sources_gathered": sources_gathered,
-        # "web_sources_reranked": web_sources_reranked,
         "search_query": [state.get("search_query", "")],
         "web_research_result": [modified_text],
         "dispatched_queries": dispatched_out,
-        "web_project_cursor": 1,
     }
 
 # 重点方法 RAG
@@ -1979,6 +1991,27 @@ def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
     # print("[rag_search] RAG查询state: ", state)
     configurable = Configuration.from_runnable_config(config)
     original_query = state.get("search_query", "")
+    
+    # 从 state 中获取用户消息
+    user_messages = state.get("messages", [])
+    # print(f"[DEBUG] rag_search - 获取到用户消息: {len(user_messages) if user_messages else 0} 条")
+    
+    # 提取所有消息的 content 字段
+    messages_content = []
+    if user_messages:
+        for msg in user_messages:
+            if isinstance(msg, dict):
+                content = msg.get('content', '')
+            else:
+                content = str(msg)
+            if content:
+                messages_content.append(content)
+        
+        # 打印消息内容用于调试
+        # if messages_content:
+            # print(f"[DEBUG] rag_search - 消息内容数量: {len(messages_content)}")
+            # print(f"[DEBUG] rag_search - 最后一条消息: {messages_content[-1][:100]}...")
+        logger.info("[NEO_LOG] [rag_search] 用户消息获取成功: %d 条消息", len(messages_content))
     
     _node_start = time.time()
     # logger.info("[NEO_LOG] [rag_search] RAG查询 START, id=%s: '%s'", state.get("id", "N/A"), original_query)
@@ -1999,8 +2032,8 @@ def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
         # 从状态中读取地区和项目类型过滤条件
         query_region = state.get("query_region")
         query_project_type = state.get("query_project_type")
-        logger.info("[NEO_LOG] [rag_search] RAG附加查询条件 - region: %s, project_type: %s", 
-                    query_region, query_project_type)
+        # logger.info("[NEO_LOG] [rag_search] RAG附加查询条件 - region: %s, project_type: %s",
+        #        query_region, query_project_type)
         hits_raw = query_rag_rest(
             query=original_query,
             area=query_region if query_region else "",
@@ -2010,6 +2043,7 @@ def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
             timeout=int(getattr(configurable, "rag_rest_timeout", 5) or 5),
             local_json=getattr(configurable, "rag_rest_local_json", "backend/examples/vendor_projects.json"),
             top_k=top_k,
+            messages=messages_content
         )
     except Exception as e:
         try:
@@ -2174,7 +2208,7 @@ def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
     
     if hits_ranked and getattr(configurable, 'enable_rag_rerank'):
         # Use helper function to build reranked segments
-        rag_sources_reranked = _build_segments(hits_ranked)
+        # rag_sources_reranked = _build_segments(hits_ranked)
         rag_rerank_meta = {
             'original_count': len(combined_hits),
             'filtered_count': len(hits_ranked),
@@ -2185,8 +2219,8 @@ def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
                    rag_rerank_meta['defer_to_reflection'])
 
     _elapsed = time.time() - _node_start
-    logger.info("[NEO_LOG] [rag_search] RAG查询 END, id=%s: '%s', 耗时=%.2fs, 结果数: %d sources, %d chars | Preview: %s",
-                state.get("id", "N/A"), original_query, _elapsed, len(segments), len(modified_text),
+    logger.info("[NEO_LOG] [rag_search] RAG查询 END, id=%s: '%s', region: %s, project_type: %s, 耗时=%.2fs, 结果数: %d sources, %d chars | Preview: %s",
+                state.get("id", "N/A"), original_query, query_region, query_project_type, _elapsed, len(segments), len(modified_text),
                 # modified_text
                 modified_text[:100] + "..." if len(modified_text) > 100 else modified_text
                 )
@@ -2194,10 +2228,11 @@ def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
     #     logger.info("[NEO_LOG] [rag_search] sources_gathered: %s", segments[0])
     return {
         "sources_gathered": segments,
-        # "rag_sources_reranked": rag_sources_reranked,
         "search_query": [state.get("search_query", "")],
         "web_research_result": rag_search_result,
         "dispatched_queries": dispatched_out,
+        "area": query_region,
+        "type": query_project_type,
     }
 
 # 重点方法 记忆搜索 Memory Search
@@ -2430,11 +2465,11 @@ def thinking_middle_stage(state: OverallState, config: RunnableConfig) -> Overal
     # Safely get messages and research results
     messages = state.get("messages", [])
     web_research_result = state.get("web_research_result", [])
-    sources_reranked = state.get("reflection_sources_reranked", [])
+    sources_reranked = state.get("sources_reranked", [])
     safe_results = []
     if sources_reranked:
         safe_results = [s for s in sources_reranked if isinstance(s, str)]
-        # logger.info("[NEO_LOG] [thinking_middle_stage] top2 reflection_sources_reranked: %s", safe_results[:2])
+        # logger.info("[NEO_LOG] [thinking_middle_stage] top2 sources_reranked: %s", safe_results[:2])
     else:
         safe_results = [s for s in web_research_result if isinstance(s, str)]
         # logger.info("[NEO_LOG] [thinking_middle_stage] top2 web_research_result: %s", safe_results[:2])
@@ -2486,11 +2521,11 @@ def thinking_middle_stage(state: OverallState, config: RunnableConfig) -> Overal
         "reasoning_model": configurable.query_generator_model,
     }
     middle_thinking_value = thinking_record_updated["middle_thinking"]
-    logger.info("[NEO_LOG] [thinking_middle_stage] PROMPT LENGTH: %d，%s ...", len(formatted_prompt), middle_thinking_value[:200])
+    # logger.info("[NEO_LOG] [thinking_middle_stage] PROMPT LENGTH: %d，%s ...", len(formatted_prompt), middle_thinking_value[:200])
     
     # Keep critical state for research loop continuity
     critical_keys = ["follow_up_queries", "is_sufficient", "knowledge_gap", 
-                     "research_loop_count", "objectives_progress", "overall_completion"]
+                     "objectives_progress", "overall_completion", "research_loop_count"]
     
     for key in critical_keys:
         if state.get(key) is not None:
@@ -2504,7 +2539,7 @@ def thinking_finalization_stage(state: OverallState, config: RunnableConfig) -> 
     
     llm = ChatGoogleGenerativeAI(
         model=configurable.query_generator_model,
-        temperature=0.2,
+        temperature=0.1,
         max_retries=2,
         api_key=os.getenv("GEMINI_API_KEY"),
     )
@@ -2515,12 +2550,11 @@ def thinking_finalization_stage(state: OverallState, config: RunnableConfig) -> 
     # Safely get state data
     messages = state.get("messages", [])
     web_research_result = state.get("web_research_result", [])
-    insights_gathered = state.get("insights_gathered", [])
-    sources_reranked = state.get("reflection_sources_reranked", [])
+    sources_reranked = state.get("sources_reranked", [])
     safe_results = []
     if sources_reranked:
         safe_results = [s for s in sources_reranked if isinstance(s, str)]
-        # logger.info("[NEO_LOG] [thinking_finalization_stage] top2 reflection_sources_reranked: %s", safe_results[:2])
+        # logger.info("[NEO_LOG] [thinking_finalization_stage] top2 sources_reranked: %s", safe_results[:2])
     else:
         safe_results = [s for s in web_research_result if isinstance(s, str)]
         # logger.info("[NEO_LOG] [thinking_finalization_stage] top2 web_research_result: %s", safe_results[:2])
@@ -2540,7 +2574,6 @@ def thinking_finalization_stage(state: OverallState, config: RunnableConfig) -> 
     # Get existing thinking record and add final thinking
     existing_thinking = state.get("thinking_process", {})
 
-    # logger.info("[NEO_LOG] [thinking_finalization_stage] Summaries: %s", summaries)
     formatted_prompt = thinking_finalization_instructions.format(
         current_date=current_date,
         research_topic=research_topic,
@@ -2550,7 +2583,7 @@ def thinking_finalization_stage(state: OverallState, config: RunnableConfig) -> 
         summaries=summaries,
     )
     logger.info("[NEO_LOG] [thinking_finalization_stage] START, PROMPT LENGTH: %d", len(formatted_prompt))
-    # logger.info("[NEO_LOG] [thinking_finalization_stage] START, PROMPT LENGTH: %d, %s", len(formatted_prompt), formatted_prompt)
+    # logger.info("[NEO_LOG] [thinking_finalization_stage] START, PROMPT：%s", formatted_prompt)
     
     result = structured_llm.invoke(formatted_prompt)
     thinking_record = {
@@ -2574,16 +2607,13 @@ def thinking_finalization_stage(state: OverallState, config: RunnableConfig) -> 
         "reasoning_model": configurable.query_generator_model,
     }
     final_thinking_value = thinking_record_updated.get("final_thinking", "")
-    logger.info("[NEO_LOG] [thinking_finalization_stage] FINISHED: %d, %s", len(final_thinking_value), final_thinking_value[:200])
+    # logger.info("[NEO_LOG] [thinking_finalization_stage] FINISHED: %d, %s", len(final_thinking_value), final_thinking_value)
     
     # Preserve core state fields (保留report生成必需的字段)
-    for key in ["research_plan", "objectives_progress", "overall_completion", "research_loop_count", 
-                "sources_gathered", "web_research_result"]:
+    for key in ["objectives_progress", "overall_completion", "sources_reranked",
+                 "research_loop_count", "research_plan"]:
         if key in state:
             preserved_state[key] = state[key]
-
-    # logger.info("[NEO_LOG] [thinking_finalization_stage] State: %s", preserved_state)
-    
     return preserved_state
 
 # 重点方法 反思 Gemini 2.5 Flash 0.2
@@ -2602,10 +2632,6 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
         Dictionary with state update, including search_query key containing the generated follow-up query
     """
     # 1. 研究循环与环境准备 目标调度策略
-    # research_plan = state.get('research_plan')
-    # query_region = research_plan.get("suggested_region")
-    # query_project_type = research_plan.get("suggested_project_type")
-    # print("[NEO_LOG] [reflection] query_region: {}, query_project_type: {}".format(query_region, query_project_type))
     configurable = Configuration.from_runnable_config(config)
     # Increment the research loop count and get the reasoning model
     state["research_loop_count"] = state.get("research_loop_count", 0) + 1
@@ -2676,7 +2702,7 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
     previous_gaps_text = "\n".join(f"• {g}" for g in prev_gaps) if prev_gaps else "(none)"
 
     # 2 重排 Web + RAG 阶段的混合信息 Apply final cross-source reranking (web + rag)
-    reflection_sources_reranked = []
+    sources_reranked = []
     reflection_rerank_meta = {}
     if getattr(configurable, 'enable_voyage_rerank', True) and getattr(configurable, 'voyage_api_key', ''):
         try:
@@ -2723,39 +2749,39 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
                         if 0 <= idx < len(documents):
                             reranked_sources.append(documents[idx])
                     
-                    reflection_sources_reranked = reranked_sources
+                    sources_reranked = reranked_sources
                     reflection_rerank_meta = {
                         'origin_count': len(documents),
-                        'final_count': len(reflection_sources_reranked),
+                        'final_count': len(sources_reranked),
                         'avg_score': sum(voyage_result.relevance_scores) / len(voyage_result.relevance_scores) if voyage_result.relevance_scores else 0.0,
                         'tokens': voyage_result.api_usage.get('total_tokens', 0)
                     }
                     # logger.info("[NEO_LOG] [reflection] 重排后 query=%s, origin=%d -> final=%d, rerank=%s", 
-                    #     research_topic, len(documents), len(reflection_sources_reranked), reflection_sources_reranked)
+                    #     research_topic, len(documents), len(sources_reranked), sources_reranked)
                     logger.info("[NEO_LOG] [reflection] 重排后 origin=%d -> final=%d (avg_score=%.3f, tokens=%d) query=%s", 
-                               len(documents), len(reflection_sources_reranked),
+                               len(documents), len(sources_reranked),
                                reflection_rerank_meta['avg_score'], reflection_rerank_meta['tokens'], research_topic)
                     # RERANK 没有匹配的情况（考虑阈值0.5）使用3个原始文档
                     if len(reranked_sources) == 0:
-                        reflection_sources_reranked = combined_sources[:3]
+                        sources_reranked = combined_sources[:3]
                 else:
                     logger.info("[NEO_LOG] [reflection] VoyageAI reranker not available for final rerank")
-                    reflection_sources_reranked = combined_sources[:3]
+                    sources_reranked = combined_sources[:3]
             else:
                 logger.info("[NEO_LOG] [reflection] Not enough sources for final merge rerank")
-                reflection_sources_reranked = combined_sources[:3]
+                sources_reranked = combined_sources[:3]
                 
         except Exception as e:
             logger.warning("[NEO_LOG] [reflection] Final merge reranking failed: %s", e)
             # Fallback: use original sources
-            reflection_sources_reranked = combined_sources[:3]
+            sources_reranked = combined_sources[:3]
             reflection_rerank_meta = {'error': str(e)}
     
-    if reflection_sources_reranked:
-        safe_results = [s for s in reflection_sources_reranked if isinstance(s, str)]
-        # logger.info("[NEO_LOG] [reflection] top3 reflection_sources_reranked: %s", safe_results[:3])
-    else:
-        logger.info("[NEO_LOG] [reflection] top3 web_research_result: %s", safe_results[:3])
+    if sources_reranked:
+        safe_results = [s for s in sources_reranked if isinstance(s, str)]
+        # logger.info("[NEO_LOG] [reflection] top3 sources_reranked: %s", safe_results[:3])
+    # else:
+    #     logger.info("[NEO_LOG] [reflection] top3 web_research_result: %s", safe_results[:3])
     
     # 3. 组装LLM提示词并调用结构化输出
     formatted_prompt = reflection_instructions.format(
@@ -2800,7 +2826,7 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
             
             parsed_json = json.loads(json_content)
             result = Reflection(**parsed_json)
-            logger.info("[NEO_LOG] [reflection] 反思结果手动解析成功: %s", result)
+            # logger.info("[NEO_LOG] [reflection] 反思结果手动解析成功: %s", result)
         except Exception as parse_e:
             logger.error("[NEO_LOG] [reflection] 反思结果手动解析失败: %s", str(parse_e))
             # 回退到结构化输出
@@ -2846,21 +2872,6 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
             objectives_progress=preserved_objectives_progress,
             overall_completion=0.0  # 由后续统一计算
         )
-
-    # 【一般】增强调试日志 - 记录反思结果的详细信息
-    # try:
-    #     followups = getattr(result, "follow_up_queries", []) or []
-    #     overall_completion = getattr(result, "overall_completion", 0.0)
-    #     logger.info(
-    #         "[NEO_LOG] [reflection] completion=%.1f%%, is_sufficient=%s, loop=%d, followups=%d, gap='%s'",
-    #         overall_completion * 100,
-    #         bool(getattr(result, "is_sufficient", False)),
-    #         state["research_loop_count"],
-    #         len(followups),
-    #         getattr(result, "knowledge_gap", ""),
-    #     )
-    # except Exception as e:
-    #     logger.error("[NEO_LOG] [reflection] Error in debug logging: %s", str(e))
 
     # Ensure follow_up_queries is properly extracted
     follow_up_queries = getattr(result, "follow_up_queries", []) or []
@@ -2915,16 +2926,6 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
         else:
             overall_completion = max(prev_overall, 0.2)
 
-    # 【一般】合并结果日志 - 记录最终的目标数量和总体完成度
-    # try:
-    #     logger.info(
-    #         "[NEO_LOG] [reflection] merged objectives=%d, overall_after=%.2f",
-    #         len(merged_prog or {}),
-    #         float(overall_completion or 0.0),
-    #     )
-    # except Exception:
-    #     pass
-
     # 6 【一般】历史记录更新 - 维护follow-ups、知识缺口和进度的历史记录
     try:
         history_max = int(configurable.history_max_len)
@@ -2942,11 +2943,11 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
     # 7 返回值调试日志 - 记录最终返回给下游节点的数据
     effort = _infer_effort(state, configurable)
     completion_threshold = _effort_completion_threshold(configurable, effort)
-    # logger.info("[NEO_LOG] [reflection] Sources reranked: %d, planned_cursor: %d", len(reflection_sources_reranked), state.get("planned_cursor", 0))
+    logger.info("[NEO_LOG] [reflection] 反思结束： Result: %s", result)
+    # logger.info("[NEO_LOG] [reflection] 反思结束：Sources reranked: %s, planned_cursor: %d, Result: %s", sources_reranked, state.get("planned_cursor", 0), result)
     return {
         # None-safe extraction to avoid AttributeError when result is None
-        "reflection_sources_reranked": reflection_sources_reranked,
-        # "reflection_rerank_meta": reflection_rerank_meta,
+        "sources_reranked": sources_reranked,
         "effort": effort,
         "completion_threshold": completion_threshold,
         "overall_completion": overall_completion,
@@ -2962,6 +2963,7 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
         "objective_rr_index": state.get("objective_rr_index"),
         "reasoning_model": configurable.query_generator_model,
         "planned_cursor": state.get("planned_cursor", 0),
+        "web_project_cursor": state.get("web_project_cursor", 0),
     }
 
 def route_after_reflection(state: OverallState, config: RunnableConfig):
@@ -3021,7 +3023,7 @@ def route_after_reflection(state: OverallState, config: RunnableConfig):
     )
 
     # Final routing decision
-    next_stage = "generate_enhanced_report" if should_finalize else "thinking_middle_stage"
+    next_stage = "thinking_finalization_stage" if should_finalize else "thinking_middle_stage"
     
     try:
         logger.info(
@@ -3037,51 +3039,34 @@ def route_after_reflection(state: OverallState, config: RunnableConfig):
 def generate_enhanced_report(state: OverallState, config: RunnableConfig) -> OverallState:
     """Generate an enhanced structured report similar to Google DeepResearch."""
     configurable = Configuration.from_runnable_config(config)
-    reasoning_model = configurable.query_generator_model # pro_model
+    reasoning_model = configurable.thinking_model # query_generator_model thinking_model pro_model
     
     llm = ChatGoogleGenerativeAI(
         model=reasoning_model,
-        temperature=0.5,
+        temperature=0.2,
         max_retries=2,
         api_key=os.getenv("GEMINI_API_KEY"),
     )
     
     current_date = get_current_date()
-    reflection_sources_reranked = state.get("reflection_sources_reranked", [])
+    sources_reranked = state.get("sources_reranked", [])
     # 经过处理后的有效结果
     safe_results = []
-    if reflection_sources_reranked:
-        safe_results = [s for s in reflection_sources_reranked if isinstance(s, str)]
-        # logger.info("[NEO_LOG] [generate_enhanced_report] top2 reflection_sources_reranked: %s", safe_results[:2])
+    if sources_reranked:
+        # logger.info("[NEO_LOG] [generate_enhanced_report] 使用重排后的高质量数据: %s", sources_reranked)
+        safe_results = [s for s in sources_reranked if isinstance(s, str)]
     else:
+        # logger.info("[NEO_LOG] [generate_enhanced_report] 使用未重排的原始数据: %d", len(state.get("web_research_result", [])))
         safe_results = [s for s in state.get("web_research_result", []) if isinstance(s, str)]
-        # logger.info("[NEO_LOG] [generate_enhanced_report] top2 web_research_result: %s", safe_results[:2])
-    
-    # Extract research plan information for comprehensive context
-    research_plan = state.get("research_plan", {})
-    research_objectives = research_plan.get("research_objectives", [])
-    research_methodology = research_plan.get("research_methodology", "")
     
     # Build comprehensive research process context
-    process_context = "\n\n\n# 研究过程记录\n"
-    
-    # Add research plan context
-    # if research_objectives or research_methodology:
-    #     process_context += "\n## 研究计划\n"
-    #     if research_objectives:
-    #         process_context += "**研究目标**:\n"
-    #         for obj in research_objectives:
-    #             process_context += f"• {obj}\n"
-    #         process_context += "\n"
-    #     if research_methodology:
-    #         process_context += "**研究方法**:\n"
-    #         process_context += f"{research_methodology}\n\n"
+    process_context = "\n\n"
     
     # Extract thinking process information for richer report generation
     thinking_process = state.get("thinking_process", {})
     
     if thinking_process:
-        process_context += "\n## 研究思考过程\n"
+        process_context += "\n## 研究过程记录\n"
         
         startup_thinking = thinking_process.get("startup_thinking", "")
         middle_thinking = thinking_process.get("middle_thinking", "")
@@ -3094,7 +3079,7 @@ def generate_enhanced_report(state: OverallState, config: RunnableConfig) -> Ove
             process_context += f"**中间阶段思考**: {middle_thinking}\n\n"
         
         if final_thinking:
-            process_context += f"**收尾阶段思考**: {final_thinking}\n\n"
+            process_context += f"**最终阶段思考**: {final_thinking}\n\n"
     
         logger.info("[NEO_LOG] [generate_enhanced_report] Processed thinking record: startup=%s, middle=%s, final=%s, context_length=%d chars", 
                    bool(startup_thinking), bool(middle_thinking), bool(final_thinking), len(process_context))
@@ -3102,14 +3087,18 @@ def generate_enhanced_report(state: OverallState, config: RunnableConfig) -> Ove
         logger.info("[NEO_LOG] [generate_enhanced_report] No thinking process records found, context_length=%d chars", len(process_context))
     
     # Combine research results with comprehensive process context
-    enhanced_summaries = _prepare_summaries(safe_results) + process_context
+    # logger.info("[NEO_LOG] [generate_enhanced_report] 组合研究结果与综合思考过程: %s", (safe_results))
+    safe_results_filtered = _prepare_summaries(safe_results, configurable.voyage_rerank_top_k)
+    # logger.info("[NEO_LOG] [generate_enhanced_report] 处理后研究结果: %s", safe_results_filtered[:100])
+    enhanced_summaries = "\n\n---\n\n" + safe_results_filtered + "\n\n---\n\n" + process_context
+    # enhanced_summaries = process_context
     
     # 获取用户个性化信息
     user_projects_text = state.get("user_projects_text", "")
     user_personalization_context = ""
     
     if user_projects_text:
-        user_personalization_context = f"""## 用户项目数据
+        user_personalization_context = f"""### 用户项目数据
     以下是用户的历史项目和专业背景信息，请在分析和推荐时参考：
 
     {user_projects_text}
@@ -3142,21 +3131,15 @@ def generate_enhanced_report(state: OverallState, config: RunnableConfig) -> Ove
         # Be resilient: if anything goes wrong, skip sanitization without failing the flow
         pass
     
-    # Process sources as before
-    unique_sources = []
-    for source in state.get("sources_gathered", []):
-        if source.get("short_url") and result.content and source["short_url"] in result.content:
-            result.content = result.content.replace(
-                source["short_url"], source["value"]
-            )
-            unique_sources.append(source)
-    
-    logger.info("[NEO_LOG] [generate_enhanced_report] END, RESULT PREVIEW: %s", result.content[:300])
+    logger.info("[NEO_LOG] [generate_enhanced_report] END, RESULT PREVIEW: %s", result.content[:2000])
     # logger.info("[NEO_LOG] [generate_enhanced_report] END, RESULT LENGTH: %d", len(result.content))
     
+    # 获取现有消息并追加新的AI回复
+    existing_messages = state.get("messages", [])
+    new_messages = existing_messages + [AIMessage(content=result.content)]
+    
     return {
-        "messages": [AIMessage(content=result.content)],
-        "sources_gathered": unique_sources,
+        "messages": new_messages,
         "reasoning_model": configurable.thinking_model,
         "previous_report": result.content,  # 设置previous_report以支持追问检测
     }
@@ -3289,7 +3272,7 @@ builder.add_edge("web_research", "reflection")
 builder.add_edge("rag_search", "reflection")
 builder.add_edge("mem_search", "reflection")
 builder.add_conditional_edges(
-    "reflection", route_after_reflection, ["thinking_middle_stage", "generate_enhanced_report"]
+    "reflection", route_after_reflection, ["thinking_middle_stage", "thinking_finalization_stage"]
 )
 
 # Both report paths end the flow

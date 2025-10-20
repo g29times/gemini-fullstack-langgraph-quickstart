@@ -389,7 +389,7 @@ class Configuration(BaseModel):
     )
     # VoyageAI 重排接口返回数量 (None for all)
     voyage_rerank_top_k: Optional[int] = Field(
-        default=10,
+        default=16,
         metadata={
             "description": "Number of top results to return from VoyageAI (None for all)."
         },
@@ -461,11 +461,11 @@ class Configuration(BaseModel):
     # These can be overridden via env vars:
     #   EFFORT_LOW_COMPLETION_THRESHOLD, EFFORT_MEDIUM_COMPLETION_THRESHOLD, EFFORT_HIGH_COMPLETION_THRESHOLD
     effort_low_completion_threshold: float = Field(
-        default=0.5,
+        default=0.7,
         metadata={"description": "Early finalization completion threshold for low effort (0-1)."},
     )
     effort_medium_completion_threshold: float = Field(
-        default=0.7,
+        default=0.8,
         metadata={"description": "Early finalization completion threshold for medium effort (0-1)."},
     )
     effort_high_completion_threshold: float = Field(

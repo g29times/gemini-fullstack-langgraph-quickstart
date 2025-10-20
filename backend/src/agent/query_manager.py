@@ -1,4 +1,5 @@
 import logging
+import math
 import re
 import os
 from dataclasses import dataclass
@@ -372,13 +373,16 @@ class QueryManager:
         # 处理追问场景
         if self.state.get("is_follow_up", False):
             messages = self.state.get("messages", [])
+            print(f"[DEBUG] QueryManager 追问场景 - messages: {len(messages) if messages else 0} 条消息")
             if messages:
                 latest_message = messages[-1]
                 research_topic = latest_message.content if hasattr(latest_message, 'content') else str(latest_message)
             else:
                 research_topic = "研究主题"
         else:
-            research_topic = get_research_topic(self.state.get("messages", []))
+            messages = self.state.get("messages", [])
+            print(f"[DEBUG] QueryManager 初始查询场景 - messages: {len(messages) if messages else 0} 条消息")
+            research_topic = get_research_topic(messages)
         
         # 获取推荐用户项目上下文（与_handle_planned_queries保持一致）
         projects, user_projects_context = self._recommend_user_projects()
@@ -401,6 +405,7 @@ class QueryManager:
             qid = self._register_query(query, "initial")
             # TODO mem
             self._update_personalized(qid, "rag", query)
+            self._update_personalized(qid, "web", query)
             query_ids.append(qid)
         
         return QueryResult(queries=queries, query_ids=query_ids)
@@ -424,15 +429,15 @@ class QueryManager:
             user_token = user_info.get("token") or user_info.get("api_key") or ""
         # logger.info("[NEO_LOG] [QueryManager] 获取推荐用户项目并进行个性化增强 %s", user_token)
         projects, user_projects_context = self._recommend_user_projects()
-        if user_projects_context:
-            research_topic = get_research_topic(self.state.get("messages", []))
-            # 使用LLM进行个性化增强 enhance_queries_with_personalization
-            enhanced_queries = self.personalization_manager.enhance_queries_with_personalization(
-                sanitized_queries, research_topic, user_projects_context
-            )
-            sanitized_queries = enhanced_queries
-        else:
-            logger.info("[NEO_LOG] [QueryManager] 推荐用户项目为空，不进行个性化增强")
+        # if user_projects_context:
+        #     research_topic = get_research_topic(self.state.get("messages", []))
+        #     # 使用LLM进行个性化增强 enhance_queries_with_personalization
+        #     enhanced_queries = self.personalization_manager.enhance_queries_with_personalization(
+        #         sanitized_queries, research_topic, user_projects_context
+        #     )
+        #     sanitized_queries = enhanced_queries
+        # else:
+        #     logger.info("[NEO_LOG] [QueryManager] 推荐用户项目为空，不进行个性化增强")
         
         backlog_ids = []
         if not self.state.get("planned_queue_ids"):
@@ -454,6 +459,7 @@ class QueryManager:
             query_ids.append(qid)
             # TODO mem
             self._update_personalized(qid, "rag", query)
+            self._update_personalized(qid, "web", query)
 
         # 初始化 cursor：记录本轮派发的数量（只在首次初始化时设置）
         cursor_value = self.state.get("planned_cursor", 0)
@@ -471,7 +477,7 @@ class QueryManager:
             metadata={"source": "planned", "projects": projects}
         )
    
-    # generate_queries 3 生成follow-up查询
+    # generate_queries 3 生成follow-up查询（将 reflection的 跟进问题 follow_up_queries 拆解为可搜索关键词）
     def _handle_followup_queries(self, follow_ups: list) -> QueryResult:
         """处理follow-up查询拆解"""
         llm = ChatGoogleGenerativeAI(
@@ -536,7 +542,7 @@ class QueryManager:
         
         # 获取推荐用户项目并进行个性化增强
         projects, user_projects_context = self._recommend_user_projects()
-        
+        # 将 reflection的 跟进问题 follow_up_queries 拆解为可搜索关键词
         formatted_prompt = generate_followup_query_instructions.format(
             research_topic=research_topic,
             knowledge_gap=self.state.get("knowledge_gap", ""),
@@ -565,19 +571,14 @@ class QueryManager:
             qid = self._register_query(query, "followup")
             query_ids.append(qid)
 
-            # RAG 通道仍然使用增强后 canonical 查询
+            # RAG 通道使用增强后 canonical 查询
             self._update_personalized(qid, "rag", query)
 
-            # Web 通道根据场景生成差异化文案
-            web_query = self._build_followup_web_query(
-                canonical=query,
-                idx=self.state.get("web_project_cursor", 0),
-                is_dialog_followup=is_dialog_followup,
-            )
-            if web_query:
-                self._update_personalized(qid, "web", web_query)
+            # Web 通道使用 canonical 查询（与新架构一致：Topic + Project 双队列）
+            # 不再使用个人项目名称，个人项目由 Project 队列独立处理
+            self._update_personalized(qid, "web", query)
 
-            # 记忆通道可以沿用 canonical，必要时可扩展定制逻辑
+            # 记忆通道沿用 canonical
             self._update_personalized(qid, "mem", query)
 
         # 保留planned_backlog以便后续轮次继续使用
@@ -587,6 +588,7 @@ class QueryManager:
         current_cursor = self.state.get("planned_cursor", 0)
         research_loop_count = self.state.get("research_loop_count", 0)
         
+        # followup
         if research_loop_count == 1:
             new_cursor = current_cursor
             logger.info("[NEO_LOG] [QueryManager] 第一次 Followup，保持 cursor=%d，由 _preprocess_queries 自然补齐", current_cursor)
@@ -678,42 +680,41 @@ class QueryManager:
         
     # 查询调度 阶段一：合并状态、去重、域名聚合
     def _preprocess_queries(self, queries: list, query_ids: list[int] | None = None) -> tuple[list, list[int]]:
-        """查询预处理：合并状态、去重、补齐、域名聚合（兼容旧逻辑）"""
-        # logger.info("[NEO_LOG] [QueryManager] 调度阶段一开始：%s", queries)
+        """查询预处理：合并状态、去重、补齐、域名聚合（兼容旧逻辑）
+        
+        优先级策略：followup > plan_queries
+        - 优先使用当前传入的 query_ids（通常是 follow-up 查询）
+        - 只有在 follow-up 不足时，才从 planned_queries 补齐
+        """
         
         pending_ids = list(query_ids or [])
         
         planned_ids = self.state.get("planned_queue_ids") or []
-        planned_cursor = self.state.get("planned_cursor", 0)  # 新增：读取 cursor
-        # 添加调试日志
-        # logger.info("[NEO_LOG] [QueryManager] DEBUG: state keys = %s", list(self.state.keys()))
+        planned_cursor = self.state.get("planned_cursor", 0)
     
         dispatched_pairs = set(tuple(x) for x in self.state.get("dispatched_pairs") or [])
         
-        # 过滤掉已派发的 pending_ids
+        # 过滤掉已派发的 pending_ids（follow-up 查询）
         if pending_ids:
             pending_ids = [qid for qid in pending_ids if (qid, "rag") not in dispatched_pairs]
-            # logger.info("[NEO_LOG] [QueryManager] 当前轮次传入 %d 个查询ID，过滤后剩余 %d 个", 
-            #         len(query_ids or []), len(pending_ids))
         
-        remaining_planned = planned_ids[planned_cursor:]  # 从 cursor 位置开始取
+        remaining_planned = planned_ids[planned_cursor:]
         
-        logger.info("[NEO_LOG] [QueryManager] 队列状态: pending=%d, planned_pool=%d (cursor=%d, 剩余=%d)", 
+        logger.info("[NEO_LOG] [QueryManager] 队列状态: followup=%d, planned_pool=%d (cursor=%d, 剩余=%d)", 
                 len(pending_ids), len(planned_ids), planned_cursor, len(remaining_planned))
-        print(f"[NEO_LOG] [QueryManager] 队列状态: pending={len(pending_ids)}, planned_pool={len(planned_ids)} (cursor={planned_cursor}, 剩余={len(remaining_planned)})")
+        print(f"[NEO_LOG] [QueryManager] 队列状态: followup={len(pending_ids)}, planned_pool={len(planned_ids)} (cursor={planned_cursor}, 剩余={len(remaining_planned)})")
 
         max_parallel = self.config.max_parallel_queries
 
-        # 从 planned 补齐到 max_parallel
+        # 优先级策略：只有在 follow-up 不足时，才从 planned 补齐
         fill_count = max_parallel - len(pending_ids)
         if fill_count > 0 and remaining_planned:
             take = remaining_planned[:fill_count]
             pending_ids.extend(take)
-            # logger.info("[NEO_LOG] [QueryManager] 从 planned 补齐: %d 个查询 (IDs: %s, 总额度=%d)", 
-            #         len(take), take, max_parallel)
+            logger.info("[NEO_LOG] [QueryManager] Follow-up不足，从planned补齐: %d个查询", len(take))
         
-        logger.info("[NEO_LOG] [QueryManager] 最终 pending_ids: %s (总数=%d)", pending_ids, len(pending_ids))
-        print(f"[NEO_LOG] [QueryManager] 最终 pending_ids: {pending_ids} (总数={len(pending_ids)})")
+        logger.info("[NEO_LOG] [QueryManager] 最终调度: followup优先, 总数=%d, IDs=%s", len(pending_ids), pending_ids)
+        print(f"[NEO_LOG] [QueryManager] 最终调度: followup优先, 总数={len(pending_ids)}, IDs={pending_ids}")
 
         # 透传回 state（planned 保持不变）
         self.state["planned_queue_ids"] = planned_ids
@@ -813,16 +814,43 @@ class QueryManager:
 
     # 查询调度 阶段二：内部方法
     def _apply_scheduling_strategy_pairs(self, pairs: list[tuple[int, str]]) -> list[tuple[int, str]]:
-        queries_only = [q for _, q in pairs]
-        reordered_queries = self._apply_scheduling_strategy(queries_only)
-        lookup = {q: [] for q in queries_only}
-        for idx, (qid, qr) in enumerate(pairs):
-            lookup[qr].append((idx, qid))
-        result = []
-        for qr in reordered_queries:
-            if lookup[qr]:
-                idx, qid = lookup[qr].pop(0)
-                result.append((qid, qr))
+        """应用调度策略，同时保持 follow-up 查询的优先级"""
+        if not pairs:
+            return pairs
+        
+        # 分离 follow-up 和 planned 查询
+        registry = self.state.get("query_registry") or {}
+        followup_pairs = []
+        planned_pairs = []
+        
+        for qid, query in pairs:
+            source = registry.get(qid, {}).get("source", "unknown")
+            if source == "followup":
+                followup_pairs.append((qid, query))
+            else:
+                planned_pairs.append((qid, query))
+        
+        # 对 planned 查询应用调度策略
+        if planned_pairs:
+            planned_queries = [q for _, q in planned_pairs]
+            reordered_planned_queries = self._apply_scheduling_strategy(planned_queries)
+            lookup = {q: [] for q in planned_queries}
+            for qid, qr in planned_pairs:
+                lookup[qr].append(qid)
+            reordered_planned_pairs = []
+            for qr in reordered_planned_queries:
+                if lookup[qr]:
+                    qid = lookup[qr].pop(0)
+                    reordered_planned_pairs.append((qid, qr))
+        else:
+            reordered_planned_pairs = []
+        
+        # follow-up 查询保持原顺序，放在最前面
+        result = followup_pairs + reordered_planned_pairs
+        
+        logger.info("[NEO_LOG] [QueryManager] 调度策略排序: followup=%d (保持原序), planned=%d (策略排序)", 
+                   len(followup_pairs), len(reordered_planned_pairs))
+        
         return result
     
     # 查询调度 阶段二：内部方法 - round_robin等调度策略
@@ -864,8 +892,16 @@ class QueryManager:
                 # 若backlog仍有剩余，至少提升一条planned到前部
                 try:
                     backlog = list(self.state.get("planned_backlog") or [])
-                    dispatched_list = list(self.state.get("dispatched_queries") or [])
-                    dispatched_norms = {normalize_query(x) for x in dispatched_list}
+                    # 使用 dispatched_pairs 和 registry 重建已派发查询集合
+                    dispatched_pairs = set(tuple(x) for x in self.state.get("dispatched_pairs") or [])
+                    registry = self.state.get("query_registry") or {}
+                    dispatched_norms = set()
+                    for qid, channel in dispatched_pairs:
+                        if qid in registry:
+                            canonical = registry[qid].get("canonical", "")
+                            if canonical:
+                                dispatched_norms.add(normalize_query(canonical))
+                    
                     remaining = [q for q in backlog if normalize_query(q) not in dispatched_norms]
                     if remaining:
                         remaining_norms = {normalize_query(q) for q in remaining}
@@ -1024,11 +1060,39 @@ class QueryManager:
         intent = self.state.get("intent", {}) or {}
         mem_only = bool(intent.get("mem_only"))
 
-        # 已派发记录：ID 级别与字符串级别双保险
+        # 已派发记录：使用 (qid, channel) 对进行去重
+        # 关键设计：每个通道独立去重，不跨通道共享
         dispatched_pairs = {
             tuple(item) for item in (self.state.get("dispatched_pairs") or []) if item and item[0] is not None
         }
-        dispatched_strings = {normalize_query(s) for s in (self.state.get("dispatched_queries") or [])}
+        
+        # 为无 ID 的老路径维护通道级别的去重集合
+        # 格式：{"rag": {query1, query2}, "web": {query3, query4}, "mem": {query5}}
+        dispatched_by_channel = {}
+        
+        # 从 dispatched_pairs 中提取有 ID 的查询
+        for qid, channel in dispatched_pairs:
+            channel_key = channel.split("_")[0] if "_" in channel else channel
+            if channel_key not in dispatched_by_channel:
+                dispatched_by_channel[channel_key] = set()
+            # 从 registry 获取该 qid 在该通道的查询内容
+            registry = self.state.get("query_registry") or {}
+            if qid in registry:
+                personalized = registry[qid].get("personalized", {})
+                query_text = personalized.get(channel_key) or registry[qid].get("canonical", "")
+                if query_text:
+                    dispatched_by_channel[channel_key].add(normalize_query(query_text))
+        
+        # 从 dispatched_queries 中提取无 ID 的查询（主要是 Web Project）
+        # 注意：dispatched_queries 包含所有已派发的查询，不区分通道
+        # 为了安全，我们将其添加到所有通道的去重集合中
+        dispatched_queries = self.state.get("dispatched_queries") or []
+        for query in dispatched_queries:
+            normalized = normalize_query(query)
+            # 将无 ID 的查询添加到 web 通道（主要用于 Project 去重）
+            if "web" not in dispatched_by_channel:
+                dispatched_by_channel["web"] = set()
+            dispatched_by_channel["web"].add(normalized)
 
         # 组装任务通道（不包含 web_research）
         if mem_only:
@@ -1043,7 +1107,14 @@ class QueryManager:
         # 准备 Web 通道的项目名称池
         user_project_names = self._get_user_project_names()
         project_cycle_len = len(user_project_names)
-        web_project_cursor = self.state.get("web_project_cursor", 0)
+        
+        # 读取游标（注意：由于使用 operator.add，这里读取的是累加后的值）
+        raw_cursor = self.state.get("web_project_cursor")
+        web_project_cursor = raw_cursor if raw_cursor is not None else 0
+        
+        logger.info("[NEO_LOG] [QueryManager] Web Project 初始化: raw_cursor=%s, cursor=%d, 总池=%d, dispatched_web_count=%d", 
+                   raw_cursor, web_project_cursor, project_cycle_len, len(dispatched_by_channel.get("web", set())))
+        print(f"[NEO_LOG] [QueryManager] Web Project 初始化: raw_cursor={raw_cursor}, cursor={web_project_cursor}, 总池={project_cycle_len}, dispatched_web_count={len(dispatched_by_channel.get('web', set()))}")
 
         sends: list[Send] = []
         
@@ -1051,14 +1122,18 @@ class QueryManager:
         for idx, query in enumerate(queries):
             qid = query_ids[idx] if idx < len(query_ids) else None
 
-            # 无 ID 的老路径：用字符串去重
-            if qid is None and normalize_query(query) in dispatched_strings:
-                continue
-
             for channel in task_channels:
                 # ID 模式：避免重复派发到同一通道
                 if qid is not None and (qid, channel) in dispatched_pairs:
                     continue
+                
+                # 无 ID 的老路径：按通道独立去重
+                channel_key = channel.split("_")[0] if channel.endswith("_search") else channel
+                if qid is None:
+                    if channel_key not in dispatched_by_channel:
+                        dispatched_by_channel[channel_key] = set()
+                    if normalize_query(query) in dispatched_by_channel[channel_key]:
+                        continue
 
                 # rag / mem 默认沿用 registry 中的个性化（若无则退回增强查询）
                 value = self._materialize_channel_query(qid, query, channel)
@@ -1074,57 +1149,198 @@ class QueryManager:
                     if research_plan:
                         payload["query_region"] = research_plan.get("suggested_region")
                         payload["query_project_type"] = research_plan.get("suggested_project_type")
+                    
+                    # 传递用户消息历史到 rag_search
+                    user_messages = self.state.get("messages", [])
+                    if user_messages:
+                        payload["messages"] = user_messages
 
                 sends.append(Send(channel, payload))
 
                 # 更新派发痕迹
+                channel_key = channel.split("_")[0] if channel.endswith("_search") else channel
                 if qid is not None:
-                    channel_key = channel.split("_")[0] if channel.endswith("_search") else channel
                     self._update_personalized(qid, channel_key, value)
                     dispatched_pairs.add((qid, channel))
                 else:
-                    dispatched_strings.add(normalize_query(value))
+                    # 无 ID 模式：更新通道级去重集合
+                    if channel_key not in dispatched_by_channel:
+                        dispatched_by_channel[channel_key] = set()
+                    dispatched_by_channel[channel_key].add(normalize_query(value))
 
-        # ==================== 第二阶段：独立派发 WEB 通道 ====================
+        # ==================== 第二阶段：双队列派发 WEB 通道（Topic + Project） ====================
         if not mem_only:
-            # 判断 Web 项目池是否耗尽
+            max_web_quota = self.config.max_parallel_queries
+            research_plan = self.state.get("research_plan") or {}
+            suggested_project_type = research_plan.get("suggested_project_type", "")
+            is_tender_oriented = suggested_project_type in {"采购", "工程"}
+            
+            if is_tender_oriented:
+                topic_quota = math.ceil(max_web_quota / 2)
+                project_quota = math.floor(max_web_quota / 2)
+            else:
+                topic_quota = max_web_quota
+                project_quota = 0
+            
+            logger.info("[NEO_LOG] [QueryManager] Web 派发策略: tender=%s, topic_quota=%d, project_quota=%d", 
+                       is_tender_oriented, topic_quota, project_quota)
+            
+            # 构建 Topic 候选队列（优先级：followup > plan_queries）
+            # 关键：直接使用 query_ids 的顺序（已排序），而不是 queries 的顺序
+            # 去重策略：仅在 WEB 通道内部去重，不跨通道
+            topic_candidates = []
+            registry = self.state.get("query_registry") or {}
+            web_dispatched = dispatched_by_channel.get("web", set())
+            
+            # logger.info("[NEO_LOG] [QueryManager] Web Topic构建: query_ids=%s, web_dispatched_count=%d", 
+            #            query_ids, len(web_dispatched))
+            # print(f"[NEO_LOG] [QueryManager] Web Topic构建: query_ids={query_ids}, web_dispatched_count={len(web_dispatched)}")
+            
+            for qid in query_ids:
+                if qid is None:
+                    continue
+                
+                # 检查是否已在 WEB 通道派发过
+                if (qid, "web_research") in dispatched_pairs:
+                    continue
+                
+                record = registry.get(qid, {})
+                query_source = record.get("source", "unknown")
+                web_query = self._materialize_channel_query(qid, "", "web")
+                is_web_dispatched = normalize_query(web_query) in web_dispatched if web_query else False
+                
+                # 添加到候选队列（仅在 WEB 通道内去重）
+                if web_query and not is_web_dispatched:
+                    topic_candidates.append((qid, web_query, query_source))
+
+            topic_dispatched = 0
+            followup_count = 0
+            planned_count = 0
+            for item in topic_candidates[:topic_quota]:
+                qid, web_query, query_source = item if len(item) == 3 else (item[0], item[1], "unknown")
+                payload = {"search_query": web_query}
+                if qid is not None:
+                    payload["id"] = str(qid)
+                sends.append(Send("web_research", payload))
+                # 更新 WEB 通道去重集合
+                if "web" not in dispatched_by_channel:
+                    dispatched_by_channel["web"] = set()
+                dispatched_by_channel["web"].add(normalize_query(web_query))
+                if qid is not None:
+                    dispatched_pairs.add((qid, "web_research"))
+                topic_dispatched += 1
+                if query_source == "followup":
+                    followup_count += 1
+                else:
+                    planned_count += 1
+            
+            project_dispatched = 0
             web_exhausted = (web_project_cursor >= project_cycle_len) if project_cycle_len > 0 else True
             
-            if web_exhausted:
-                logger.info("[NEO_LOG] [QueryManager] Web 项目池已耗尽 (cursor=%d, total=%d)", 
-                        web_project_cursor, project_cycle_len)
-                print(f"[NEO_LOG] [QueryManager] Web 项目池已耗尽 (cursor={web_project_cursor}, total={project_cycle_len})")
-            else:
-                # 本轮最多派发的 Web 查询数量
-                max_parallel_dispatches = self.config.max_parallel_queries
-                web_dispatches_count = 0
-                
-                # 从游标位置开始派发用户项目
-                while web_project_cursor < project_cycle_len and web_dispatches_count < max_parallel_dispatches:
+            # 计算实际的起始游标（基于已派发的项目数量）
+            actual_start_cursor = len(dispatched_by_channel.get("web", set())) - len(topic_candidates)
+            actual_start_cursor = max(0, actual_start_cursor)  # 确保不为负数
+            
+            # logger.info("[NEO_LOG] [QueryManager] Project 派发开始: 实际起始=%d (基于已派发%d个Web查询), quota=%d", 
+            #            actual_start_cursor, len(dispatched_by_channel.get("web", set())), project_quota)
+            # print(f"[NEO_LOG] [QueryManager] Project 派发开始: 实际起始={actual_start_cursor} (基于已派发{len(dispatched_by_channel.get('web', set()))}个Web查询), quota={project_quota}")
+            
+            if not web_exhausted and project_quota > 0:
+                initial_cursor = web_project_cursor
+                while web_project_cursor < project_cycle_len and project_dispatched < project_quota:
                     project_name = user_project_names[web_project_cursor]
+                    # 检查是否已在 WEB 通道派发过
+                    if "web" not in dispatched_by_channel:
+                        dispatched_by_channel["web"] = set()
                     
-                    # 构造 Web 查询 payload
-                    payload = {"search_query": project_name}
+                    is_dispatched = normalize_query(project_name) in dispatched_by_channel["web"]
+                    # logger.info("[NEO_LOG] [QueryManager] 检查项目[%d]: '%s', 已派发=%s", 
+                    #            web_project_cursor, project_name, is_dispatched)
+                    # print(f"[NEO_LOG] [QueryManager] 检查项目[{web_project_cursor}]: '{project_name}', 已派发={is_dispatched}")
                     
-                    # 注意：Web 通道不使用 query_id，因为它独立于查询词
-                    sends.append(Send("web_research", payload))
-                    dispatched_strings.add(normalize_query(project_name))
-                    
-                    web_project_cursor += 1
-                    web_dispatches_count += 1
+                    if not is_dispatched:
+                        payload = {"search_query": project_name}
+                        sends.append(Send("web_research", payload))
+                        dispatched_by_channel["web"].add(normalize_query(project_name))
+                        project_dispatched += 1
+                        web_project_cursor += 1  # 只在成功派发时推进游标
+                        # logger.info("[NEO_LOG] [QueryManager] 派发成功: dispatched=%d, cursor=%d", 
+                        #            project_dispatched, web_project_cursor)
+                        # print(f"[NEO_LOG] [QueryManager] 派发成功: dispatched={project_dispatched}, cursor={web_project_cursor}")
+                    else:
+                        # 项目已派发过，跳过并推进游标
+                        web_project_cursor += 1
+                        # logger.info("[NEO_LOG] [QueryManager] 跳过已派发: cursor=%d", web_project_cursor)
+                        # print(f"[NEO_LOG] [QueryManager] 跳过已派发: cursor={web_project_cursor}")
                 
-                logger.info("[NEO_LOG] [QueryManager] Web 本轮派发: %d 个项目 (cursor: %d -> %d, 总池: %d)", 
-                        web_dispatches_count, 
-                        web_project_cursor - web_dispatches_count,
-                        web_project_cursor, 
-                        project_cycle_len)
-                print(f"[NEO_LOG] [QueryManager] Web 本轮派发: {web_dispatches_count} 个项目 (cursor: {web_project_cursor - web_dispatches_count} -> {web_project_cursor}, 总池: {project_cycle_len})")
+                # logger.info("[NEO_LOG] [QueryManager] Project 派发结束: 实际范围 %d -> %d, 本轮派发=%d", 
+                #            actual_start_cursor, actual_start_cursor + project_dispatched, project_dispatched)
+                # print(f"[NEO_LOG] [QueryManager] Project 派发结束: 实际范围 {actual_start_cursor} -> {actual_start_cursor + project_dispatched}, 本轮派发={project_dispatched}")
+            
+            remaining_quota = max_web_quota - topic_dispatched - project_dispatched
+            if remaining_quota > 0 and topic_dispatched < len(topic_candidates):
+                for item in topic_candidates[topic_quota:topic_quota + remaining_quota]:
+                    qid, web_query, query_source = item if len(item) == 3 else (item[0], item[1], "unknown")
+                    # 检查是否已在 WEB 通道派发过
+                    if "web" not in dispatched_by_channel:
+                        dispatched_by_channel["web"] = set()
+                    if normalize_query(web_query) not in dispatched_by_channel["web"]:
+                        payload = {"search_query": web_query}
+                        if qid is not None:
+                            payload["id"] = str(qid)
+                        sends.append(Send("web_research", payload))
+                        dispatched_by_channel["web"].add(normalize_query(web_query))
+                        if qid is not None:
+                            dispatched_pairs.add((qid, "web_research"))
+                        topic_dispatched += 1
+                        if query_source == "followup":
+                            followup_count += 1
+                        else:
+                            planned_count += 1
+            
+            # 计算实际的项目派发范围（基于去重后的结果）
+            actual_project_end = actual_start_cursor + project_dispatched
+            logger.info("[NEO_LOG] [QueryManager] Web 本轮派发: Topic=%d (followup=%d, planned=%d), Project=%d (实际范围: %d -> %d, 总池: %d)", 
+                       topic_dispatched, followup_count, planned_count, project_dispatched, 
+                       actual_start_cursor, actual_project_end, project_cycle_len)
+            print(f"[NEO_LOG] [QueryManager] Web 本轮派发: Topic={topic_dispatched} (followup={followup_count}, planned={planned_count}), Project={project_dispatched} (实际范围: {actual_start_cursor} -> {actual_project_end}, 总池: {project_cycle_len})")
 
-        # 更新 state
+        # 准备状态更新（通过返回值回写到主状态）
+        final_cursor = web_project_cursor if project_cycle_len else 0
+        
+        # logger.info("[NEO_LOG] [QueryManager] 准备状态更新: web_project_cursor=%d (project_cycle_len=%d)", 
+        #            final_cursor, project_cycle_len)
+        # print(f"[NEO_LOG] [QueryManager] 准备状态更新: web_project_cursor={final_cursor} (project_cycle_len={project_cycle_len})")
+        
+        # 重建 dispatched_queries 用于向下兼容（route_after_reflection 等地方需要）
+        # 包含：1) 有 ID 的查询的 canonical  2) 无 ID 的 Web Project
+        registry = self.state.get("query_registry") or {}
+        dispatched_canonical_set = set()
+        
+        # 添加有 ID 的查询
+        for qid, channel in dispatched_pairs:
+            if qid in registry:
+                canonical = registry[qid].get("canonical", "")
+                if canonical:
+                    dispatched_canonical_set.add(canonical)
+        
+        # 添加无 ID 的 Web Project（从 dispatched_by_channel["web"] 中提取）
+        if "web" in dispatched_by_channel:
+            for normalized_query in dispatched_by_channel["web"]:
+                # 注意：这里的 normalized_query 已经是标准化的，我们需要原始形式
+                # 但由于我们只用于去重，标准化形式也可以
+                dispatched_canonical_set.add(normalized_query)
+        
+        dispatched_queries_list = list(dispatched_canonical_set)
+        
+        # 保存状态更新到 self.state（供 route_after_generate_query 读取）
         self.state["dispatched_pairs"] = list(dispatched_pairs)
-        self.state["dispatched_queries"] = list(dispatched_strings)
-        self.state["current_query_ids"] = [qid for qid in query_ids if qid is not None]
-        self.state["web_project_cursor"] = web_project_cursor if project_cycle_len else 0
-
+        self.state["dispatched_queries"] = dispatched_queries_list
+        self.state["web_project_cursor"] = final_cursor
+        
+        logger.info("[NEO_LOG] [QueryManager] 保存状态更新: dispatched_pairs=%d, dispatched_queries=%d, web_project_cursor=%d", 
+                   len(dispatched_pairs), len(dispatched_queries_list), final_cursor)
+        print(f"[NEO_LOG] [QueryManager] 保存状态更新: dispatched_pairs={len(dispatched_pairs)}, dispatched_queries={len(dispatched_queries_list)}, web_project_cursor={final_cursor}")
+        
         return sends
 
