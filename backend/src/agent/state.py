@@ -17,6 +17,7 @@ class OverallState(TypedDict):
     max_research_loops: int
     research_loop_count: int
     reasoning_model: str
+    prompt: str
 
     # 意图识别 Fields for intent routing (optional and set early in the flow)
     intent: dict | None

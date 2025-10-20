@@ -81,8 +81,8 @@ Examples:
 - "What are the latest features of GitHub?" → entity: "GitHub", attribute: "latest features", intent_label: "DIRECT_LOOKUP"
 
 - "上次我们聊了什么？" → entity: "我们", attribute: "聊", intent_label: "RESEARCH", mem_only: true
-- "最近上海有哪些酒店项目机会" → entity: "上海", attribute: "酒店项目机会", intent_label: "RESEARCH", mem_only: false
-- "给我推荐两个招投标项目" → entity: "用户", attribute: "招投标项目", intent_label: "RESEARCH", mem_only: false
+- "最近上海有哪些酒店项目机会" → entity: "酒店", attribute: "项目机会", intent_label: "RESEARCH", mem_only: false
+- "给我推荐两个招投标项目" → entity: "招投标", attribute: "项目", intent_label: "RESEARCH", mem_only: false
 - "Analysis of blockchain technology trends" → entity: "blockchain technology", attribute: "trends", intent_label: "RESEARCH", mem_only: false
 - "基于我们上次的讨论，推荐最新的技术方案" → entity: "上次讨论", attribute: "推荐技术方案", intent_label: "RESEARCH", mem_only: false
 
@@ -302,6 +302,9 @@ research_plan_instructions = """你是一位专业的全球化、多语种研究
 - 推断地区和项目类型：suggested_region 和 suggested_project_type
 
 任务指导：
+- 室内设计词典：
+  "CCD": "/Cheng Chung Design/郑中设计 全球知名室内设计公司"
+  "犀照科技": "深圳市犀照网络科技有限公司 CCD全资子公司"
 - 数量：生成研究目标和查询词的多少取决于用户问题的复杂程度
   - 例如：用户问“上次咱们聊了什么？”，研究目标："回忆上次的对话内容"，查询词：["上次对话内容", "最近聊天记录"]
 - 语言：research_objectives 和 research_methodology 优先使用与用户相同的语言（但保留专业术语）
@@ -562,21 +565,27 @@ thinking_middle_instructions = """你正处于研究的中间阶段，
   #   * 例如，研究主题是“帮我查询一下犀照科技的AI研究进展”，主题中，时间、地点不明，而数据中出现“深圳犀照科技”，“杭州犀照科技”，你综合数据后发现，深圳犀照科技有AI业务，而杭州犀照科技则是与本研究无关的噪声数据（搜索引擎结果偏差），则保留深圳犀照科技的数据，删除杭州犀照科技的数据。
   # * 数据完整性：检查数据的完整性，剔除不完整或不准确、不确定的数据。
   # * 数据一致性：检查多个数据源的数据一致性，采用更高可信度的来源，将研究主题的语言国的数据作为主要数据来源，其他语种的数据可作为补充
-thinking_finalization_instructions = """你是一个数据研究员，请围绕研究主题，给出数据清洗指南。
+# 研究目标：{research_objectives}
+# 研究方法：{research_methodology}
+# 思考过程：{thinking_process}
+thinking_finalization_instructions = """你是一个数据研究员，请围绕问题，给出数据初筛结果。
 
-# 清洗维度
-  - 清洗范围
-    仅清洗有id编号的数据，这些数据是从系统中初步查询的，可能不准确，需要进行清洗
-    保留无id编号的数据，这些数据包括web搜索的结果和用户记忆
-  - 剔除数据
-    - 时间过期、失效的数据
-    - 参照地区字典，筛出地点不匹配的数据
-    - 信息不匹配、不完整、不准确、不确定、不符合基本常识的数据
-    - 清洗掉来自 https://vertexaisearch.cloud.google.com/ 的项目数据（比如 海奕酒店项目设计招标），但非项目数据（如百科或新闻）可以保留
+# 清洗标准
+  - 保留没有id编号的数据，包括web搜索的结果(通常是一段文字）和用户记忆
+  - 对于有id编号的项目数据，检查（地点符合、时间有效、材料相关）
+    匹配要素：
+      - 地点符合：参照地区字典
+      - 时间有效：数据时间未过期
+      - 材料相关：数据内容与问题相关
+    不匹配：
+      - 与问题无关，信息不完整、不准确、不确定、不符合基本常识的数据
   - 去重数据
     - 数据重复：多条一摸一样的信源，保留一条即可
     - 实体重复：数据中如出现多个可能重名或重复的实体名称，需逐个明确其与问题的关系，排除与问题无关的实体
-  - 在 final_thinking 部分输出数据清洗指南
+  - 在 final_thinking 部分输出数据初筛结果
+    - 格式：只需要输出数据的前几个字（后面的可用...省略），不需要输出数据的全部内容
+    - 格式：数据 - （数据分析），如：“深圳大亚湾希尔顿酒店... - （时间、地点都符合）”
+    - 每条数据都要分析，不要遗漏也不要重复
 
 # 地区字典
   "华北地区": [
@@ -659,36 +668,34 @@ thinking_finalization_instructions = """你是一个数据研究员，请围绕�
 # 输出格式（JSON）：
 {{
     "stage_name": "final_thinking",
-    "final_thinking": "数据清洗指南"
+    "final_thinking": "数据初筛结果"
 }}
 
 # 示例：
-  研究主题：最近山西有什么项目？
-  收集到的数据：
+  示例问题：最近广东有什么涉及到玻璃材料的项目？当前日期：2025-10-15
+  示例数据：
     ---
-
-    13086. 大同古城太平楼南侧11处院落装修改造项目设计(1标段)招标公告 | 2025-10-23 09:30:00 | http://www.ggzy.gov.cn/information/html/a/140000/0101/202509/26/0014c0f47e2b65f64b32b5a57195c23cc094.shtml | 项目概要：
-    1.项目名称：大同古城太平楼南侧11处院落装修改造项目设计(1标段)
-    2.招标截止时间：2025102309:30:00
-    3.地址：大同古城太平楼南侧，东至李怀角、南抵狮子街；大同市平城区恒安街与文兴路交汇处西南角金贸国际中心18层
-    4.项目概况：将现有11处院落改造装修成酒店，总改造面积2701.45㎡。
+    藤桥亚洲海湾大酒店改造项目（设计“评定分离”）	2025-09-28 09:00:00
+    清远北江中心改造装修工程项目设计施工总承包（EPC）招标公告 2025-09-30 09:30:00
+    深圳大亚湾希尔顿酒店升级改造建设项目（施工）	2025-09-23 10:30:00 
+    广东旅游地产开发：趋势、政策与案例 广东省在旅游地产开发领域展现出蓬勃的活力和多元化的发展趋势...
+    惠州某道路施工项目 2025-11-01 09:30:00
+    深圳大亚湾希尔顿酒店升级改造建设项目（施工）	2025-09-23 10:30:00 
     ---
-
-    15949. 粤建科·中山数智荟项目二区工程设计施工总承包（EPC）澄清文件（二） | 2025-10-31 09:30:00 | http://www.ggzy.gov.cn/information/html/a/440000/0101/202510/15/00444c45df160dde46ef93a1eda4804120d8.shtml | 项目概要：1.项目名称：粤建科·中山数智荟项目二区工程设计施工总承包（EPC）...
-    
-    ---
-  清洗：剔除数据15949，保留数据13086，因为13086是山西的项目，15949不是山西的项目
-  输出：{{
+  示例输出（每条数据都要分析，不遗漏也不重复）：{{
     "stage_name": "final_thinking",
-    "final_thinking": "建议剔除数据15949，保留数据13086，因为13086是山西的项目，15949不是山西的项目"
+    "final_thinking": "
+    1. 藤桥亚洲海湾大酒店...（地点温州，不符合广东）
+    2. 清远北江中心改造...(09-30 时间过期失效)
+    3. 深圳大亚湾希尔顿酒店...（时间、地点都符合，酒店可能用到玻璃材料）
+    4. 广东旅游地产开发(web搜索结果，可供参考)
+    5. 惠州某道路施工项目（道路施工与玻璃无关）
+    6. 深圳大亚湾希尔顿酒店...（重复数据，删除）"
   }}
 
 当前日期：{current_date}
-研究主题：{research_topic}
-# 研究目标：{research_objectives}
-# 研究方法：{research_methodology}
-# 思考过程：{thinking_process}
-# 收集到的信息和数据：{summaries}
+问题：{research_topic}
+收集到的数据：{summaries}
 """
 
 

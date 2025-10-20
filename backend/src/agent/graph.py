@@ -1088,7 +1088,7 @@ def generate_research_plan(state: OverallState, config: RunnableConfig) -> Overa
         research_topic=get_research_topic(state.get("messages", [])),
     )
     
-    # logger.info("[NEO_LOG] [generate_research_plan] prompt => %s", formatted_prompt)
+    logger.info("[NEO_LOG] [generate_research_plan] prompt => %s", formatted_prompt)
     # 优先使用结构化输出；失败则回退到非结构化并解析；最终提供安全默认
     plan_dict = None
     try:
@@ -1138,6 +1138,7 @@ def generate_research_plan(state: OverallState, config: RunnableConfig) -> Overa
     
     # 保留intent信息，确保research_channels正确传递
     result = {
+        "prompt": formatted_prompt,
         "research_plan": plan_dict,
         "plan_approved": False,
         "reasoning_model": configurable.query_generator_model,
@@ -1918,13 +1919,13 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
     # First attempt with primary (possibly translated) query
     start_time = time.time()
     try:
-        logger.debug("[NEO_LOG] [web_search] Starting primary query: '%s' at %s", primary_query, time.strftime('%H:%M:%S'))
+        # logger.debug("[NEO_LOG] [web_search] Starting primary query: '%s' at %s", primary_query, time.strftime('%H:%M:%S'))
         sources_gathered, modified_text, cits = _run_and_extract(primary_query)
         elapsed = time.time() - start_time
-        logger.debug("[NEO_LOG] [web_search] Primary query: '%s' completed in %.2fs: %d sources, %d chars", 
-                   primary_query, elapsed, len(sources_gathered), len(modified_text))
-        logger.debug("[NEO_LOG] [web_search] Web搜索响应文本预览(200字): %s", 
-                    (modified_text or "")[:200] + ("..." if len(modified_text or "") > 200 else ""))
+        # logger.debug("[NEO_LOG] [web_search] Primary query: '%s' completed in %.2fs: %d sources, %d chars", 
+        #            primary_query, elapsed, len(sources_gathered), len(modified_text))
+        # logger.debug("[NEO_LOG] [web_search] Web搜索响应文本预览(200字): %s", 
+        #             (modified_text or "")[:200] + ("..." if len(modified_text or "") > 200 else ""))
     except Exception as e:
         # 兜底：任何未预期异常都不应中断流程
         elapsed = time.time() - start_time
@@ -1939,12 +1940,12 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
     # Retry with secondary (original) if no sources gathered
     if not sources_gathered and secondary_query:
         retry_start = time.time()
-        logger.debug("[NEO_LOG] [web_search] Starting secondary query: '%s' at %s", secondary_query, time.strftime('%H:%M:%S'))
+        # logger.debug("[NEO_LOG] [web_search] Starting secondary query: '%s' at %s", secondary_query, time.strftime('%H:%M:%S'))
         try:
             sources_gathered, modified_text, cits = _run_and_extract(secondary_query)
             retry_elapsed = time.time() - retry_start
-            logger.debug("[NEO_LOG] [web_search] Secondary query: '%s' completed in %.2fs: %d sources, %d chars", 
-                       secondary_query, retry_elapsed, len(sources_gathered), len(modified_text))
+            # logger.debug("[NEO_LOG] [web_search] Secondary query: '%s' completed in %.2fs: %d sources, %d chars", 
+            #            secondary_query, retry_elapsed, len(sources_gathered), len(modified_text))
         except Exception as e:
             retry_elapsed = time.time() - retry_start
             error_msg = str(e)
@@ -2011,7 +2012,7 @@ def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
         # if messages_content:
             # print(f"[DEBUG] rag_search - 消息内容数量: {len(messages_content)}")
             # print(f"[DEBUG] rag_search - 最后一条消息: {messages_content[-1][:100]}...")
-        logger.info("[NEO_LOG] [rag_search] 用户消息获取成功: %d 条消息", len(messages_content))
+        # logger.info("[NEO_LOG] [rag_search] 用户消息获取成功: %d 条消息", len(messages_content))
     
     _node_start = time.time()
     # logger.info("[NEO_LOG] [rag_search] RAG查询 START, id=%s: '%s'", state.get("id", "N/A"), original_query)
@@ -2539,7 +2540,7 @@ def thinking_finalization_stage(state: OverallState, config: RunnableConfig) -> 
     
     llm = ChatGoogleGenerativeAI(
         model=configurable.query_generator_model,
-        temperature=0.1,
+        temperature=0.5,
         max_retries=2,
         api_key=os.getenv("GEMINI_API_KEY"),
     )
@@ -2553,9 +2554,11 @@ def thinking_finalization_stage(state: OverallState, config: RunnableConfig) -> 
     sources_reranked = state.get("sources_reranked", [])
     safe_results = []
     if sources_reranked:
+        # logger.info("[NEO_LOG] [generate_enhanced_report] 使用重排后的高质量数据: %d", len(sources_reranked))
         safe_results = [s for s in sources_reranked if isinstance(s, str)]
         # logger.info("[NEO_LOG] [thinking_finalization_stage] top2 sources_reranked: %s", safe_results[:2])
     else:
+        # logger.info("[NEO_LOG] [generate_enhanced_report] 使用未重排的原始数据: %d", len(state.get("web_research_result", [])))
         safe_results = [s for s in web_research_result if isinstance(s, str)]
         # logger.info("[NEO_LOG] [thinking_finalization_stage] top2 web_research_result: %s", safe_results[:2])
     
@@ -2607,7 +2610,7 @@ def thinking_finalization_stage(state: OverallState, config: RunnableConfig) -> 
         "reasoning_model": configurable.query_generator_model,
     }
     final_thinking_value = thinking_record_updated.get("final_thinking", "")
-    # logger.info("[NEO_LOG] [thinking_finalization_stage] FINISHED: %d, %s", len(final_thinking_value), final_thinking_value)
+    logger.info("[NEO_LOG] [thinking_finalization_stage] FINISHED: %d, %s", len(final_thinking_value), final_thinking_value)
     
     # Preserve core state fields (保留report生成必需的字段)
     for key in ["objectives_progress", "overall_completion", "sources_reranked",
@@ -3039,7 +3042,7 @@ def route_after_reflection(state: OverallState, config: RunnableConfig):
 def generate_enhanced_report(state: OverallState, config: RunnableConfig) -> OverallState:
     """Generate an enhanced structured report similar to Google DeepResearch."""
     configurable = Configuration.from_runnable_config(config)
-    reasoning_model = configurable.thinking_model # query_generator_model thinking_model pro_model
+    reasoning_model = configurable.query_generator_model # query_generator_model thinking_model pro_model
     
     llm = ChatGoogleGenerativeAI(
         model=reasoning_model,
