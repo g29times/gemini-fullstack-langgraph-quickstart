@@ -22,12 +22,6 @@ from agent.util.utils import (
 )
 from agent.util.tools_and_schemas import (
     SearchQueryList,
-    Reflection,
-    Intent,
-    OfficialSiteCandidates,
-    ResearchPlan,
-    ThinkingStage,
-    FollowUpResponse,
 )
 from agent.prompts import (
     generate_initial_query_instructions,
@@ -1058,7 +1052,12 @@ class QueryManager:
 
         # 读取意图，判断是否仅限记忆通道
         intent = self.state.get("intent", {}) or {}
+        research_plan = self.state.get("research_plan", {}) or {}
+        user_messages = self.state.get("messages", [])
+
         mem_only = bool(intent.get("mem_only"))
+        query_region = intent.get("suggested_region")
+        query_project_type = intent.get("suggested_project_type")
 
         # 已派发记录：使用 (qid, channel) 对进行去重
         # 关键设计：每个通道独立去重，不跨通道共享
@@ -1144,14 +1143,12 @@ class QueryManager:
                     
                 # 传递地区和项目类型过滤条件到 rag_search
                 if channel == "rag_search":
-                    research_plan = self.state.get("research_plan")
-                    # print("--------------------- research_plan", research_plan)
                     if research_plan:
-                        payload["query_region"] = research_plan.get("suggested_region")
-                        payload["query_project_type"] = research_plan.get("suggested_project_type")
+                        payload["query_region"] = query_region
+                        payload["query_project_type"] = query_project_type
                     
                     # 传递用户消息历史到 rag_search
-                    user_messages = self.state.get("messages", [])
+                    # user_messages = self.state.get("messages", [])
                     if user_messages:
                         payload["messages"] = user_messages
 
@@ -1171,9 +1168,8 @@ class QueryManager:
         # ==================== 第二阶段：双队列派发 WEB 通道（Topic + Project） ====================
         if not mem_only:
             max_web_quota = self.config.max_parallel_queries
-            research_plan = self.state.get("research_plan") or {}
-            suggested_project_type = research_plan.get("suggested_project_type", "")
-            is_tender_oriented = suggested_project_type in {"采购", "工程"}
+            # tender 投标、招标
+            is_tender_oriented = query_project_type in {"采购", "工程"}
             
             if is_tender_oriented:
                 topic_quota = math.ceil(max_web_quota / 2)
@@ -1182,7 +1178,7 @@ class QueryManager:
                 topic_quota = max_web_quota
                 project_quota = 0
             
-            logger.info("[NEO_LOG] [QueryManager] Web 派发策略: tender=%s, topic_quota=%d, project_quota=%d", 
+            logger.info("[NEO_LOG] [QueryManager] Web 派发策略: 招投标=%s, topic_quota=%d, project_quota=%d", 
                        is_tender_oriented, topic_quota, project_quota)
             
             # 构建 Topic 候选队列（优先级：followup > plan_queries）

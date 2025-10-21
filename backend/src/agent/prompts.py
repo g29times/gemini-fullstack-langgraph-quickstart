@@ -1,9 +1,9 @@
 # detect_follow_up | Gemini 2.5 Flash-Lite (快速追问检测) 0.1
 follow_up_detection_instructions = """你是一个专业的对话分析助手，
 
-你需要结合对话历史判断用户的当前消息是否为追问（follow-up question）。
+你需要结合对话内容判断用户的当前消息是否为追问（follow-up question）。
 
-对话历史：
+对话内容：
 {conversation_history}
 
 当前用户消息：
@@ -46,17 +46,25 @@ follow_up_instructions = """你是一个专业的研究助手。
 """
 
 
-# 重点提示词 意图识别 意图分类 classify_intent | Gemini 2.5 Flash-Lite 0.2
+
+# 重点提示词 意图识别 意图分类 classify_intent | Gemini 2.5 Flash-Lite 0.2（参数化追问场景）
 intent_classifier_instructions = """You are an intent classification expert. Determine if the user's request should:
 1) be answered directly without any web research (SIMPLE_FACT),
 2) be answered via a simple direct lookup from an official source (DIRECT_LOOKUP), or
 3) require a multi-step research process (RESEARCH).
 
+Context:
+{previous_context_block}
+Request:
+{research_topic}
+
 Instructions:
+{follow_up_overrides}
 - Identify SIMPLE_FACT requests that can be answered immediately without browsing, such as: short calculations, unit conversions, acronym expansions, general knowledge questions, or other deterministic facts that do not require external sources.
 - Identify DIRECT_LOOKUP for real-time or location-specific information like: current date/time/weekday, weather inquiries, timezone conversions, stock prices, or other data that requires authoritative sources.
 - Identify DIRECT_LOOKUP when an official site likely contains the answer (e.g., today's top items, release notes, pricing, docs).
 - Choose RESEARCH for complex topics requiring deeper web search or multi-step analysis, such as: bidding projects, industry trends, historical analysis, comparative studies, or broad conceptual topics.
+- Provide a confidence score between 0 and 1.
 - Extract an entity (canonical name) and attribute (what is being asked) when possible:
   * Entity: The main subject/object being asked about (e.g., "北京", "Product Hunt", "OpenAI")
   * Attribute: What specific information is requested (e.g., "weather", "function", "latest products")  
@@ -71,20 +79,33 @@ Instructions:
 - **Memory Query Detection** (for RESEARCH intent only): Determine if the query is memory-only or hybrid:
   * **Memory-only queries**: Personal/contextual questions like "上次我们聊了什么？", "我之前收藏的xx", "What did we discuss last time?" → mem_only: true
   * **Hybrid queries**: All other research queries, including pure external research and questions combining personal context with external info → mem_only: false
-- Provide a confidence score between 0 and 1.
+- 推断地区和项目类型： suggested_region 和 suggested_project_type
+  * "suggested_region": "问题中明确提到的地区（范围仅限省市，如'广东省'、'深圳市'），如范围不对或未提及地区则输出''",
+  * "suggested_project_type": "招投标项目类型 - 如问题涉及项目招投标，且与供应商相关则为'采购'，与设计施工相关则为'工程'，如不涉及项目招投标或难以判断则输出''"
 
 Examples:
-- "你好" → entity: null, attribute: null, intent_label: "SIMPLE_FACT"
-- "What is machine learning?" → entity: null, attribute: null, intent_label: "SIMPLE_FACT"
-- "What's the weather like in New York today?" → entity: "New York", attribute: "weather", intent_label: "DIRECT_LOOKUP"
-- "Product Hunt的最新产品" → entity: "Product Hunt", attribute: "最新产品", intent_label: "DIRECT_LOOKUP"
-- "What are the latest features of GitHub?" → entity: "GitHub", attribute: "latest features", intent_label: "DIRECT_LOOKUP"
-
-- "上次我们聊了什么？" → entity: "我们", attribute: "聊", intent_label: "RESEARCH", mem_only: true
-- "最近上海有哪些酒店项目机会" → entity: "酒店", attribute: "项目机会", intent_label: "RESEARCH", mem_only: false
-- "给我推荐两个招投标项目" → entity: "招投标", attribute: "项目", intent_label: "RESEARCH", mem_only: false
-- "Analysis of blockchain technology trends" → entity: "blockchain technology", attribute: "trends", intent_label: "RESEARCH", mem_only: false
-- "基于我们上次的讨论，推荐最新的技术方案" → entity: "上次讨论", attribute: "推荐技术方案", intent_label: "RESEARCH", mem_only: false
+- intent_label 判例：
+  "你好" → entity: null, attribute: null, intent_label: "SIMPLE_FACT"
+  "What is machine learning?" → entity: null, attribute: null, intent_label: "SIMPLE_FACT"
+  "What's the weather like in New York today?" → entity: "New York", attribute: "weather", intent_label: "DIRECT_LOOKUP"
+  "Product Hunt的最新产品" → entity: "Product Hunt", attribute: "最新产品", intent_label: "DIRECT_LOOKUP"
+  "What are the latest features of GitHub?" → entity: "GitHub", attribute: "latest features", intent_label: "DIRECT_LOOKUP"
+- mem_only 判例：
+  "上次我们聊了什么？" → entity: "我们", attribute: "聊", intent_label: "RESEARCH", mem_only: true
+  "最近上海有哪些酒店项目机会" → entity: "酒店", attribute: "项目机会", intent_label: "RESEARCH", mem_only: false
+  "给我推荐两个招投标项目" → entity: "招投标", attribute: "项目", intent_label: "RESEARCH", mem_only: false
+  "Analysis of blockchain technology trends" → entity: "blockchain technology", attribute: "trends", intent_label: "RESEARCH", mem_only: false
+  "基于我们上次的讨论，推荐最新的技术方案" → entity: "上次讨论", attribute: "推荐技术方案", intent_label: "RESEARCH", mem_only: false
+- suggested_project_type 例子：
+  “这次招投标付款方式、付款条件和付款周期是怎样的” -> "采购" （原因：供应商关心招投标的付款信息）
+  “帮我找下广东省橱柜衣柜相关的招投标项目” -> "采购" (原因：供应商关心招投标项目的品类信息，如橱柜衣柜)
+  “这个项目招的材料，是否有产地或特定的技术认证（如防火等级、环保认证、节能标识）要求？” -> "采购"
+  “杰恩设计今年中标多少个办公业态的项目” -> "工程"（原因：设计机构关心招投标的项目中标等情况）
+  “广东省近三年的四五星级酒店开发项目会有哪些，有哪些是带有国资背景的投资项目” -> "工程" （原因：隐含招投标机会）
+  “最近有哪些上海地区的酒旅相关的项目” -> "工程" （原因：项目意味着工程施工机会（优先）和采购机会（次之））
+  “这个单体项目预计涉及那些材料品类的使用” -> "" （原因：主要关注点是如何使用材料，而不是项目招投标）
+  “这个总承包项目会分几期招标” -> "" （原因：主要关注点不在招投标机会上，而是项目本身）
+  “最近准备出席在8月31号WaytoAGI的摆摊大会，给我策划几个方案” -> "" （原因：招投标无关）
 
 Output Format (JSON):
 {{
@@ -95,51 +116,9 @@ Output Format (JSON):
   "attribute": string | null,
   "missing_elements": ["time", "location", "subject", "event"] | [],
   "clarification_reason": string | null,
-  "mem_only": boolean
-}}
-
-Context:
-{research_topic}
-"""
-
-
-# 增强版意图分类（支持追问上下文）enhanced_classify_intent | Gemini 2.5 Flash-Lite 0.2
-enhanced_intent_classifier_instructions = """You are an intent classification expert handling follow-up questions. Determine if the user's follow-up request should:
-1) be answered directly without any web research (SIMPLE_FACT),
-2) be answered via a simple direct lookup from an official source (DIRECT_LOOKUP), or
-3) require a multi-step research process (RESEARCH).
-
-Instructions:
-- This is a follow-up question based on previous research context
-- Consider both the follow-up question and the previous research context
-- Identify SIMPLE_FACT requests that can be answered immediately from the previous context or general knowledge
-- Identify DIRECT_LOOKUP for real-time or specific information that requires authoritative sources
-- Choose RESEARCH for complex follow-up topics requiring deeper web search or multi-step analysis
-- Extract an entity (canonical name) and attribute (what is being asked) when possible
-- **Key Element Completeness Check**: Verify the presence of all essential elements:
-  * **Time Element**: Is the time range specified (e.g., "today", "now", "latest", etc.)?
-  * **Location Element**: Is the geographic location clearly defined (especially for weather, traffic, or local service queries)?
-  * **Subject/Entity Element**: Is the subject of the query clearly identified (company, product, person, etc.)?
-  * **Event/Attribute Element**: Is the specific event or attribute being asked about explicit?
-- **Missing Elements Assessment**: If any key element is missing, list them in `missing_elements` and provide reasoning in `clarification_reason`.
-- Provide a confidence score between 0 and 1.
-
-Previous Research Context:
-{previous_report}
-
-Follow-up Question:
-{research_topic}
-Is Follow-up: {is_follow_up}
-
-Output Format (JSON):
-{{
-  "is_simple_lookup": boolean,
-  "intent_label": "SIMPLE_FACT" | "DIRECT_LOOKUP" | "RESEARCH",
-  "confidence": number,
-  "entity": string | null,
-  "attribute": string | null,
-  "missing_elements": ["time", "location", "subject", "event"] | [],
-  "clarification_reason": string | null
+  "mem_only": boolean,
+  "suggested_region": string | null,
+  "suggested_project_type": string | null
 }}
 """
 
@@ -156,7 +135,7 @@ intent_clarification_instructions = """你是一个全球多语种智能助手�
 
 当前日期：{current_date}
 
-当前对话历史：
+当前对话内容：
 {conversation_history}
 
 用户最新消息：{user_message}
@@ -289,62 +268,61 @@ Summaries:
 
 # 重点提示词 generate_research_plan | Gemini 2.5 Flash (专业研究规划) 0.2
 research_plan_instructions = """你是一位专业的全球化、多语种研究助手，尤其擅长建筑/室内设计领域。
-你将根据用户问题，优先使用中文为用户制定一个详细的研究计划。
+你将根据对话内容，优先使用中文制定一个详细的研究计划。
 （如果用户使用了多种语言，你需要理解用户的意图并选择最有利于研究的语言来生成计划）。
 
 当前日期：{current_date}
-用户问题：{research_topic}
+对话内容：{research_topic}
 
 任务：
 - 研究目标：research_objectives 理解并分解用户问题，制定1到5个清晰的研究目标
 - 研究方法：research_methodology 规划研究方法或路径
 - 查询搜索词：planned_queries 围绕研究目标，生成1到10个适合搜索引擎的查询关键词或短语
-- 推断地区和项目类型：suggested_region 和 suggested_project_type
 
 任务指导：
-- 室内设计词典：
-  "CCD": "/Cheng Chung Design/郑中设计 全球知名室内设计公司"
-  "犀照科技": "深圳市犀照网络科技有限公司 CCD全资子公司"
+- 时间尺度：
+  - 如果用户问的比较模糊，比如"最近..."，则默认为"最近一年"
 - 数量：生成研究目标和查询词的多少取决于用户问题的复杂程度
   - 例如：用户问“上次咱们聊了什么？”，研究目标："回忆上次的对话内容"，查询词：["上次对话内容", "最近聊天记录"]
+- 追问场景处理：
+  - 对话内容可能是结构化文本，如：**原始问题**、**助手回复摘要**、**用户追问**。
+  - 若出现“用户追问”，需将其视为本轮的主问题，基于“助手回复摘要”的既有成果进行“增量更新”，避免复述旧计划。
+  - 输出的 research_objectives 与 planned_queries 应围绕“用户追问”聚焦与展开；必要时引用“原始问题”提供上下文，不得简单拷贝既有目标/查询。
+  - planned_queries 要去重、去相近，优先覆盖新的信息维度（时间/地区/主体/事件/约束），确保与助手摘要中已有内容形成差异化补充。
+- 室内设计知识：
+  "CCD": "/Cheng Chung Design/郑中设计 全球知名室内设计公司"
+  "犀照科技": "深圳市犀照网络科技有限公司 CCD全资子公司"
+  设计风格：现代、极简、新中式、北欧、工业、地中海、田园、日式侘寂风、东南亚、简欧、美式
+  "公装" → 可扩展为："公装"、"酒店住宿"、"商业空间"、"办公空间"、"餐饮空间"、"教育与文化空间"、"医疗与康养空间"、"娱乐与体育空间"等
+  "家装" → 可扩展为："玄关 / 门厅"、"客厅"、"餐厅"、"厨房"、"卫生间"、"卧室"、"阳台"、"书房"、"储藏室"、"花园"、"走廊 / 过道"等
 - 语言：research_objectives 和 research_methodology 优先使用与用户相同的语言（但保留专业术语）
-- planned_queries 语言：为搜索引擎优化，根据问题的文化背景，适当混合多种国际化语言搜索词（80% 用户语言 + 20% 英、中、法等其他语言）
-- planned_queries 结构：
-  - 先独立，后组合构词法：
-    - 先独立 - 一个查询词只包含一个主体
-      - 主体： 人物、组织、事件、物体、概念等名词
-    - 后组合 - 基于主体进行扩展
-      - 联合多个主体，或扩展主体的空间属性和时间属性，如 Who What Where When Why How 等维度。
-        - 例如 对于商业实体，可扩展搜索其创始人、注册地、注册时间、主营业务等信息。
-        - 对于事件，该事件发生的时间、地点、人物、原因、结果、影响等信息。
-        - 对于人物，该人物的年代、活动地点和时间、事迹等信息。
-      - 技巧：递进构词法，例如问题：“研究下 某地 某科技公司A发展前景”，
-        可以依次构造搜索词： "公司A名称", "地名 公司A名称", "地名 公司A名称 主营业务", "地名 公司A名称 科技板块"
-      - 技巧：对于中国企业信息，重点参考“天眼查”，“企查查”，“爱企查”三个企业分析平台，其他国家用户的问题也可使用当地的信息平台
-      - 当查询中包含以下关键词时，可以考虑使用其扩展词汇：
-        - "公装" → 可扩展为："公装"、"酒店住宿"、"商业空间"、"办公空间"、"餐饮空间"、"教育与文化空间"、"医疗与康养空间"、"娱乐与体育空间"
-        - "家装" → 可扩展为："玄关 / 门厅"、"客厅"、"餐厅"、"厨房"、"卫生间"、"卧室"、"阳台"、"书房"、"储藏室"、"花园"、"走廊 / 过道"
-        例如，对于"北京公装改造项目"的研究主题，可以生成如下查询：
-        ["北京 酒店住宿", "北京 商业空间", "北京 办公空间", "公装改造"]
+  - planned_queries 语言：为搜索引擎优化，根据问题的文化背景，适当混合多种国际化语言搜索词（80% 用户语言 + 20% 英、中、法等其他语言）
+  - planned_queries 构词法：
+      - 1. 独立构词 - 一个查询词只包含一个主体
+        - 主体： 人物、组织、事件、物体、概念等名词
+      - 2. 组合构词 - 基于主体进行扩展
+        - 2.1 扩展单个主体的空间和时间等属性，如 Who What Where When Why How 等维度。
+          - 对于商户，可扩展搜索其创始人、注册地、注册时间、主营业务等信息。
+          - 对于事件，该事件的类别，发生的时间、地点、结果、影响等信息。
+          - 对于人物，该人物的年代、活动地点和时间、事迹等信息。
+        - 2.2 联合多个主体
+      - 构词过程示例："研究下 某地 某科技公司A 今年的发展前景"（已明确主体、时间、地点）
+        - 独立主体 -> "公司A名称"
+        - 空间属性 -> "所在地 公司A名称"（如 “深圳 犀照科技”）
+        - 时间属性 -> "2025年 所在地 公司A名称"
+        - 其他属性 -> "2025年 所在地 公司A名称 主营业务"（如 “2025年 深圳 犀照科技 室内设计”）
+      - planned_queries 生成示例：
+        - "有哪些酒店项目推荐？"(时间、地点均未明确，需要酌情扩展，经济发达地区优先，时间留出宽裕范围)
+          ["北美 高端酒店 2024 2025 2026", "东亚 精品酒店 2024 2025 2026", "西欧 奢华酒店 2024 2025 2026", ...]
+        - "绿城对本项目的设计风格和装修标准是否有明确界定？
+          ["绿城集团", "新中式设计风格", "现代设计风格", "中国国家装修标准", "绿城设计风格", "绿城A项目装修标准", ...]
 
 输出格式（JSON）：
 {{
     "research_objectives": ["目标1", "目标2", "...", "目标5"],
     "research_methodology": "研究方法、步骤",
-    "planned_queries": ["查询1", "查询2", "...", "查询10"],
-    "suggested_region": "问题中明确提到的地区（范围仅限省市，如'广东省'、'深圳市'），如范围不对或未提及地区则输出''",
-    "suggested_project_type": "指招投标项目类型，如问题涉及项目招投标，且与供应商相关则为'采购'，与设计施工相关则为'工程'，如不涉及项目招投标或难以判断则输出''"
+    "planned_queries": ["查询1", "查询2", "...", "查询10"]
 }}
-suggested_project_type 例子：
-  “这次招投标付款方式、付款条件和付款周期是怎样的” -> "采购" （原因：供应商关心招投标的付款信息）
-  “帮我找下广东省橱柜衣柜相关的招投标项目” -> "采购" (原因：供应商关心招投标项目的品类信息，如橱柜衣柜)
-  “这个项目招的材料，是否有产地或特定的技术认证（如防火等级、环保认证、节能标识）要求？” -> "采购"
-  “杰恩设计今年中标多少个办公业态的项目” -> "工程"（原因：设计机构关心招投标的项目中标等情况）
-  “广东省近三年的四五星级酒店开发项目会有哪些，有哪些是带有国资背景的投资项目” -> "工程" （原因：隐含招投标机会）
-  “最近有哪些上海地区的酒旅相关的项目” -> "工程" （原因：项目意味着工程施工机会（优先）和采购机会（次之））
-  “这个单体项目预计涉及那些材料品类的使用” -> "" （原因：主要关注点是如何使用材料，而不是项目招投标）
-  “这个总承包项目会分几期招标” -> "" （原因：主要关注点不在招投标机会上，而是项目本身）
-  “最近准备出席在8月31号WaytoAGI的摆摊大会，给我策划几个方案” -> "" （原因：招投标无关）
 
 planned_queries 正例：
   用户问题：“最近准备代表深圳犀照科技出席在8月31号WaytoAGI的摆摊大会，给我策划几个方案”

@@ -62,7 +62,7 @@ class OverallState(TypedDict):
    
     # RAG query filters (extracted from user question and confirmed via HITL)
     query_region: str  # Region filter: province or city (e.g., "广东", "深圳")
-    query_project_type: str  # Project type: "supplier" or "designer"
+    query_project_type: str  # Project type: "采购" or "工程"
     
     # RAG rerank fields
     # rag_sources_reranked: NotRequired[Annotated[list, operator.add]]  # RAG sources after reranking

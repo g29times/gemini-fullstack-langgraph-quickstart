@@ -27,7 +27,6 @@ from agent.prompts import (
     reflection_instructions,
     answer_instructions,
     intent_classifier_instructions,
-    enhanced_intent_classifier_instructions,
     official_site_finder_instructions,
     direct_lookup_instructions,
     quick_lookup_fallback_instructions,
@@ -245,6 +244,9 @@ def classify_intent(state: OverallState, config: RunnableConfig) -> OverallState
                 "confidence": 0.0,
                 "entity": None,
                 "attribute": None,
+                "mem_only": False,
+                "suggested_region": "",
+                "suggested_project_type": ""
             }
         }
     llm = ChatGoogleGenerativeAI(
@@ -279,17 +281,19 @@ def classify_intent(state: OverallState, config: RunnableConfig) -> OverallState
     is_memory_only = has_memory_keywords and not has_external_indicators
     is_hybrid_query = has_memory_keywords and has_external_indicators
     
-    # Enhanced prompt with follow-up context 追问
-    if is_follow_up and previous_report:
-        prompt = enhanced_intent_classifier_instructions.format(
-            research_topic=topic,
-            previous_report=truncate_content(previous_report), # Apply smart truncation
-            is_follow_up=is_follow_up
-        )
-    else:
-        prompt = intent_classifier_instructions.format(research_topic=topic)
-    
-    # logger.debug("[NEO_LOG] [classify_intent] prompt => %s", prompt)
+    # 构建统一提示词参数，兼容追问场景
+    follow_up_overrides = ""
+    previous_context_block = ""
+    if is_follow_up:
+        follow_up_overrides = "- This is a follow-up question based on previous research context. Consider both the follow-up question and the previous research context.\n"
+        if previous_report:
+            previous_context_block = f"\nPrevious Research Context:\n{truncate_content(previous_report)}\n"
+    prompt = intent_classifier_instructions.format(
+        research_topic=topic,
+        follow_up_overrides=follow_up_overrides,
+        previous_context_block=previous_context_block,
+    )
+    logger.info("[NEO_LOG] [classify_intent] prompt: %s", prompt)
 
     try:
         result = structured_llm.invoke(prompt)
@@ -305,6 +309,8 @@ def classify_intent(state: OverallState, config: RunnableConfig) -> OverallState
         payload.setdefault("entity", None)
         payload.setdefault("attribute", None)
         payload.setdefault("mem_only", False)
+        payload.setdefault("suggested_region", "")
+        payload.setdefault("suggested_project_type", "")
         
         # Rule-based memory-first override for RESEARCH intent
         if payload.get("intent_label") == "RESEARCH":
@@ -324,7 +330,7 @@ def classify_intent(state: OverallState, config: RunnableConfig) -> OverallState
         needs_clarification = confidence < configurable.intent_confidence_threshold
         payload["needs_clarification"] = needs_clarification
         
-        logger.info("[NEO_LOG] [classify_intent] threshold=%.3f, needs_clarification=%s, structured payload ===> %s", 
+        logger.info("[NEO_LOG] [classify_intent] 置信度低于这个阈值触发意图澄清=%.3f, needs_clarification=%s, intent=%s", 
                    configurable.intent_confidence_threshold, needs_clarification, payload)
         return {"intent": payload}
     except Exception as e:
@@ -337,6 +343,9 @@ def classify_intent(state: OverallState, config: RunnableConfig) -> OverallState
                 "entity": None,
                 "attribute": None,
                 "needs_clarification": True,  # 异常情况下默认需要澄清
+                "mem_only": False,
+                "suggested_region": "",
+                "suggested_project_type": ""
             }
         }
 
@@ -1083,12 +1092,13 @@ def generate_research_plan(state: OverallState, config: RunnableConfig) -> Overa
     structured_llm = llm.with_structured_output(ResearchPlan)
     
     current_date = get_current_date()
+    request = get_research_topic(state.get("messages", []))
     formatted_prompt = research_plan_instructions.format(
         current_date=current_date,
-        research_topic=get_research_topic(state.get("messages", [])),
+        research_topic=request,
     )
     
-    logger.info("[NEO_LOG] [generate_research_plan] prompt => %s", formatted_prompt)
+    logger.info("[NEO_LOG] [generate_research_plan] prompt: %s", formatted_prompt)
     # 优先使用结构化输出；失败则回退到非结构化并解析；最终提供安全默认
     plan_dict = None
     try:
@@ -1134,6 +1144,7 @@ def generate_research_plan(state: OverallState, config: RunnableConfig) -> Overa
             "planned_queries": [],
             "research_methodology": "",
         }
+    # plan_dict.add(request)
     logger.info("[NEO_LOG] [generate_research_plan] RESEARCH PLAN: %s", plan_dict)
     
     # 保留intent信息，确保research_channels正确传递
@@ -1155,7 +1166,7 @@ def wait_for_human_approval(state: OverallState, config: RunnableConfig) -> Over
     """Wait for human approval of the research plan."""
     configurable = Configuration.from_runnable_config(config)
     
-    # 检查是否启用 HITL bypass
+    # 检查是否启用 HITL bypass 跳过人类确认
     if configurable.enable_hitl_bypass:
         logger.info("[NEO_LOG] [wait_for_human_approval] HITL bypass enabled, 跳过用户审核, auto-approving research plan")
         result = {

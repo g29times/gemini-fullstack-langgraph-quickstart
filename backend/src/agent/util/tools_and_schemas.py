@@ -39,7 +39,7 @@ class Intent(BaseModel):
     via a direct lookup on an official source (DIRECT_LOOKUP), or via multi-step research (RESEARCH).
     """
     is_simple_lookup: bool = Field(
-        description="Whether the user's query can likely be answered by a simple direct lookup from an official source."
+        description="Whether the query should be answered directly without browsing."
     )
     intent_label: str = Field(
         description='One of {"SIMPLE_FACT", "DIRECT_LOOKUP", "RESEARCH"} to indicate the routing choice.'
@@ -55,10 +55,6 @@ class Intent(BaseModel):
         default=None,
         description="Specific attribute being asked (e.g., today's top 5).",
     )
-    needs_clarification: bool = Field(
-        default=False,
-        description="Whether the query lacks essential elements and needs clarification."
-    )
     missing_elements: List[str] = Field(
         default_factory=list,
         description="List of missing key elements: 时间, 地点, 人物/主体, 事件"
@@ -70,6 +66,19 @@ class Intent(BaseModel):
     mem_only: bool = Field(
         default=False,
         description="For RESEARCH intent: whether to query memory only (True) or use hybrid approach with mem+web+rag (False)"
+    )
+    suggested_region: Optional[str] = Field(
+        default=None,
+        description="Suggested region filter (province or city, e.g., '广东', '深圳')."
+    )
+    suggested_project_type: Optional[str] = Field(
+        default=None,
+        description="Suggested project type: 'supplier' or 'designer'."
+    )
+    # 在意图澄清阶段使用，是否需要再次澄清
+    needs_clarification: bool = Field(
+        default=False,
+        description="Whether the query lacks essential elements and needs clarification."
     )
 
 
@@ -96,14 +105,6 @@ class ResearchPlan(BaseModel):
     )
     research_methodology: str = Field(
         description="Detailed description of research methodology."
-    )
-    suggested_region: Optional[str] = Field(
-        default=None,
-        description="Suggested region filter (province or city, e.g., '广东', '深圳')."
-    )
-    suggested_project_type: Optional[str] = Field(
-        default=None,
-        description="Suggested project type: 'supplier' or 'designer'."
     )
 
 
