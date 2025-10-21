@@ -1,12 +1,86 @@
 import argparse
 import json
-from langchain_core.messages import HumanMessage
+from pathlib import Path
+from typing import List, Dict, Any
+from langchain_core.messages import HumanMessage, AIMessage
 from langgraph.errors import NodeInterrupt
 from agent.graph import graph
 
-# 可能失败原因：VPN，APIKEY，酒旅 餐饮 潮玩 广东 长三角
+def build_conversation_history(args) -> List[Any]:
+    """
+    Build conversation history from various input sources.
+    Priority: history-json > prev-question/prev-answer > question only
+    """
+    messages = []
+    
+    # Option 1: Load from JSON file
+    if args.history_json:
+        history_path = Path(args.history_json)
+        
+        # Try multiple resolution strategies
+        if not history_path.exists():
+            # Try relative to script directory
+            script_dir = Path(__file__).resolve().parent.parent.parent
+            alt_path = script_dir / args.history_json
+            if alt_path.exists():
+                history_path = alt_path
+            else:
+                print(f"[WARNING] History file not found: {args.history_json}")
+                print(f"[WARNING] Tried paths: {Path(args.history_json).resolve()}, {alt_path}")
+        
+        if history_path.exists():
+            try:
+                with open(history_path, 'r', encoding='utf-8') as f:
+                    history_data = json.load(f)
+                
+                for msg in history_data:
+                    msg_type = msg.get("type", "human")
+                    content = msg.get("content", "")
+                    if msg_type in ("human", "user"):
+                        messages.append(HumanMessage(content=content))
+                    elif msg_type in ("ai", "assistant"):
+                        messages.append(AIMessage(content=content))
+                
+                print(f"[CLI] Loaded {len(messages)} messages from {args.history_json}")
+            except Exception as e:
+                print(f"[ERROR] Failed to load history: {e}")
+    
+    # Option 2: Simple prev-question/prev-answer pair
+    elif args.prev_question and args.prev_answer:
+        messages.append(HumanMessage(content=args.prev_question))
+        messages.append(AIMessage(content=args.prev_answer))
+        print(f"[CLI] Loaded 1 previous Q&A pair")
+    
+    elif args.prev_question:
+        print("[WARNING] --prev-question provided without --prev-answer, ignoring")
+    
+    # Always append current question
+    messages.append(HumanMessage(content=args.question))
+    
+    return messages
+
+# 可能失败原因：VPN，APIKEY
+# 酒旅 餐饮 潮玩 广东 长三角
 # 查三轮 python backend/src/cli_research.py --max-concurrency 4 --auto-approve "最近有哪些广东地区的酒旅相关的项目"
 # 查一轮（优先）python backend/src/cli_research.py --max-concurrency 4 --max-loops 1 --auto-approve "最近有哪些广东地区的酒旅相关的项目"
+# 1. 简单追问（命令行参数）
+# python backend/src/cli_research.py \
+#   --prev-question "CCD近三年在大湾区做了哪些高端酒店项目？" \
+#   --prev-answer "...报告内容..." \
+#   --auto-approve \
+#   "那CCD在广东做了哪些高端住宅项目？"
+
+# # 2. 复杂追问（JSON 文件）
+# python backend/src/cli_research.py \
+#   --history-json conversation_history_example.json \
+#   --auto-approve \
+#   "那CCD在广东做了哪些高端住宅项目？"
+
+# # 3. 首轮对话（无历史）
+# python backend/src/cli_research.py \
+#   --max-concurrency 4 \
+#   --auto-approve \
+#   "最近有哪些广东地区的酒旅相关的项目"
 def main() -> None:
     """Run the research agent from the command line."""
     parser = argparse.ArgumentParser(description="Run the LangGraph research agent")
@@ -55,10 +129,31 @@ def main() -> None:
         action="store_true",
         help="Automatically approve the research plan at the HITL stage for testing",
     )
+    parser.add_argument(
+        "--history-json",
+        type=str,
+        default=None,
+        help="Path to JSON file containing conversation history (format: [{\"type\": \"human\", \"content\": \"...\"}, ...])",
+    )
+    parser.add_argument(
+        "--prev-question",
+        type=str,
+        default=None,
+        help="Previous user question (for simple follow-up scenario)",
+    )
+    parser.add_argument(
+        "--prev-answer",
+        type=str,
+        default=None,
+        help="Previous AI answer (for simple follow-up scenario)",
+    )
     args = parser.parse_args()
 
+    # Build conversation history
+    messages = build_conversation_history(args)
+    
     state = {
-        "messages": [HumanMessage(content=args.question)],
+        "messages": messages,
         "initial_search_query_count": args.initial_queries,
         "max_research_loops": args.max_loops,
         "reasoning_model": args.reasoning_model,

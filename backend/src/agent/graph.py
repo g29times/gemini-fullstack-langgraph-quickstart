@@ -96,6 +96,7 @@ genai_client = Client(api_key=os.getenv("GEMINI_API_KEY"))
 def detect_follow_up(state: OverallState, config: RunnableConfig) -> OverallState:
     """Intelligently detect if this is a follow-up question using LLM analysis."""
     messages = state.get("messages", [])
+    # logger.info("[NEO_LOG][follow_up_detection] messages=%s", messages)
     
     # 关键修复：检查消息历史中是否有批准消息
     # 如果有，说明这是HITL流程的继续，应该跳过追问检测
@@ -162,7 +163,7 @@ def detect_follow_up(state: OverallState, config: RunnableConfig) -> OverallStat
     )
     
     try:
-        # logger.debug("[NEO_LOG][follow_up_detection] formatted_prompt=%s", formatted_prompt)
+        # logger.info("[NEO_LOG][follow_up_detection] formatted_prompt=%s", formatted_prompt)
         result = structured_llm.invoke(formatted_prompt)
         
         # 转换为字典格式
@@ -170,15 +171,31 @@ def detect_follow_up(state: OverallState, config: RunnableConfig) -> OverallStat
             detection_result = result.model_dump()
         else:
             detection_result = dict(result)
-        
+        # print(detection_result)
+
         # 只有高置信度才判定为追问（可配置阈值）
         threshold = float(configurable.follow_up_confidence_threshold)
         confidence = detection_result.get("confidence", 0.0)
         is_follow_up = detection_result.get("is_follow_up", False) and confidence >= threshold
-        logger.info("[NEO_LOG][follow_up_detection] threshold=%s, confidence=%s, is_follow_up=%s", threshold, confidence, is_follow_up)
+        
+        # 处理 former_ids：LLM 可能输出浮点数，需转为整数
+        former_ids_raw = detection_result.get("former_ids", [])
+        former_ids = []
+        if former_ids_raw:
+            for item in former_ids_raw:
+                try:
+                    # 转为整数（处理浮点数如 12345.0 -> 12345）
+                    former_ids.append(int(float(item)))
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"[NEO_LOG][follow_up_detection] 无效的 former_id: {item}, 错误: {e}")
+                    continue
+        
+        logger.info("[NEO_LOG][follow_up_detection] threshold=%s, confidence=%s, is_follow_up=%s, former_ids=%s", 
+                    threshold, confidence, is_follow_up, former_ids)
         
         # 保留现有状态，只更新追问相关字段
         return {
+            "former_ids": former_ids,
             "is_follow_up": is_follow_up,
             "follow_up_detection": detection_result
         }
@@ -293,7 +310,7 @@ def classify_intent(state: OverallState, config: RunnableConfig) -> OverallState
         follow_up_overrides=follow_up_overrides,
         previous_context_block=previous_context_block,
     )
-    logger.info("[NEO_LOG] [classify_intent] prompt: %s", prompt)
+    # logger.info("[NEO_LOG] [classify_intent] prompt: %s", prompt)
 
     try:
         result = structured_llm.invoke(prompt)
@@ -479,7 +496,7 @@ def clarify_intent(state: OverallState, config: RunnableConfig) -> OverallState:
     3. Maximum clarification rounds reached
     4. User explicitly opts out
     """
-    logger.debug("[NEO_LOG] [意图澄清] ===== CLARIFY_INTENT NODE CALLED =====")
+    # logger.debug("[NEO_LOG] [意图澄清] ===== CLARIFY_INTENT NODE CALLED =====")
     configurable = Configuration.from_runnable_config(config)
     
     # Initialize clarification state if not present
@@ -1303,7 +1320,8 @@ def generate_query(state: OverallState, config: RunnableConfig) -> OverallState:
     user_info = configurable.user_info or {}
     if user_info:
         state["user_info"] = user_info
-        # logger.info("[NEO_LOG][generate_query] user_info 已传递到 state: %s", user_info)
+
+    # logger.info("[NEO_LOG][generate_query] former_ids: %s", state.get("former_ids", []))
     
     # 初始化查询数量配置
     if state.get("initial_search_query_count") is None:
@@ -1354,7 +1372,8 @@ def generate_query(state: OverallState, config: RunnableConfig) -> OverallState:
         "follow_up_queries",
         "intent",
         "research_plan",
-        "messages",  # 添加 messages 字段，确保传递到 QueryGenerationState
+        "messages",  # QueryGenerationState
+        "former_ids",
     ]
     for key in critical_keys:
         if state.get(key) is not None:
@@ -2044,14 +2063,14 @@ def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
         # 从状态中读取地区和项目类型过滤条件
         query_region = state.get("query_region")
         query_project_type = state.get("query_project_type")
-        # logger.info("[NEO_LOG] [rag_search] RAG附加查询条件 - region: %s, project_type: %s",
-        #        query_region, query_project_type)
+        # logger.info("[NEO_LOG] [rag_search] RAG附加查询条件 - pids: %s", state.get("former_ids", []))
         hits_raw = query_rag_rest(
+            endpoint=getattr(configurable, "rag_search_endpoint"),
+            api_key=getattr(configurable, "rag_rest_api_key"),
             query=original_query,
             area=query_region if query_region else "",
             type=query_project_type if query_project_type else "",
-            endpoint=getattr(configurable, "rag_search_endpoint", None),
-            api_key=getattr(configurable, "rag_rest_api_key", None),
+            pids=state.get("former_ids", []),
             timeout=int(getattr(configurable, "rag_rest_timeout", 5) or 5),
             local_json=getattr(configurable, "rag_rest_local_json", "backend/examples/vendor_projects.json"),
             top_k=top_k,
@@ -2231,9 +2250,13 @@ def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
                    rag_rerank_meta['defer_to_reflection'])
 
     _elapsed = time.time() - _node_start
-    logger.info("[NEO_LOG] [rag_search] RAG查询 END, id=%s: '%s', region: %s, project_type: %s, 耗时=%.2fs, 结果数: %d sources, %d chars | Preview: %s",
+    
+    # 提取项目IDs用于日志
+    project_ids = [h.get("id", "0") for h in hits_ranked] if hits_ranked else []
+    
+    logger.info("[NEO_LOG] [rag_search] RAG查询 END, id=%s: '%s', region: %s, project_type: %s, 耗时=%.2fs, 结果数: %d sources, %d chars, IDs: %s | Preview: %s",
                 state.get("id", "N/A"), original_query, query_region, query_project_type, _elapsed, len(segments), len(modified_text),
-                # modified_text
+                project_ids,
                 modified_text[:100] + "..." if len(modified_text) > 100 else modified_text
                 )
     # if segments:

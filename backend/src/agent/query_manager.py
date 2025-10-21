@@ -1054,6 +1054,7 @@ class QueryManager:
         intent = self.state.get("intent", {}) or {}
         research_plan = self.state.get("research_plan", {}) or {}
         user_messages = self.state.get("messages", [])
+        former_ids = self.state.get("former_ids", [])
 
         mem_only = bool(intent.get("mem_only"))
         query_region = intent.get("suggested_region")
@@ -1143,6 +1144,7 @@ class QueryManager:
                     
                 # 传递地区和项目类型过滤条件到 rag_search
                 if channel == "rag_search":
+                    payload["former_ids"] = former_ids
                     if research_plan:
                         payload["query_region"] = query_region
                         payload["query_project_type"] = query_project_type

@@ -45,6 +45,7 @@ class OverallState(TypedDict):
     # Follow-up conversation support
     is_follow_up: bool  # Whether this is a follow-up question
     previous_report: str | None  # Previous research report for context
+    former_ids: list[int]  # IDs of previous messages in the conversation
     conversation_history: Annotated[list, operator.add]  # Full conversation context
     
     # Reflection state fields
@@ -122,6 +123,7 @@ class QueryGenerationState(TypedDict):
     user_projects: NotRequired[list]  # User's project list for personalization
     user_projects_text: NotRequired[str]  # Formatted user projects context for prompts
     messages: NotRequired[list]  # 用户消息历史，用于在查询管理器中获取研究主题
+    former_ids: NotRequired[list[int]]
 
 class ReflectionState(TypedDict):
     is_sufficient: bool
@@ -136,7 +138,8 @@ class ReflectionState(TypedDict):
 class FollowUpDetection(TypedDict):
     is_follow_up: bool
     confidence: float
-
+    former_ids: list[int]
+    
 
 class Query(TypedDict):
     query: str
@@ -155,6 +158,7 @@ class WebSearchState(TypedDict):
     search_query: str
     id: str
     web_project_cursor: Annotated[int, operator.add]
+    former_ids: list[int]  # IDs of previous messages in the conversation
     
 
 class ResearchPlanState(TypedDict):

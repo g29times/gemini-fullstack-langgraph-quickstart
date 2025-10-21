@@ -198,15 +198,15 @@ def _normalize_item(item: Dict[str, Any], score: float) -> Dict[str, Any]:
 
 
 def query_rag_rest(
+    endpoint: str,
+    api_key: str,
     query: str,
     area: Optional[str] = "",
     type: Optional[str] = "",
-    pids: Optional[List[str]] = [],
-    top_k: int = 8,
-    endpoint: Optional[str] = None,
-    api_key: Optional[str] = None,
+    pids: Optional[List[int]] = [],
     timeout: int = 8,
     local_json: str = DEFAULT_LOCAL_JSON,
+    top_k: int = 8,
     messages: Optional[List[str]] = [""]
 ) -> List[Dict[str, Any]]:
     """
@@ -234,18 +234,11 @@ def query_rag_rest(
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
         
-        # New API format: send query as array of strings
-        payload = { "labels": [query], "area": "", "myClassify": type, "pids": pids, "top_k": top_k, "question": messages[-1] or "" } # Changed from dict to array format
+        # New API format: send query as array of strings 
+        payload = { "labels": [query], "area": "", "myClassify": type, "pids": pids, "top_k": top_k, "question": messages[-1] or "" } 
         
         # Debug: 打印 payload 内容
-        # print(f"[DEBUG] RAG REST API Payload:")
-        # print(f"  - labels: {payload.get('labels')}")
-        # print(f"  - area: {payload.get('area')}")
-        # print(f"  - myClassify: {payload.get('myClassify')}")
-        # print(f"  - pids: {payload.get('pids')}")
-        # print(f"  - top_k: {payload.get('top_k')}")
-        # print(f"  - question: {payload.get('question')}")
-        # print(f"  - 完整 payload: {payload}")
+        # print("[NEO_LOG] [query_rag_rest] payload: ", payload)
         
         resp = _http_post_json(endpoint, payload, headers, timeout)
         
@@ -255,6 +248,9 @@ def query_rag_rest(
             if resp.get("success") and resp.get("data"):
                 projects_data = resp["data"]
                 logger.info("[NEO_LOG] [query_rag_rest] 从API响应中提取到 %d 个项目", len(projects_data))
+                # debug
+                # project_ids = [item.get("id") for item in projects_data if item.get("id")]
+                # print("[NEO_LOG] [query_rag_rest] 从API响应中提取到 %d 个项目, IDs: %s", len(projects_data), project_ids)
             else:
                 logger.warning("[NEO_LOG] [query_rag_rest] API响应格式错误或无数据: success=%s", resp.get('success'))
         elif isinstance(resp, list):
