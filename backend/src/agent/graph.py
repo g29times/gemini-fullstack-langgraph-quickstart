@@ -1098,7 +1098,7 @@ def generate_research_plan(state: OverallState, config: RunnableConfig) -> Overa
         research_topic=request,
     )
     
-    logger.info("[NEO_LOG] [generate_research_plan] prompt: %s", formatted_prompt)
+    # logger.info("[NEO_LOG] [generate_research_plan] prompt: %s", formatted_prompt)
     # 优先使用结构化输出；失败则回退到非结构化并解析；最终提供安全默认
     plan_dict = None
     try:

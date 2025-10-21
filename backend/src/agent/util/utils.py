@@ -35,15 +35,19 @@ def get_research_topic(messages: List[Any]) -> str:
         if isinstance(msg, HumanMessage):
             return True
         if isinstance(msg, dict):
-            return msg.get("role") == "user"
+            role = msg.get("role")
+            msg_type = msg.get("type")
+            return role == "user" or msg_type == "human"
         return False
-    
+
     def is_ai_message(msg: Any) -> bool:
         """Check if message is from AI assistant"""
         if isinstance(msg, AIMessage):
             return True
         if isinstance(msg, dict):
-            return msg.get("role") in ("assistant", "system")
+            role = msg.get("role")
+            msg_type = msg.get("type")
+            return role in ("assistant", "system") or msg_type in ("ai", "assistant", "system")
         return False
     
     # For single message, return its content
@@ -70,9 +74,9 @@ def get_research_topic(messages: List[Any]) -> str:
                 if is_ai_message(msg):
                     # Extract a summary from the assistant's response
                     content = extract_content(msg)
-                    if len(content) > 300:
+                    if len(content) > 1000:
                         # Take the first 200 chars and last 100 chars for context
-                        assistant_summary = f"{content[:200]}...{content[-100:]}"
+                        assistant_summary = f"{content[:700]}...{content[-300:]}"
                     else:
                         assistant_summary = content
                     break
@@ -151,23 +155,23 @@ def insert_citation_markers(text, citations_list):
     return modified_text
 
 
-def truncate_content(content: str, max_length: int = 300) -> str:
+def truncate_content(content: str, min_length: int = 1000) -> str:
     """
     Truncate content using smart strategy to reduce token consumption.
     
     Args:
         content: The content to truncate
-        max_length: Maximum length threshold (default: 300)
+        min_length: 最短处理长度 短于这个长度的不进行处理 直接返回
         
     Returns:
-        str: Truncated content using "first 200 + ... + last 100" strategy for long content
+        str: Truncated content
     """
-    if not content or len(content) <= max_length:
+    if not content or len(content) <= min_length:
         return content
     
-    # For long content: take first 200 chars + "..." + last 100 chars
-    first_part = content[:200]
-    last_part = content[-100:]
+    # For long content: take first 700 chars + "..." + last 300 chars
+    first_part = content[:700]
+    last_part = content[-300:]
     return f"{first_part}...{last_part}"
 
 
