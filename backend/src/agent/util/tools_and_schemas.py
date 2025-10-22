@@ -30,6 +30,14 @@ class Reflection(BaseModel):
         default=0.0,
         description="Overall research completion percentage (0.0-1.0)."
     )
+    compressed_web: str = Field(
+        default="",
+        description="Compressed summary of WEB sources, extracting only key facts relevant to research objectives."
+    )
+    compressed_mem: str = Field(
+        default="",
+        description="Compressed summary of MEMORY sources, extracting only key facts relevant to research objectives."
+    )
 
 
 class Intent(BaseModel):

@@ -47,6 +47,7 @@ from agent.api.rag_rest import query_rag_rest
 
 from agent.graph_utils import (
     _prepare_summaries,
+    _prepare_summaries_by_type,
     _contains_cjk,
     _extract_cjk_terms,
     _translate_to_english,
@@ -180,7 +181,9 @@ def detect_follow_up(state: OverallState, config: RunnableConfig) -> OverallStat
         
         # 处理 former_ids：LLM 可能输出浮点数，需转为整数
         former_ids_raw = detection_result.get("former_ids", [])
+        ask_project_ids_raw = detection_result.get("ask_project_ids", [])
         former_ids = []
+        ask_project_ids = []
         if former_ids_raw:
             for item in former_ids_raw:
                 try:
@@ -189,15 +192,24 @@ def detect_follow_up(state: OverallState, config: RunnableConfig) -> OverallStat
                 except (ValueError, TypeError) as e:
                     logger.warning(f"[NEO_LOG][follow_up_detection] 无效的 former_id: {item}, 错误: {e}")
                     continue
-        
-        logger.info("[NEO_LOG][follow_up_detection] threshold=%s, confidence=%s, is_follow_up=%s, former_ids=%s", 
-                    threshold, confidence, is_follow_up, former_ids)
+        if ask_project_ids_raw:
+            for item in ask_project_ids_raw:
+                try:
+                    # 转为整数（处理浮点数如 12345.0 -> 12345）
+                    ask_project_ids.append(int(float(item)))
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"[NEO_LOG][follow_up_detection] 无效的 ask_project_id: {item}, 错误: {e}")
+                    continue
+        project_names = detection_result.get("project_names", [])
+        logger.info("[NEO_LOG][follow_up_detection] threshold=%s, confidence=%s, is_follow_up=%s, former_ids=%s, ask_project_ids=%s, project_names=%s", 
+                    threshold, confidence, is_follow_up, former_ids, ask_project_ids, project_names)
         
         # 保留现有状态，只更新追问相关字段
         return {
-            "former_ids": former_ids,
             "is_follow_up": is_follow_up,
-            "follow_up_detection": detection_result
+            "follow_up_detection": detection_result,
+            "former_ids": former_ids,
+            "ask_project_ids": ask_project_ids,
         }
         
     except Exception as e:
@@ -1059,7 +1071,7 @@ def finalize_answer(state: OverallState, config: RunnableConfig):
 
     # Format the prompt
     current_date = get_current_date()
-    safe_results = [s for s in state.get("web_research_result", []) if isinstance(s, str)]
+    safe_results = [s for s in state.get("web_research_result", [])]
     formatted_prompt = answer_instructions.format(
         current_date=current_date,
         research_topic=get_research_topic(state.get("messages", [])),
@@ -1374,6 +1386,7 @@ def generate_query(state: OverallState, config: RunnableConfig) -> OverallState:
         "research_plan",
         "messages",  # QueryGenerationState
         "former_ids",
+        "ask_project_ids",
     ]
     for key in critical_keys:
         if state.get(key) is not None:
@@ -1807,7 +1820,7 @@ def web_research_SerpAPI(state: WebSearchState, config: RunnableConfig) -> Overa
     return {
         "sources_gathered": sources_gathered,
         "search_query": [state.get("search_query", "")],
-        "web_research_result": [modified_text],
+        "web_research_result": [{"type":"web","text": modified_text}], # [modified_text],
         "dispatched_queries": dispatched_out,
         "web_sources_reranked": web_sources_reranked,
         "web_rerank_meta": web_rerank_meta,
@@ -1997,15 +2010,12 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
     _elapsed = time.time() - _node_start
     logger.info("[NEO_LOG] [web_search] Web查询 END, id=%s: '%s', 耗时=%.2fs, 结果数: %d sources, %d chars | Preview: %s",
                 state.get("id", "N/A"), original_query, _elapsed, len(sources_gathered), len(modified_text),
-                # modified_text,
                 modified_text[:100] + "..." if len(modified_text) > 100 else modified_text
                 )
-    # if sources_gathered:
-    #     logger.info("[NEO_LOG] [web_search] sources_gathered: %s", sources_gathered[0])
     return {
         "sources_gathered": sources_gathered,
         "search_query": [state.get("search_query", "")],
-        "web_research_result": [modified_text],
+        "web_research_result": [{"type":"web","text": modified_text}], # [modified_text],
         "dispatched_queries": dispatched_out,
     }
 
@@ -2063,7 +2073,7 @@ def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
         # 从状态中读取地区和项目类型过滤条件
         query_region = state.get("query_region")
         query_project_type = state.get("query_project_type")
-        # logger.info("[NEO_LOG] [rag_search] RAG附加查询条件 - pids: %s", state.get("former_ids", []))
+        logger.info("[NEO_LOG] [rag_search] RAG附加查询条件调试 - pids: %s", state.get("ask_project_ids", []))
         hits_raw = query_rag_rest(
             endpoint=getattr(configurable, "rag_search_endpoint"),
             api_key=getattr(configurable, "rag_rest_api_key"),
@@ -2118,7 +2128,7 @@ def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
     segments = _build_segments(combined_hits)
 
     hits_ranked = []
-    # 级联重排 Apply cascaded reranking: local heuristic -> VoyageAI (if enabled)
+    # RAG重排 已禁用
     if combined_hits and getattr(configurable, 'enable_rag_rerank'):
         try:
             # Stage 1: Local heuristic reranking (fast pre-filtering)
@@ -2226,8 +2236,8 @@ def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
             date = h.get("date", "") # 截止投标日期
             url = h.get("url", "") # 项目URL
             desc = h.get("desc", "") # 项目描述
-            bullets.append(f"{id}. {title} | {date} | {url} | {desc}")
-        modified_text = "\n".join(bullets)
+            bullets.append({"type":"rag", "text": f"{id}. {title} | {date} | {url} | {desc}"})
+        modified_text = "\n".join([b["text"] for b in bullets])
         rag_search_result = bullets
     else:
         modified_text = "RAG搜索未找到相关内容。"
@@ -2259,8 +2269,6 @@ def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
                 project_ids,
                 modified_text[:100] + "..." if len(modified_text) > 100 else modified_text
                 )
-    # if segments:
-    #     logger.info("[NEO_LOG] [rag_search] sources_gathered: %s", segments[0])
     return {
         "sources_gathered": segments,
         "search_query": [state.get("search_query", "")],
@@ -2312,7 +2320,7 @@ def mem_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
                                  retry_count, max_retries + 1, node_id)
                     if retry_count > max_retries:
                         mem_results = [
-                            "[mem] 记忆搜索服务超时，请稍后重试"
+                            {"type":"mem","text": "[mem] 记忆搜索服务超时，请稍后重试"}
                         ]
                         
         except Exception as e:
@@ -2321,17 +2329,16 @@ def mem_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
                         retry_count, max_retries + 1, node_id, str(e))
             if retry_count > max_retries:
                 mem_results = [
-                    "[mem] 记忆搜索服务暂时不可用"
+                    {"type":"mem","text": "[mem] 记忆搜索服务暂时不可用"}
                 ]
 
     dispatched_out = [original_query] if original_query else []
     _elapsed = time.time() - _node_start
     
-    logger.debug("[NEO_LOG] [mem_search] 记忆搜索 END, id=%s: '%s', 耗时=%.2fs, 重试=%d次, 结果数=%d | Preview: %s",
+    logger.info("[NEO_LOG] [mem_search] 记忆查询 END, id=%s: '%s', 耗时=%.2fs, 重试=%d次, 结果数=%d | Preview: %s",
                 node_id, original_query, _elapsed, retry_count, len(mem_results),
                 mem_results[0][:50] + "..." if mem_results and len(mem_results[0]) > 50 else (mem_results[0] if mem_results else "无结果")
                 )
-
     return {
         "sources_gathered": [],  # Mock version doesn't provide real sources
         "search_query": [state.get("search_query", "")],
@@ -2340,7 +2347,7 @@ def mem_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
     }
 
 # 记忆搜索API调用（暂时Mock）
-def _mock_mem_api_call_sync(query: str, node_id: str) -> list[str]:
+def _mock_mem_api_call_sync(query: str, node_id: str) -> list[dict|str]:
     """Mock synchronous memory API call with realistic delay."""
     
     # Simulate realistic API latency (0.3-1.0s for mock)
@@ -2349,20 +2356,20 @@ def _mock_mem_api_call_sync(query: str, node_id: str) -> list[str]:
     query_lower = (query or "").lower()
     
     # Simplified categorization logic
-    if any(kw in query_lower for kw in ["招投标", "供应商", "项目", "采购"]):
+    if any(kw in query_lower for kw in ["招投标", "供应商", "项目", "采购", "材料"]):
         return [
-            "[记忆] 历史画像：你经常关注招投标和供应商信息，特别是室内设计相关的项目",
-            "[记忆] 用户偏好：倾向于获取官方公告链接和详细的项目描述信息",
+            {"type":"mem","text": "[记忆] 历史画像：你经常关注招投标和供应商信息，特别是室内设计相关的项目"},
+            {"type":"mem","text": "[记忆] 用户偏好：倾向于获取官方公告链接和详细的项目描述信息"},
         ]
     elif any(kw in query_lower for kw in ["技术", "研究", "发展", "趋势", "推荐", "分析"]):
         return [
-            "[记忆] 研究偏好：你对技术发展和行业趋势比较关注",
-            "[记忆] 历史模式：通常需要深入的技术分析和行业洞察",
-            "[记忆] 建议：结合最新的研究报告和专业资料进行分析"
+            {"type":"mem","text": "[记忆] 研究偏好：你对技术发展和行业趋势比较关注"},
+            {"type":"mem","text": "[记忆] 历史模式：通常需要深入的技术分析和行业洞察"},
+            {"type":"mem","text": "[记忆] 建议：结合最新的研究报告和专业资料进行分析"}
         ]
     elif any(kw in query_lower for kw in ["上次", "之前", "聊", "对话", "记录"]):
         return [
-            "[记忆] 对话回忆：你之前提到你比较喜欢设计和艺术",
+            {"type":"mem","text": "[记忆] 对话回忆：你之前提到你比较喜欢设计和艺术"},
         ]
     else:
         return []
@@ -2503,10 +2510,10 @@ def thinking_middle_stage(state: OverallState, config: RunnableConfig) -> Overal
     sources_reranked = state.get("sources_reranked", [])
     safe_results = []
     if sources_reranked:
-        safe_results = [s for s in sources_reranked if isinstance(s, str)]
+        safe_results = [s for s in sources_reranked]
         # logger.info("[NEO_LOG] [thinking_middle_stage] top2 sources_reranked: %s", safe_results[:2])
     else:
-        safe_results = [s for s in web_research_result if isinstance(s, str)]
+        safe_results = [s for s in web_research_result]
         # logger.info("[NEO_LOG] [thinking_middle_stage] top2 web_research_result: %s", safe_results[:2])
     
     # Get research topic from messages or use a fallback
@@ -2588,12 +2595,12 @@ def thinking_finalization_stage(state: OverallState, config: RunnableConfig) -> 
     sources_reranked = state.get("sources_reranked", [])
     safe_results = []
     if sources_reranked:
-        # logger.info("[NEO_LOG] [generate_enhanced_report] 使用重排后的高质量数据: %d", len(sources_reranked))
-        safe_results = [s for s in sources_reranked if isinstance(s, str)]
+        # logger.info("[NEO_LOG] [thinking_finalization_stage] 使用重排后的高质量数据: %d %s", len(sources_reranked), sources_reranked[:2])
+        safe_results = [s for s in sources_reranked]
         # logger.info("[NEO_LOG] [thinking_finalization_stage] top2 sources_reranked: %s", safe_results[:2])
     else:
-        # logger.info("[NEO_LOG] [generate_enhanced_report] 使用未重排的原始数据: %d", len(state.get("web_research_result", [])))
-        safe_results = [s for s in web_research_result if isinstance(s, str)]
+        # logger.info("[NEO_LOG] [thinking_finalization_stage] 使用未重排的原始数据: %d", len(state.get("web_research_result", [])))
+        safe_results = [s for s in web_research_result]
         # logger.info("[NEO_LOG] [thinking_finalization_stage] top2 web_research_result: %s", safe_results[:2])
     
     research_topic = get_research_topic(messages) if messages else "研究主题"
@@ -2676,7 +2683,8 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
 
     # Format the prompt
     current_date = get_current_date()
-    safe_results = [s for s in state.get("web_research_result", []) if isinstance(s, str)]
+    safe_results = [s for s in state.get("web_research_result", [])]
+    # logger.info("[NEO_LOG] [reflection] web_research_results: %s", safe_results)
     # Get research objectives from research plan if available
     research_plan = state.get("research_plan", {})
     research_objectives = research_plan.get("research_objectives", [])
@@ -2745,11 +2753,17 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
         try:
             # Combine and deduplicate by URL
             combined_sources = state.get("web_research_result", []) or []
-            seen_urls = set()
-            # 去重
-            # logger.info("[NEO_LOG] [reflection] documents before deduplication: %d", len(combined_sources))
-            combined_sources = list(set(combined_sources))
-            # logger.info("[NEO_LOG] [reflection] documents after deduplication: %d", len(combined_sources))
+            # 去重：基于 text 字段（dict）或字符串本身（str）
+            logger.info("[NEO_LOG] [reflection] documents before deduplication: %d", len(combined_sources))
+            seen_texts = set()
+            deduped_sources = []
+            for item in combined_sources:
+                text = item.get("text") if isinstance(item, dict) else item
+                if text and text not in seen_texts:
+                    seen_texts.add(text)
+                    deduped_sources.append(item)
+            combined_sources = deduped_sources
+            logger.info("[NEO_LOG] [reflection] documents after deduplication: %d", len(combined_sources))
 
             # Apply final reranking if we have enough sources
             min_sources_for_rerank = getattr(configurable, 'final_rerank_min_count')
@@ -2757,13 +2771,20 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
                 voyage_reranker = create_voyage_reranker(configurable)
                 # Prepare documents for VoyageAI
                 if voyage_reranker:
+                    # 建立 text -> dict 映射，保留 type 信息
+                    text_to_item_map = {}
                     documents = []
-                    # 用标题title和desc拼接成文档，可优化
                     for source in combined_sources:
-                        doc_text = source # f"{source.get('title', '')} {source.get('desc', '')}".strip()
-                        documents.append(doc_text)
-                    # 去重
-                    # documents = list(set(documents))
+                        if isinstance(source, dict):
+                            doc_text = source.get("text")
+                            if doc_text:
+                                documents.append(doc_text)
+                                # 使用 text 作为 key，保存完整的 dict（包含 type）
+                                text_to_item_map[doc_text] = source
+                        elif isinstance(source, str):
+                            documents.append(source)
+                            # 向后兼容：纯字符串构造一个伪 dict
+                            text_to_item_map[source] = {"type": "web", "text": source}
 
                     # Get research topic for query
                     research_topic = get_research_topic(state.get("messages", []))
@@ -2771,8 +2792,7 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
                     query = " ".join(queries)
                     query = research_topic + " " + query
                     # Call VoyageAI final rerank
-                    logger.info("[NEO_LOG] [reflection] 重排前(已去重) origin=%d, query=%s", len(documents), research_topic)
-                    # logger.info("[NEO_LOG] [reflection] 重排前(已去重) query=%s, origin=%s", research_topic, documents)
+                    logger.info("[NEO_LOG] [reflection] VoyageAI 重排前(已去重) origin=%d, query=%s", len(documents), research_topic)
                     voyage_result = voyage_reranker.rerank_documents(
                         query=query,
                         documents=documents,
@@ -2780,11 +2800,18 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
                         relevance_threshold=getattr(configurable, 'rag_relevance_threshold')
                     )
                     
-                    # Map back to original sources
+                    # 根据 rerank 结果映射回原始 dict（包含 type）
                     reranked_sources = []
                     for idx in voyage_result.original_indices:
                         if 0 <= idx < len(documents):
-                            reranked_sources.append(documents[idx])
+                            doc_text = documents[idx]
+                            # 从映射表找回原始 dict
+                            original_item = text_to_item_map.get(doc_text)
+                            if original_item:
+                                reranked_sources.append(original_item)
+                            else:
+                                # Fallback: 如果映射丢失，构造一个默认 dict
+                                reranked_sources.append({"type": "web", "text": doc_text})
                     
                     sources_reranked = reranked_sources
                     reflection_rerank_meta = {
@@ -2793,9 +2820,9 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
                         'avg_score': sum(voyage_result.relevance_scores) / len(voyage_result.relevance_scores) if voyage_result.relevance_scores else 0.0,
                         'tokens': voyage_result.api_usage.get('total_tokens', 0)
                     }
-                    # logger.info("[NEO_LOG] [reflection] 重排后 query=%s, origin=%d -> final=%d, rerank=%s", 
+                    # logger.info("[NEO_LOG] [reflection] VoyageAI 重排后 query=%s, origin=%d -> final=%d, rerank=%s", 
                     #     research_topic, len(documents), len(sources_reranked), sources_reranked)
-                    logger.info("[NEO_LOG] [reflection] 重排后 origin=%d -> final=%d (avg_score=%.3f, tokens=%d) query=%s", 
+                    logger.info("[NEO_LOG] [reflection] VoyageAI 重排后 origin=%d -> final=%d (avg_score=%.3f, tokens=%d) query=%s", 
                                len(documents), len(sources_reranked),
                                reflection_rerank_meta['avg_score'], reflection_rerank_meta['tokens'], research_topic)
                     # RERANK 没有匹配的情况（考虑阈值0.5）使用3个原始文档
@@ -2814,13 +2841,33 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
             sources_reranked = combined_sources[:3]
             reflection_rerank_meta = {'error': str(e)}
     
+    # 3. 按来源类型构造分段 summaries（Web/Mem 合并 + RAG 原文）
+    # 使用 sources_reranked（dict items）而非提取后的纯文本，以保留 type 信息
+    type_counts = {"rag": 0, "web": 0, "mem": 0, "str": 0}
     if sources_reranked:
-        safe_results = [s for s in sources_reranked if isinstance(s, str)]
-        # logger.info("[NEO_LOG] [reflection] top3 sources_reranked: %s", safe_results[:3])
-    # else:
-    #     logger.info("[NEO_LOG] [reflection] top3 web_research_result: %s", safe_results[:3])
-    
-    # 3. 组装LLM提示词并调用结构化输出
+        # 统计各类型数量
+        for item in sources_reranked:
+            if isinstance(item, dict):
+                item_type = item.get("type", "web")
+                type_counts[item_type] = type_counts.get(item_type, 0) + 1
+            else:
+                type_counts["str"] += 1
+        
+        # 使用分段构造函数：Web/Mem 合并压缩，RAG 保留原文
+        summaries_text = _prepare_summaries_by_type(
+            sources_reranked,
+            max_items=16,
+            max_chars=40000
+        )
+        logger.info("[NEO_LOG] [reflection] sources_reranked type distribution: rag=%d, web=%d, mem=%d",
+                   type_counts.get("rag", 0), type_counts.get("web", 0), type_counts.get("mem", 0))
+        # logger.info("[NEO_LOG] [reflection] summaries_text preview: %s", summaries_text[:500] + "..." if len(summaries_text) > 500 else summaries_text)
+    else:
+        # Fallback: 使用原始 safe_results（已提取文本）
+        summaries_text = _prepare_summaries(safe_results)
+        logger.info("[NEO_LOG] [reflection] Using fallback summaries (no reranked sources)")
+        
+    # 组装LLM提示词并调用结构化输出
     formatted_prompt = reflection_instructions.format(
         current_date=current_date,
         research_topic=get_research_topic(state.get("messages", [])),
@@ -2829,9 +2876,10 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
         previous_gaps=previous_gaps_text,
         previous_objectives_progress=prev_obj_prog_text,
         progress_scoring_rules=progress_scoring_rules,
-        summaries=_prepare_summaries(safe_results),
+        summaries=summaries_text,
     )
     # 添加详细日志跟踪LLM调用和followups生成
+    # logger.info("[NEO_LOG] [reflection] PROMPT: %s", formatted_prompt)
     logger.info("[NEO_LOG] [reflection] PROMPT LENGTH: %d", len(formatted_prompt))
     # init Reasoning Model
     llm = ChatGoogleGenerativeAI(
@@ -2846,7 +2894,7 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
         # 只调用一次LLM，获取原始输出并手动解析
         raw_result = llm.invoke(formatted_prompt)
         raw_content = raw_result.content if hasattr(raw_result, 'content') else str(raw_result)
-        logger.debug("[NEO_LOG] [reflection] LLM原始文本返回: %s", raw_content)
+        logger.info("[NEO_LOG] [reflection] LLM原始文本返回: %s", raw_content)
         
         # 手动解析JSON并创建Reflection对象
         import json
@@ -2907,7 +2955,9 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
             knowledge_gap="Structured output parsing failed; using local fallback analysis",
             follow_up_queries=[fallback_query],
             objectives_progress=preserved_objectives_progress,
-            overall_completion=0.0  # 由后续统一计算
+            overall_completion=0.0,  # 由后续统一计算
+            compressed_web="",  # fallback 时无法压缩，保持空字符串
+            compressed_mem=""   # fallback 时无法压缩，保持空字符串
         )
 
     # Ensure follow_up_queries is properly extracted
@@ -2977,14 +3027,54 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
     new_prog_history = (state.get("objectives_progress_history", []) or []) + [merged_prog]
     new_prog_history = new_prog_history[-history_max:]
     
-    # 7 返回值调试日志 - 记录最终返回给下游节点的数据
+    # 7 提取压缩后的 WEB/MEM 并替换 web_research_result
+    compressed_web = getattr(result, "compressed_web", "") or ""
+    compressed_mem = getattr(result, "compressed_mem", "") or ""
+    updated_web_research_result = []
+    
+    if compressed_web or compressed_mem:
+        # 用压缩后的 WEB/MEM 替换原始数据
+        # logger.info("[NEO_LOG] [reflection] Using compressed WEB (%d chars) and MEM (%d chars) to replace original sources", 
+        #            len(compressed_web), len(compressed_mem))
+        
+        # 添加压缩后的 WEB（如果有）
+        if compressed_web:
+            updated_web_research_result.append({
+                "type": "web",
+                "text": compressed_web
+            })
+        
+        # 添加压缩后的 MEM（如果有）
+        if compressed_mem:
+            updated_web_research_result.append({
+                "type": "mem",
+                "text": compressed_mem
+            })
+        
+        # 保留所有 RAG 数据（不压缩）
+        for item in sources_reranked:
+            if isinstance(item, dict) and item.get("type") == "rag":
+                updated_web_research_result.append(item)
+    else:
+        # Fallback: 如果 LLM 没有输出压缩版本，保留原始数据
+        logger.warning("[NEO_LOG] [reflection] No compressed_web/mem from LLM, keeping original sources")
+        updated_web_research_result = sources_reranked
+    
+    # 8 返回值调试日志 - 记录最终返回给下游节点的数据
     effort = _infer_effort(state, configurable)
     completion_threshold = _effort_completion_threshold(configurable, effort)
-    logger.info("[NEO_LOG] [reflection] 反思结束： Result: %s", result)
-    # logger.info("[NEO_LOG] [reflection] 反思结束：Sources reranked: %s, planned_cursor: %d, Result: %s", sources_reranked, state.get("planned_cursor", 0), result)
+    logger.info("[NEO_LOG] [reflection] 反思结束：result=%s", result)
+    # logger.info("[NEO_LOG] [reflection] 反思结束：compressed_web=%d chars, compressed_mem=%d chars, updated_results=%d items (web=%d, mem=%d, rag=%d)", 
+    #             len(compressed_web), len(compressed_mem), len(updated_web_research_result),
+    #             sum(1 for x in updated_web_research_result if isinstance(x, dict) and x.get("type") == "web"),
+    #             sum(1 for x in updated_web_research_result if isinstance(x, dict) and x.get("type") == "mem"),
+    #             sum(1 for x in updated_web_research_result if isinstance(x, dict) and x.get("type") == "rag"))
+    # logger.info("[NEO_LOG] [reflection] updated_web_research_result: %s", updated_web_research_result)
+    
     return {
         # None-safe extraction to avoid AttributeError when result is None
-        "sources_reranked": sources_reranked,
+        "sources_reranked": updated_web_research_result,  # 使用更新后的数据
+        "web_research_result": updated_web_research_result,  # 同步更新原始字段
         "effort": effort,
         "completion_threshold": completion_threshold,
         "overall_completion": overall_completion,
@@ -3090,11 +3180,11 @@ def generate_enhanced_report(state: OverallState, config: RunnableConfig) -> Ove
     # 经过处理后的有效结果
     safe_results = []
     if sources_reranked:
-        # logger.info("[NEO_LOG] [generate_enhanced_report] 使用重排后的高质量数据: %s", sources_reranked)
-        safe_results = [s for s in sources_reranked if isinstance(s, str)]
+        # logger.info("[NEO_LOG] [generate_enhanced_report] 使用重排后的高质量数据: %d %s", len(sources_reranked), sources_reranked[:2])
+        safe_results = [s for s in sources_reranked]
     else:
         # logger.info("[NEO_LOG] [generate_enhanced_report] 使用未重排的原始数据: %d", len(state.get("web_research_result", [])))
-        safe_results = [s for s in state.get("web_research_result", []) if isinstance(s, str)]
+        safe_results = [s for s in state.get("web_research_result", [])]
     
     # Build comprehensive research process context
     process_context = "\n\n"
@@ -3168,8 +3258,7 @@ def generate_enhanced_report(state: OverallState, config: RunnableConfig) -> Ove
         # Be resilient: if anything goes wrong, skip sanitization without failing the flow
         pass
     
-    logger.info("[NEO_LOG] [generate_enhanced_report] END, RESULT PREVIEW: %s", result.content[:2000])
-    # logger.info("[NEO_LOG] [generate_enhanced_report] END, RESULT LENGTH: %d", len(result.content))
+    logger.info("[NEO_LOG] [generate_enhanced_report] END, RESULT PREVIEW:%d %s", len(result.content), result.content[:2000])
     
     # 获取现有消息并追加新的AI回复
     existing_messages = state.get("messages", [])

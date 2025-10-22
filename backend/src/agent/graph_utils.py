@@ -6,18 +6,35 @@ from agent.configuration import Configuration
 # Unified summaries separator and builder
 SUMMARY_SEPARATOR = "\n\n---\n\n"
 
-def _prepare_summaries(results: list[str] | None, max_items: int = 10, max_chars: int = 40000) -> str:
-    """Build a normalized, light deduped and size-capped summaries string.
+def _prepare_summaries(results: list[str | dict] | None, max_items: int = 16, max_chars: int = 40000) -> str:
+    """Build a normalized, light deduped and size-capped summaries string with type tags.
 
-    - Filters non-strings
+    max_items: voyage_rerank_top_k
+    - Handles both str and dict (extracts 'text' field from dict)
+    - Preserves type information by adding [RAG]/[WEB]/[MEM] prefix tags
     - Deduplicates by normalized lowercase + collapsed whitespace
     - Caps by items count and total characters
     - Joins with a unified separator
     """
     if not results:
         return "No research results available"
-    # 过滤与轻量去重
-    safe = [s for s in results if isinstance(s, str)]
+    # 过滤与提取文本：dict 取 text 字段并添加 type 标签，str 直接用
+    safe = []
+    for item in results:
+        if isinstance(item, dict):
+            text = item.get("text")
+            item_type = item.get("type", "web")  # 默认 web
+            if text:
+                # 添加类型标签前缀
+                if item_type == "rag":
+                    safe.append(f"[RAG] {text}")
+                elif item_type == "mem":
+                    safe.append(f"[MEM] {text}")
+                else:  # web
+                    safe.append(f"[WEB] {text}")
+        elif isinstance(item, str):
+            # 向后兼容：纯字符串标记为 web
+            safe.append(f"[WEB] {item}")
     seen: set[str] = set()
     dedup: list[str] = []
     for s in safe:
@@ -45,6 +62,91 @@ def _prepare_summaries(results: list[str] | None, max_items: int = 10, max_chars
         out.append(s)
         total += sep_len + len(s)
     return SUMMARY_SEPARATOR.join(out) if out else "No research results available"
+
+def _prepare_summaries_by_type(results: list[str | dict] | None, max_items: int = 16, max_chars: int = 40000) -> str:
+    """Build structured summaries with type-tagged items for LLM visibility.
+    
+    Args:
+        results: List of str or dict items (dict must have 'type' and 'text' fields)
+        max_items: Maximum number of items to include
+        max_chars: Maximum total characters
+    
+    Returns:
+        Formatted string with three sections, each item prefixed with type tag:
+        [WEB SOURCES] - Items tagged with [WEB]
+        [MEMORY SOURCES] - Items tagged with [MEM]
+        [RAG SOURCES] - Items tagged with [RAG] (preserved as-is)
+    
+    Example output:
+        [WEB SOURCES]
+        [WEB] The hotel design landscape in Guangdong...
+        [WEB] Recent developments in hospitality...
+        
+        ---
+        
+        [MEMORY SOURCES]
+        [MEM] User preference: Focus on luxury hotels
+        
+        ---
+        
+        [RAG SOURCES]
+        [RAG] 334. 吉县农业生产基地建设项目招标公告 | 2025-09-08 | ...
+        [RAG] 390. 2025年濉溪县百善镇... | 2025-09-03 | ...
+    """
+    if not results:
+        return "No research results available"
+    
+    # 分组：按 type 拆分，并给每条加上类型标签
+    rag_items = []
+    web_items = []
+    mem_items = []
+    
+    for item in results:
+        if isinstance(item, dict):
+            item_type = item.get("type", "web")  # 默认当作 web
+            text = item.get("text")
+            if not text:
+                continue
+            
+            # 给每条文本加上类型前缀标签
+            if item_type == "rag":
+                rag_items.append(f"[RAG] {text}")
+            elif item_type == "mem":
+                mem_items.append(f"[MEM] {text}")
+            else:  # web
+                web_items.append(f"[WEB] {text}")
+        elif isinstance(item, str):
+            # 向后兼容：纯字符串当作 web
+            web_items.append(f"[WEB] {item}")
+    
+    # 构造分段 summaries
+    sections = []
+    
+    # Section 1: WEB 数据（带标签）
+    if web_items:
+        web_budget_items = max(1, max_items // 3)
+        web_budget_chars = max(1000, max_chars // 3)
+        web_summary = _prepare_summaries(web_items, web_budget_items, web_budget_chars)
+        sections.append(f"[WEB SOURCES]\n{web_summary}")
+    
+    # Section 2: MEM 数据（带标签）
+    if mem_items:
+        mem_budget_items = max(1, max_items // 3)
+        mem_budget_chars = max(1000, max_chars // 3)
+        mem_summary = _prepare_summaries(mem_items, mem_budget_items, mem_budget_chars)
+        sections.append(f"[MEMORY SOURCES]\n{mem_summary}")
+    
+    # Section 3: RAG 原文保留（带标签，bullets 格式）
+    if rag_items:
+        rag_budget_items = max_items - len(web_items) - len(mem_items)
+        rag_texts = rag_items[:rag_budget_items]
+        rag_block = "\n".join(rag_texts)
+        sections.append(f"[RAG SOURCES]\n{rag_block}")
+    
+    if not sections:
+        return "No research results available"
+    
+    return "\n\n---\n\n".join(sections)
 
 def _contains_cjk(text: str) -> bool:
     """Lightweight detection for CJK characters to decide if translation is needed."""

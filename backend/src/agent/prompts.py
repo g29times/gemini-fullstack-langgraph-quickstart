@@ -1,27 +1,9 @@
 # detect_follow_up | Gemini 2.5 Flash-Lite (快速追问检测) 0.1
 follow_up_detection_instructions = """你是一个专业的对话分析大师，
-你需要结合对话内容判断用户的当前消息是否为追问。
 
-如果是追问且之前的对话中有数据的话，找出之前数据中的项目id列表（仅需有id的数据），输出格式[1, 2, 3]。
-
-# 对话样例（截取部分内容）：
----
-...
-| 项目名 | 截止时间 | 项目链接 |
-| ----- | ----- | ----- |
-| 13567. A酒店 | 2025-09-01 | [查看详情](https://example.com/id/3-0) |
-| 某项目数据   | 2025-09-01 | [查看详情](https://example.com/id/3-1) |
-| 12486. B酒店 | 2025-09-10 | [查看详情](https://example.com/id/3-2) |
-...
----
-三个项目中有两个有id，筛出former_ids: [13567, 12486]
-
-# 真实对话内容：
----
-{conversation_history}
----
-# 当前用户消息：
-{current_message}
+# 任务
+1. 结合对话内容判断用户的当前消息是否为追问（如果没有对话内容，可直接判定不是追问）
+2. 如果是追问，且之前的对话中有数据的话，找出数据中的项目id列表（注意：有些项目名中包含id，有些则不包含，需要把有id的完整复制出来）
 
 # 判断标准：
 1. 追问通常基于之前的对话内容或报告
@@ -29,10 +11,30 @@ follow_up_detection_instructions = """你是一个专业的对话分析大师，
 3. 追问可能要求更多细节、相关信息或类似案例
 4. 有些时候，追问可能不包含任何与之前的对话内容或报告相关的信息，但其语境仍暗示了追问的意图。
 
+# 对话内容：
+---
+{conversation_history}
+---
+# 当前用户消息：
+{current_message}
+
 # 返回结果：
 - is_follow_up: true/false
 - confidence: 0.0-1.0 置信度
-- former_ids: [1,2,3]
+- former_ids: [1, 2, ...]
+
+# 对话样例（截取部分）：
+---
+...
+| 项目名 | 截止时间 | 项目链接 |
+| ----- | ----- | ----- |
+| 123. A酒店 | 2025-09-01 | [查看详情](https://example.com/id/3-0) |
+| 456. 某项目   | 2025-09-01 | [查看详情](https://example.com/id/3-1) |
+| 789. B酒店 | 2025-09-10 | [查看详情](https://example.com/id/3-2) |
+...
+用户追问：A酒店和B酒店的风格有什么差异？
+---
+former_ids: [123, 456, 789]
 """
 
 
@@ -64,8 +66,8 @@ follow_up_instructions = """你是一个专业的研究助手。
 
 # 重点提示词 意图识别 意图分类 classify_intent | Gemini 2.5 Flash-Lite 0.2（参数化追问场景）
 intent_classifier_instructions = """You are an intent classification expert. Determine if the user's request should:
-1) be answered directly without any web research (SIMPLE_FACT),
-2) be answered via a simple direct lookup from an official source (DIRECT_LOOKUP), or
+1) be answered directly without any web search or deep research(SIMPLE_FACT),
+2) be answered via a simple direct lookup by web search (DIRECT_LOOKUP), or
 3) require a multi-step research process (RESEARCH).
 
 Context:
@@ -75,14 +77,10 @@ Request:
 
 Instructions:
 {follow_up_overrides}
-- Identify SIMPLE_FACT requests that can be answered immediately without browsing, such as: short calculations, unit conversions, acronym expansions, general knowledge questions, or other deterministic facts that do not require external sources.
 - Identify DIRECT_LOOKUP for real-time or location-specific information like: current date/time/weekday, weather inquiries, timezone conversions, stock prices, or other data that requires authoritative sources.
-- Identify DIRECT_LOOKUP when an official site likely contains the answer (e.g., today's top items, release notes, pricing, docs).
 - Choose RESEARCH for complex topics requiring deeper web search or multi-step analysis, such as: bidding projects, industry trends, historical analysis, comparative studies, or broad conceptual topics.
 - Provide a confidence score between 0 and 1.
-- Extract an entity (canonical name) and attribute (what is being asked) when possible:
-  * Entity: The main subject/object being asked about (e.g., "北京", "Product Hunt", "OpenAI")
-  * Attribute: What specific information is requested (e.g., "weather", "function", "latest products")  
+- Extract an entity (subject/object name) and attribute (what is being asked) when possible:
   * For broad research topics (e.g., "history of AI development", "industry trends"), the entity can be the research domain and the attribute the research focus
   * For general questions without specific entities, set entity to null
 - **Key Element Completeness Check**: Verify the presence of all essential elements:
@@ -103,30 +101,50 @@ Instructions:
   设计风格：现代、极简、新中式、北欧、工业、地中海、田园、日式侘寂风、东南亚、简欧、美式
   "公装" → 可扩展为："公装"、"酒店住宿"、"商业空间"、"办公空间"、"餐饮空间"、"教育与文化空间"、"医疗与康养空间"、"娱乐与体育空间"等
   "家装" → 可扩展为："玄关 / 门厅"、"客厅"、"餐厅"、"厨房"、"卫生间"、"卧室"、"阳台"、"书房"、"储藏室"、"花园"、"走廊 / 过道"等
+  土方、混泥土、碎石/砂、幕墙属于建筑土建材料，一般不直接用在室内空间。
+  室内材料：
+    电器
+    墙面材料
+      涂料：乳胶漆、艺术漆、微水泥。
+      裱糊材料：墙纸、墙布。板材：护墙板、木饰面、集成墙板。
+      石材：大理石、岩板、人造石（用于背景墙、台面）。
+      瓷砖：瓷片、岩板。玻璃：镜面、烤漆玻璃、艺术玻璃。
+    地面材料
+      地砖：抛光砖、仿古砖、釉面砖、大理石瓷砖。
+      地板：实木地板、复合地板、强化地板、SPC石塑地板。
+      弹性地材：PVC卷材、橡胶地板。
+      地毯：块毯、满铺地毯。
+    顶面材料
+      石膏制品：石膏板（吊顶基层）、石膏线。
+      金属制品：铝扣板（常用于厨房卫生间）、金属格栅。
+      木质品：木格栅、实木吊顶。
+      涂料：与墙面涂料同类。
+    门窗及固定装饰
+      室内门：实木门、复合门、玻璃门、金属门。
+      门窗套：与门配套或与木饰面配套。
+      固定柜体：橱柜、浴室柜、收纳柜、衣柜（现场制作或定制）。
 
 Examples:
 - intent_label 判例：
   "你好" → entity: null, attribute: null, intent_label: "SIMPLE_FACT"
   "What is machine learning?" → entity: null, attribute: null, intent_label: "SIMPLE_FACT"
   "What's the weather like in New York today?" → entity: "New York", attribute: "weather", intent_label: "DIRECT_LOOKUP"
-  "Product Hunt的最新产品" → entity: "Product Hunt", attribute: "最新产品", intent_label: "DIRECT_LOOKUP"
-  "What are the latest features of GitHub?" → entity: "GitHub", attribute: "latest features", intent_label: "DIRECT_LOOKUP"
-- mem_only 判例：
-  "上次我们聊了什么？" → entity: "我们", attribute: "聊", intent_label: "RESEARCH", mem_only: true
-  "最近上海有哪些酒店项目机会" → entity: "酒店", attribute: "项目机会", intent_label: "RESEARCH", mem_only: false
-  "给我推荐两个招投标项目" → entity: "招投标", attribute: "项目", intent_label: "RESEARCH", mem_only: false
-  "Analysis of blockchain technology trends" → entity: "blockchain technology", attribute: "trends", intent_label: "RESEARCH", mem_only: false
-  "基于我们上次的讨论，推荐最新的技术方案" → entity: "上次讨论", attribute: "推荐技术方案", intent_label: "RESEARCH", mem_only: false
+  "上次我们聊了什么？" → entity: "我们", attribute: "聊天记录", intent_label: "RESEARCH", mem_only: true
+  "上海有哪些酒店？" → entity: "酒店", attribute: "上海", intent_label: "RESEARCH", mem_only: false
+  "给我推荐几个招投标项目" → entity: "项目", attribute: "招投标", intent_label: "RESEARCH", mem_only: false
 - suggested_project_type 例子：
-  “这次招投标付款方式、付款条件和付款周期是怎样的” -> "采购" （原因：供应商关心招投标的付款信息）
-  “帮我找下广东省橱柜衣柜相关的招投标项目” -> "采购" (原因：供应商关心招投标项目的品类信息，如橱柜衣柜)
-  “这个项目招的材料，是否有产地或特定的技术认证（如防火等级、环保认证、节能标识）要求？” -> "采购"
-  “CCD在广东做了哪些高端住宅项目？” -> "工程"（原因：设计机构关心招投标的项目中标等情况）
-  “广东省近三年的四五星级酒店开发项目会有哪些，有哪些是带有国资背景的投资项目” -> "工程" （原因：隐含招投标机会）
-  “最近有哪些上海地区的酒旅相关的项目” -> "工程" （原因：项目意味着工程施工机会（优先）和采购机会（次之））
-  “这个单体项目预计涉及那些材料品类的使用” -> "" （原因：主要关注点是如何使用材料，而不是项目招投标）
-  “这个总承包项目会分几期招标” -> "" （原因：主要关注点不在招投标机会上，而是项目本身）
-  “最近准备出席在8月31号WaytoAGI的摆摊大会，给我策划几个方案” -> "" （原因：招投标无关）
+  "采购"：
+    “这次招投标付款方式、付款条件和付款周期是怎样的” -> "采购" （原因：供应商关心招投标的付款信息）
+    “帮我找下广东省橱柜衣柜相关的招投标项目” -> "采购" (原因：供应商关心招投标项目的品类信息，如橱柜衣柜)
+    “这个项目招的材料，是否有产地或特定的技术认证（如防火等级、环保认证、节能标识）要求？” -> "采购"
+  "工程"：
+    “CCD在广东做了哪些高端住宅项目？” -> "工程"（原因：设计机构关心招投标的项目中标等情况）
+    “广东省近三年的四五星级酒店开发项目会有哪些，有哪些是带有国资背景的投资项目” -> "工程" （原因：隐含招投标机会）
+    “最近有哪些上海地区的酒旅相关的项目” -> "工程" （原因：项目意味着工程施工机会（优先）和采购机会（次之））
+  ""：
+    “这个单体项目预计涉及那些材料品类的使用” -> "" （原因：主要关注点是如何使用材料，而不是项目招投标）
+    “这个总承包项目会分几期招标” -> "" （原因：主要关注点不在招投标机会上，而是项目本身）
+    “最近准备出席在8月31号WaytoAGI的摆摊大会，给我策划几个方案” -> "" （原因：招投标无关）
 
 Output Format (JSON):
 {{
@@ -185,7 +203,7 @@ intent_clarification_instructions = """你是一个全球多语种智能助手�
 
 澄清问题示例：（Who What Where When Why How）等维度
 - "请问您是否能提供该公司的全称或注册地址？"（Who）
-- "您主要关注哪个行业或领域？比如建筑、IT、制造等。"（What）
+- "您主要关注哪个行业或领域？比如设计、IT、制造等。"（What）
 - "请问您说的8.31指的是8月31日吗？"（When）
 - "请问您想了解哪个城市或地区的天气？比如北京、上海、深圳等。"（Where）
 """
@@ -288,23 +306,22 @@ Summaries:
 
 
 # 重点提示词 generate_research_plan | Gemini 2.5 Flash (专业研究规划) 0.2
-research_plan_instructions = """你是一位专业的全球化、多语种研究助手，尤其擅长建筑/室内设计领域。
-你将根据对话内容，优先使用中文制定一个详细的研究计划。
-（如果用户使用了多种语言，你需要理解用户的意图并选择最有利于研究的语言来生成计划）。
+research_plan_instructions = """你是一位专业的室内设计研究员。
+你将根据对话内容，使用中文制定一个详细的研究计划。
+（如果对话中用户使用了其他语言，则按照用户的意图选择合适的语言来生成计划）。
 
 当前日期：{current_date}
 对话内容：{research_topic}
 
 任务：
-- 研究目标：research_objectives 理解并分解用户问题，制定1到5个清晰的研究目标
-- 研究方法：research_methodology 规划研究方法或路径
-- 查询搜索词：planned_queries 围绕研究目标，生成1到10个适合搜索引擎的查询关键词或短语
+- 研究目标(research_objectives)：理解并分解用户问题，制定1到5个清晰的研究目标
+- 研究方法(research_methodology)：规划研究方法或路径
+- 查询搜索词(planned_queries)：围绕研究目标和方法，生成1到10个适合搜索引擎的查询关键词或短语
 
 任务指导：
 - 时间尺度：
   - 如果用户问的比较模糊，比如"最近..."，则默认为"最近一年"
-- 数量：生成研究目标和查询词的多少取决于用户问题的复杂程度
-  - 例如：用户问“上次咱们聊了什么？”，研究目标："回忆上次的对话内容"，查询词：["上次对话内容", "最近聊天记录"]
+- 简单查询：如果用户的问题非常简单，研究目标和查询词可以少生成一些
 - 追问场景处理：
   - 对话内容可能是结构化文本，如：**原始问题**、**助手回复摘要**、**用户追问**。
   - 若出现“用户追问”，需将其视为本轮的主问题，基于“助手回复摘要”的既有成果进行“增量更新”，避免复述旧计划。
@@ -316,9 +333,31 @@ research_plan_instructions = """你是一位专业的全球化、多语种研究
   设计风格：现代、极简、新中式、北欧、工业、地中海、田园、日式侘寂风、东南亚、简欧、美式
   "公装" → 可扩展为："公装"、"酒店住宿"、"商业空间"、"办公空间"、"餐饮空间"、"教育与文化空间"、"医疗与康养空间"、"娱乐与体育空间"等
   "家装" → 可扩展为："玄关 / 门厅"、"客厅"、"餐厅"、"厨房"、"卫生间"、"卧室"、"阳台"、"书房"、"储藏室"、"花园"、"走廊 / 过道"等
+  土方、混泥土、碎石/砂、幕墙属于建筑土建材料，一般不直接用在室内空间。
+  室内材料：
+    电器
+    墙面材料
+      涂料：乳胶漆、艺术漆、微水泥。
+      裱糊材料：墙纸、墙布。板材：护墙板、木饰面、集成墙板。
+      石材：大理石、岩板、人造石（用于背景墙、台面）。
+      瓷砖：瓷片、岩板。玻璃：镜面、烤漆玻璃、艺术玻璃。
+    地面材料
+      地砖：抛光砖、仿古砖、釉面砖、大理石瓷砖。
+      地板：实木地板、复合地板、强化地板、SPC石塑地板。
+      弹性地材：PVC卷材、橡胶地板。
+      地毯：块毯、满铺地毯。
+    顶面材料
+      石膏制品：石膏板（吊顶基层）、石膏线。
+      金属制品：铝扣板（常用于厨房卫生间）、金属格栅。
+      木质品：木格栅、实木吊顶。
+      涂料：与墙面涂料同类。
+    门窗及固定装饰
+      室内门：实木门、复合门、玻璃门、金属门。
+      门窗套：与门配套或与木饰面配套。
+      固定柜体：橱柜、浴室柜、收纳柜、衣柜（现场制作或定制）。
 - 语言：research_objectives 和 research_methodology 优先使用与用户相同的语言（但保留专业术语）
-  - planned_queries 语言：为搜索引擎优化，根据问题的文化背景，适当混合多种国际化语言搜索词（80% 用户语言 + 20% 英、中、法等其他语言）
-  - planned_queries 构词法：
+  - planned_queries 语言：为搜索引擎优化，根据问题的文化背景，适当混合多种国际化语言搜索词（80% 用户语言 + 20% 英文、中文等其他语言）
+  - planned_queries 构词：
       - 1. 独立构词 - 一个查询词只包含一个主体
         - 主体： 人物、组织、事件、物体、概念等名词
       - 2. 组合构词 - 基于主体进行扩展
@@ -332,11 +371,6 @@ research_plan_instructions = """你是一位专业的全球化、多语种研究
         - 空间属性 -> "所在地 公司A名称"（如 “深圳 犀照科技”）
         - 时间属性 -> "2025年 所在地 公司A名称"
         - 其他属性 -> "2025年 所在地 公司A名称 主营业务"（如 “2025年 深圳 犀照科技 室内设计”）
-      - planned_queries 生成示例：
-        - "有哪些酒店项目推荐？"(时间、地点均未明确，需要酌情扩展，经济发达地区优先，时间留出宽裕范围)
-          ["北美 高端酒店 2024 2025 2026", "东亚 精品酒店 2024 2025 2026", "西欧 奢华酒店 2024 2025 2026", ...]
-        - "绿城对本项目的设计风格和装修标准是否有明确界定？
-          ["绿城集团", "新中式设计风格", "现代设计风格", "中国国家装修标准", "绿城设计风格", "绿城A项目装修标准", ...]
 
 输出格式（JSON）：
 {{
@@ -346,17 +380,23 @@ research_plan_instructions = """你是一位专业的全球化、多语种研究
 }}
 
 planned_queries 正例：
-  用户问题：“最近准备代表深圳犀照科技出席在8月31号WaytoAGI的摆摊大会，给我策划几个方案”
-  "planned_queries": ["犀照科技", "深圳 犀照科技", "WaytoAGI", "WaytoAGI 8月31", "WaytoAGI 摆摊大会", "AI公司展台设计", "..."]
-（良好原因：按照原子化拆解了不同主体“犀照科技”和“WaytoAGI”，并进行了时间、地点拓展，有利于搜索到准确信息）
+  - 用户问题："上次咱们聊了什么？"，
+    "planned_queries": ["上次聊天内容"]
+  - 用户问题："有哪些酒店项目推荐？"(时间、地点均未明确，需要酌情扩展，经济发达地区优先，时间留出宽裕范围)
+    "planned_queries": ["北美 高端酒店 2024 2025 2026", "东亚 精品酒店 2024 2025 2026", "西欧 奢华酒店 2024 2025 2026", ...]
+  - 用户问题："绿城对本项目的设计风格和装修标准是否有明确界定？"
+    "planned_queries": ["绿城集团", "新中式设计风格", "现代设计风格", "中国国家装修标准", "绿城设计风格", "绿城A项目装修标准", ...]
+  - 用户问题："最近准备代表深圳犀照科技出席在8月31号WaytoAGI的摆摊大会，给我策划几个方案"
+    "planned_queries": ["犀照科技", "深圳 犀照科技", "WaytoAGI", "WaytoAGI 8月31", "WaytoAGI 摆摊大会", "AI公司展台设计", "..."]
+（良好原因：拆解了不同主体，并进行了时间、地点拓展，有利于搜索到准确信息）
 
 planned_queries 反例：
-  用户问题：“深入研究下Context Engineering和模型记忆之间（如Mem0, MIRIX）的关系和研究进展”
+  用户问题："深入研究下Context Engineering和模型记忆之间（如Mem0, MIRIX）的关系和研究进展"
   "planned_queries": [
     "Context Engineering 模型记忆 关系 研究", （不良原因：两个不同主题“Context Engineering”和“模型记忆”未拆分，可能导致搜索引擎无法返回有效结果）
     "Mem0 MIRIX engineering vs model-centric memory"（不良原因：两种不同技术框架“Mem0”和“MIRIX”未拆分）
   ]
-  改进建议：["Context Engineering", "模型记忆", "Mem0", "MIRIX", "大型语言模型 上下文工程", "大型语言模型 记忆机制"]
+（改进建议：["Context Engineering", "模型记忆", "Mem0", "MIRIX", "大型语言模型 上下文工程", "大型语言模型 记忆机制"]）
 """
 
 
@@ -438,62 +478,50 @@ Research Topic:
 #       - When a follow-up is based primarily on RAG hints, include verification-oriented constraints (e.g., site:gov.cn, site:集团官网 招采/新闻/公告, time window like last 12 months).
 # - Style:
 #       - keep non-English proper nouns in original script (quoted); add transliterations/aliases when useful.
-reflection_instructions = """You are an expert research assistant analyzing summaries about "{research_topic}".
+reflection_instructions = """You are a research assistant analyzing summaries about "{research_topic}".
 
-Research Objectives (if available):
-{research_objectives}
+**Research Objectives**: {research_objectives}
 
-Reflect carefully on the Summaries to identify knowledge gaps and assess objective completion. 
-Summaries:
+## Source Handling Rules
+1. **[RAG]** - Structured project/bid data: PRESERVE completely, treat as hypotheses needing verification
+2. **[WEB]** - Web search results: COMPRESS aggressively, extract only key facts relevant to objectives
+3. **[MEM]** - User preferences: COMPRESS moderately, keep patterns to guide follow-ups
+
+## Task
+Assess objective completion, identify knowledge gaps, and compress [WEB]/[MEM] sources.
+
+**Summaries**:
 {summaries}
 
-Then, produce your output following this JSON format:
-Output Format:
-- Format your response as a JSON object with these exact keys:
-   - "objectives_progress": Object mapping each objective to completion score (0.0-1.0)
-   - "overall_completion": Overall research completion percentage (0.0-1.0, Average of objectives_progress)
-   - "is_sufficient": true or false, true if overall_completion >= 0.8
-   - "knowledge_gap": Describe what information is missing or needs clarification
-   - "follow_up_queries": A list with 1-2 highly specific question(s) to address this gap
-
-Example:
-```json
+## Output Format (JSON)
 {{
-    "objectives_progress": {{
-        "Analyze the milestones of visual language models": 0.6,
-        "Identify and analyze representative VLM model architectures, training methods and core technical innovations": 0.4
-    }},
+    "objectives_progress": {{"objective text": score}},  // 0.0-1.0, use EXACT objective text as keys, MONOTONIC (never decrease)
+    "overall_completion": 0.0-1.0,  // average of objectives_progress
+    "is_sufficient": true/false,  // true if overall_completion >= 0.8
+    "knowledge_gap": "what's missing",  // REQUIRED if any objective < 1.0
+    "follow_up_queries": ["query1", "query2"],  // 1-3 queries, MANDATORY if overall_completion < 0.7
+                                                 // Must be DISTINCT from past queries, include ≥1 constraint (time/region/site:/etc)
+    "compressed_web": "key facts <800 words",  // REQUIRED: trends, insights, statistics only
+    "compressed_mem": "user patterns <200 words"  // REQUIRED: preferences and historical context
+}}
+
+**Scoring Rules**: {progress_scoring_rules}
+
+**Context History**:
+- Previous Progress: {previous_objectives_progress}
+- Past Gaps: {previous_gaps}
+- Past Follow-ups (DO NOT REPEAT): {previous_followups}
+
+**Example**:
+{{
+    "objectives_progress": {{"Analyze VLM milestones": 0.6, "Identify VLM architectures": 0.4}},
     "overall_completion": 0.5,
     "is_sufficient": false,
-    "knowledge_gap": "The summary lacks information about VLM performance metrics and benchmarks",
-    "follow_up_queries": ["What are typical performance benchmarks and metrics used to evaluate VLM?", "How do people upgrade standard of VLM benchmarks?"]
+    "knowledge_gap": "Missing VLM performance metrics and benchmarks",
+    "follow_up_queries": ["What are typical VLM benchmarks site:arxiv.org", "VLM evaluation metrics 2023-2024"],
+    "compressed_web": "VLMs evolved through 3 phases: 2015-2018 exploration, 2019-2021 growth, 2022+ large-scale. Key architectures: CLIP, BLIP, Flamingo. Training: contrastive learning, large-scale pretraining.",
+    "compressed_mem": "User prefers technical innovations and architectural details."
 }}
-```
-
-Instructions:
-   - "objectives_progress": Object mapping each objective to completion score (0.0-1.0) - REQUIRED FIELD
-      - use the EXACT objective text as keys, not bullet points or modified text.
-      - Assess each objective and keep scores MONOTONIC (never decrease vs previous);
-      - Scoring rules: {progress_scoring_rules}
-      - THIS FIELD IS MANDATORY - you must provide a score for each objective, even if 0.0
-   - "overall_completion": Overall research completion percentage (0.0-1.0, Average of objectives_progress)
-      - overall_completion = average(objectives_progress); is_sufficient = (overall_completion >= 0.8).
-   - "is_sufficient": true or false, true if overall_completion >= 0.8
-   - "knowledge_gap": Describe what information is missing or needs clarification
-      - If any objective score < 1.0, it MUST be proposed (otherwise optional).
-   - "follow_up_queries": A list with 1-2 highly specific question(s) to address this gap
-      - Generate 1-3 follow-ups to close the current knowledge_gap. MANDATORY when overall_completion < 0.7.
-      - STRICT DEDUPLICATION: with ALL Past Follow-ups. Each follow-up must explore a DISTINCT dimension.
-      - CONSTRAINT REQUIREMENTS: Each must include ≥1 explicit constraint (site:, people, event, time, region, filetype:, etc.)
-      - ACTIONABILITY: Self-contained, precise, and directly searchable (avoid vague rephrasing)
-
-Context History:
-- Previous Objectives Progress (for monotonic scoring):
-{previous_objectives_progress}
-- Past Knowledge Gaps (you may reuse or refine when appropriate):
-{previous_gaps}
-- Past Follow-up Queries (do NOT repeat or paraphrase):
-{previous_followups}
 """
 
 
@@ -541,15 +569,7 @@ thinking_middle_instructions = """你正处于研究的中间阶段，
 # 研究方法：{research_methodology}
 
 # 任务：
-1. **数据整理**：
-  a. **数据清洗整理**：整理并清洗 收集到的信息和数据。
-    * 数据有效性：分辨数据真伪，分析、筛选和整理有价值的数据，识别、标记、并指出错误或无关的数据。
-      * 实体信息确认：对出现的实体进行信息确认。重点关注实体名称、时间和地点维度，确保核心研究对象名称准确，时间有效，地点准确，防止出现重名、过期等错误。
-      * 实体关联性：对于任何声称的关联性，务必有明确的、可验证的证据支撑。如果证据不足，则明确指出无法确认关联或仅为推测。
-      * 例如，研究主题是“帮我查询一下犀照科技的AI研究进展”，主题中，时间、地点不明，而数据中出现“深圳犀照科技”，“杭州犀照科技”，你综合数据后发现，深圳犀照科技有AI业务，而杭州犀照科技则是与本研究无关的噪声数据（搜索引擎结果偏差），反之，如果现有数据不足以推断主题对应的实体，则要明确标记出数据缺口。
-    * 数据完整性与准确性：检查数据的完整性和准确性，对于不完整或不准确、不确定的数据，给出明显的标记。
-    * 数据一致性：检查多个数据源的数据一致性，采用更高可信度的来源，将研究主题的语言国的数据作为主要数据来源，其他语种的数据可作为参考
-2. **深化思考**：从信息中发现关键洞察，识别需要进一步探索的领域，如果没有有效信息，则需要考虑调整下一步的行动方向
+- **深化思考**：从信息中发现关键洞察，识别需要进一步探索的领域，如果没有有效信息，则需要考虑调整下一步的行动方向
 
 # 收集到的信息和数据：
 {summaries}
@@ -567,207 +587,104 @@ thinking_middle_instructions = """你正处于研究的中间阶段，
 # 研究目标：{research_objectives}
 # 研究方法：{research_methodology}
 # 思考过程：{thinking_process}
-thinking_finalization_instructions = """你是一个数据研究员，请围绕问题，给出数据初筛结果。
+thinking_finalization_instructions = """你是数据质量评估专家，负责评估收集到的数据并为最终报告提供处理建议。
 
-# 清洗标准
-  - 保留没有id编号的数据，包括web搜索的结果(通常是一段文字）和用户记忆
-  - 对于有id编号的项目数据，检查（地点符合、时间有效、材料相关）
-    匹配要素：
-      - 地点符合：参照地区字典
-      - 时间有效：数据时间未过期
-      - 材料相关：数据内容与问题相关
-    不匹配：
-      - 与问题无关，信息不完整、不准确、不确定、不符合基本常识的数据
-  - 去重数据
-    - 数据重复：多条一摸一样的信源，保留一条即可
-    - 实体重复：数据中如出现多个可能重名或重复的实体名称，需逐个明确其与问题的关系，排除与问题无关的实体
-  - 在 final_thinking 部分输出数据初筛结果
-    - 格式：只需要输出数据的前几个字（后面的可用...省略），不需要输出数据的全部内容
-    - 格式：数据 - （数据分析），如：“深圳大亚湾希尔顿酒店... - （时间、地点都符合）”
-    - 每条数据都要分析，不要遗漏也不要重复
+**当前日期**: {current_date}
+**研究主题**: {research_topic}
 
-# 地区字典
-  "华北地区": [
-    "北京市",
-    "天津市",
-    "河北省",
-    "山西省",
-    "内蒙古自治区"
-  ],
-  "东北地区": [
-    "辽宁省",
-    "吉林省",
-    "黑龙江省"
-  ],
-  "华东地区": [
-    "上海市",
-    "江苏省",
-    "浙江省",
-    "安徽省",
-    "福建省",
-    "江西省",
-    "山东省"
-  ],
-  "华中地区": [
-    "河南省",
-    "湖北省",
-    "湖南省"
-  ],
-  "华南地区": [
-    "广东省",
-    "广西壮族自治区",
-    "海南省"
-  ],
-  "西南地区": [
-    "重庆市",
-    "四川省",
-    "贵州省",
-    "云南省",
-    "西藏自治区"
-  ],
-  "西北地区": [
-    "陕西省",
-    "甘肃省",
-    "青海省",
-    "宁夏回族自治区",
-    "新疆维吾尔自治区"
-  ]
-  "直辖市": ["北京市", "天津市", "上海市", "重庆市"],
-  "河北省": ["唐山市", "石家庄市", "保定市", "沧州市", "秦皇岛市"],
-  "山西省": ["太原市", "吕梁市", "长治市", "大同市", "运城市"],
-  "内蒙古自治区": ["鄂尔多斯市", "包头市", "呼和浩特市", "赤峰市", "通辽市"],
-  "辽宁省": ["大连市", "沈阳市", "鞍山市", "抚顺市", "丹东市"],
-  "吉林省": ["长春市", "吉林市", "延边州", "四平市", "通化市"],
-  "黑龙江省": ["哈尔滨市", "齐齐哈尔市", "绥化市", "大庆市", "牡丹江市"],
-  "江苏省": ["苏州市", "南京市", "无锡市", "常州市", "南通市"],
-  "浙江省": ["杭州市", "宁波市", "温州市", "绍兴市", "嘉兴市"],
-  "安徽省": ["合肥市", "芜湖市", "滁州市", "安庆市", "马鞍山市"],
-  "福建省": ["福州市", "泉州市", "厦门市", "漳州市", "三明市"],
-  "江西省": ["南昌市", "赣州市", "九江市", "景德镇市", "萍乡市"],
-  "山东省": ["青岛市", "济南市", "烟台市", "潍坊市", "淄博市"],
-  "河南省": ["郑州市", "洛阳市", "南阳市", "许昌市", "安阳市"],
-  "湖北省": ["武汉市", "宜昌市", "襄阳市", "荆州市", "黄石市"],
-  "湖南省": ["长沙市", "岳阳市", "常德市", "株洲市", "湘潭市"],
-  "广东省": ["深圳市", "广州市", "佛山市", "东莞市", "湛江市"],
-  "广西壮族自治区": ["南宁市", "柳州市", "桂林市", "北海市", "玉林市"],
-  "海南省": ["海口市", "三亚市", "儋州市", "琼海市", "文昌市"],
-  "四川省": ["成都市", "绵阳市", "宜宾市", "德阳市", "泸州市"],
-  "贵州省": ["贵阳市", "遵义市", "毕节市", "六盘水市", "兴义市"],
-  "云南省": ["昆明市", "曲靖市", "红河州", "玉溪市", "昭通市"],
-  "西藏自治区": ["拉萨市", "日喀则市", "昌都市", "林芝市", "山南市"],
-  "陕西省": ["西安市", "榆林市", "咸阳市", "宝鸡市", "延安市"],
-  "甘肃省": ["兰州市", "庆阳市", "酒泉市", "天水市", "白银市"],
-  "青海省": ["西宁市", "海东市", "海西州", "海南州", "海北州"],
-  "宁夏回族自治区": ["银川市", "吴忠市", "石嘴山市", "中卫市", "固原市"],
-  "新疆维吾尔自治区": ["乌鲁木齐市", "伊犁州", "昌吉州", "克拉玛依市", "喀什市"],
-  "香港特别行政区": ["香港特别行政区"],
-  "澳门特别行政区": ["澳门特别行政区"],
-  "台湾省": ["台北市", "新北市", "桃园市", "台中市", "高雄市"]
+## 数据来源说明
+- **[RAG]**: 招投标项目数据库，结构化数据，最可靠
+- **[WEB]**: 网络搜索结果，用于趋势分析和背景补充
+- **[MEM]**: 用户历史偏好，用于个性化推荐
 
-# 输出格式（JSON）：
+## 评估任务
+请按优先级逐条评估数据：
+
+### 优先级1：必检项
+1. **时间有效性**: 如主题涉及时间要求，检查数据时间是否符合
+2. **地点匹配度**: 如主题指定地区，检查数据地点是否匹配（参考：华北/东北/华东/华中/华南/西南/西北七大区及各省市）
+3. **内容相关性**: 数据是否直接回答研究主题
+
+### 优先级2：可选项
+1. **隐含关联**: 评估间接相关的有价值信息
+   - 示例：主题"大理石采购项目" + 数据"游客中心建设" → 可能需要大理石 → 相关
+2. **数据完整性**: 标记信息不完整、模糊或存疑的数据
+3. **重复实体**: 如多条数据提到相同实体，逐个确认与主题的关系
+
+### 特殊处理规则
+- **[RAG]数据**: 优先保留，这是最可靠的结构化数据源
+- **[WEB]数据**: 标注其参考价值（如"可供参考"、"背景信息"）
+- **[MEM]数据**: 标注其适用场景（如"用户偏好"、"历史画像"）
+
+## 输出格式
+```json
 {{
     "stage_name": "final_thinking",
-    "final_thinking": "数据初筛结果"
+    "final_thinking": "逐条评估，格式：\\n序号. [标签] 数据标题... - (评估结论)\\n\\n要求：\\n- 数据标题过长用...省略\\n- 评估结论简洁明确（时间符合/地点不符/内容相关/可供参考等）\\n- 每条数据必须评估，不遗漏不重复"
 }}
+```
 
-# 示例：
-  示例问题：最近广东有什么涉及到玻璃材料的项目？当前日期：2025-10-15
-  示例数据：
-    ---
-    藤桥亚洲海湾大酒店改造项目（设计“评定分离”）	2025-09-28 09:00:00
-    清远北江中心改造装修工程项目设计施工总承包（EPC）招标公告 2025-09-30 09:30:00
-    深圳大亚湾希尔顿酒店升级改造建设项目（施工）	2025-09-23 10:30:00 
-    广东旅游地产开发：趋势、政策与案例 广东省在旅游地产开发领域展现出蓬勃的活力和多元化的发展趋势...
-    惠州某道路施工项目 2025-11-01 09:30:00
-    深圳大亚湾希尔顿酒店升级改造建设项目（施工）	2025-09-23 10:30:00 
-    ---
-  示例输出（每条数据都要分析，不遗漏也不重复）：{{
-    "stage_name": "final_thinking",
-    "final_thinking": "
-    1. 藤桥亚洲海湾大酒店...（地点温州，不符合广东）
-    2. 清远北江中心改造...(09-30 时间过期失效)
-    3. 深圳大亚湾希尔顿酒店...（时间、地点都符合，酒店可能用到玻璃材料）
-    4. 广东旅游地产开发(web搜索结果，可供参考)
-    5. 惠州某道路施工项目（道路施工与玻璃无关）
-    6. 深圳大亚湾希尔顿酒店...（重复数据，删除）"
-  }}
-
-当前日期：{current_date}
-问题：{research_topic}
-收集到的数据：{summaries}
+# 收集到的数据
+{summaries}
 """
 
 
 # 重点提示词 generate_enhanced_report | Gemini 2.5 Pro/Flash (高质量报告生成) 0.5
 # 报告大纲：{report_outline}
 # 输出格式：URL链接 - 暂时取消 - 引用“收集到的数据/信息”中的url；在相关句子后内联标注为 [n](SHORT_URL)，例如 [1](SHORT_URL)；同一来源可在多处复用同一编号；若没有数据或来源，可不添加引用
-enhanced_report_instructions = """你是一名资深的研究员，你的任务是回答用户提出的问题或为研究主题生成简要的分析报告。
-首先了解用户个人背景，然后理解并整理收集到的数据（这些数据有些有用，有些没用），使用用户的语言（指英文、中文等）进行回答。
-不要做语气类的、应答类的陈述，如“好的，下面是我为您生成的一份报告”等，直接回答或写报告。
+enhanced_report_instructions = """你是资深研究员，直接回答问题或生成报告，使用用户语言，无需客套开场。
 
-# 任务
-- 展示数据（可选）
-  - 结合问题对数据进行清洗
-  - 充分利用markdown、表格、图表、列表等可视化手段展示数据
-  - 需要展示数据的情况：用户希望寻找一些资料/发现一些商机，且收集到的数据确实有用户需要的信息；用户明确要求展示数据表；其他有必要展示的情况
-  - 不需要展示数据的情况：1. 用户的意图不需要收集数据；2. 用户明确要求不展示数据；3. 收集到的数据没有用户所需的信息
-- 回答问题或输出研究报告
+**CRITICAL: 招投标项目表格格式（必须严格遵守）**
+```markdown
+| 项目名 | 截止时间 | 项目链接 |
+| ----- | ----- | ----- |
+| 项目A | 2025-09-01 09:00:00 | [查看详情](http://example.com/a) |
+```
+- 表头固定3列：项目名 | 截止时间 | 项目链接
+- 分隔符只有一行：`| ----- | ----- | ----- |`
+- 链接格式统一：`[查看详情](完整URL)`
+- 不要添加额外的分隔行或延伸符号
 
-## 报告结构
-根据问题的情况，选择合适的报告结构。
-- 情况1：问题与建筑/室内设计招标、投标、项目有关：
-  1.1. 第一部分 **数据展示**：（如果收集到了用户需要的数据，则展示，否则跳过这一节）
-    - 对于一般数据，自动选择合适的markdown格式输出（列表、表格、引用块等）。
-    - 对于招投标/项目，**使用标准Markdown表格格式**，包含一行表头和一行分隔符，不要重复或延伸 ----- 或其他分隔符。
-      - 表格列字段固定为：“项目名 | 截止时间 | 项目链接”
-      - 项目链接使用标准markdown格式，链接名一律显示“查看详情”：[查看详情](http://example.com)
-  1.2. 第二部分 **研究报告**：基于数据，进行分析报告
-    - 报告内容包括个性化解读（如有则置顶）和数据解读（如有有效数据的前提下）。
-    - 如果数据不足，既无法做个性化解读，也无法做数据解读，或者问题本身不需要收集数据，则直接针对用户问题进行回答。
-    - 不需要引言、结论等复杂的报告结构，除非用户明确指定了报告格式。
-  1.3. 完整结构示例：
-    ```
-    # 数据展示
-      | 项目名 | 截止时间 | 项目链接  |
-      | ----- | ----- | ----- |
-      | 示例项目A | 2025-09-01 | [查看详情](http://example.com/a) |
-      | 示例项目B | 2025-09-10 | [查看详情](http://example.com/b) |
-      | 更多项目... | ... | ... |
-    # 研究报告
-    ## 个性化解读
-      ...
-    ## 数据解读
-      ...
-    ```
+**当前日期**: {current_date}
+**研究主题**: {research_topic}
+**用户背景**: {user_personalization_context}
 
-- 情况2：对于研究类的问题，建议结构如下：
-  2.1. **标题和摘要**
-  2.2. **正文**：章节和段落
-  2.3. **备注、Appendix、Glossary等**
+## 输出结构
 
-- 情况3：对于其他类型的问题，根据问题的性质，自行选择合适的回答/报告结构。
-  3.1. 生活类的问题，比如美食、运动、娱乐等，不需要死板的书面回答，语气可以活泼一点
+### 招投标/项目类问题
+```
+# 1. 数据展示
+[标准表格，严格按上述格式]
 
-## 报告结尾：
-1. 用户引导：
-  - 如果收集到的数据/信息不足，可在结尾表达“我能收集到的信息不足以回答您的问题/生成一份详实的报告/...，但根据现有数据，我可以为您...”的意思，表述可以灵活调整。
-  - 可以根据已有信息，引导用户进一步交流，比如“希望这些信息能帮助你。如果你有特定的xx偏好，或者对某些类型的xx更感兴趣，我很乐意提供进一步的分析。”等。
-2. 备注说明：可在备注中说明你对数据的评估和理解，但不要在正文中陈述数据处理逻辑（正文只展示数据）。
+# 2. 研究报告
+## 个性化解读
+[如用户有相关项目经验，关联分析；否则省略]
 
-# 用户相关信息
-## 用户的日期：{current_date}
-## 用户提出的问题/研究主题：{research_topic}
-## 用户背景信息：
-{user_personalization_context}
-### 个性化解读：
-  如果用户之前做过项目，基于用户项目和收集到的数据的相关性做解读，如"鉴于您曾参与xxx项目，您可能对xxx感兴趣"，否则不做个性化解读。
+## 数据解读
+[甲方、投资、金额、时间、地区、行业趋势等维度分析]
+```
 
-# 收集到的数据/信息：
+### 研究类问题
+- 标题和摘要
+- 正文（章节段落）
+- 备注/附录（可选）
+
+### 其他问题
+- 简洁直答，生活类问题可活泼
+
+## 数据处理规则
+1. **展示条件**: 有用数据 + (主题需要 OR 用户要求)
+2. **不展示**: 无用数据 OR 用户明确拒绝 OR 主题不需要
+3. **个性化**: 仅当用户有相关项目经验时关联分析
+4. **数据不足**: 结尾说明并引导进一步交流
+
+## 数据来源标签
+- [RAG]: 招投标数据库
+- [WEB]: 网络搜索
+- [MEM]: 用户偏好
+
+**收集到的数据**:
 {summaries}
-### 数据分析指南：
-  评估、理解并利用数据中隐含的有效信息，比如：用户说“请推荐几个大理石的采购项目”，
-    收集到的某条数据是 “中卫市沙漠文旅综合体项目，'项目概况': '建设面积约为116.14亩，主要建设游客中心、停车场及配套公共服务设施等...'”，
-    由于游客中心的建设很可能需要大理石材料，这就是一个有效的相关数据。
 """
 
 
@@ -836,7 +753,7 @@ entity_specificity_check_instructions = """你是一个多语种智能分析助�
 **不够具体的实体**（需要澄清）：
 - 泛化词汇：项目、公司、企业、业务、组织、供应商、厂商、承包商、服务、产品、解决方案（中英文均可）
 - 过于简短：少于3个字符且非明显品牌名
-- 纯描述性：仅包含行业类别而无具体名称（如"建筑项目"、"科技公司"）
+- 纯描述性：仅包含行业类别而无具体名称（如"设计项目"、"科技公司"）
 
 **足够具体的实体**（可直接研究）：
 - 具体公司名：华信科技、Apple Inc.、阿里巴巴集团

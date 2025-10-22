@@ -156,7 +156,7 @@ class Configuration(BaseModel):
     )
     # 最大研究循环数
     max_research_loops: int = Field(
-        default=3,
+        default=2,
         metadata={"description": "The maximum number of research loops to perform."},
     )
     # 查询调度配置
