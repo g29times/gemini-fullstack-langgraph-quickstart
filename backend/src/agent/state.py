@@ -100,6 +100,7 @@ class OverallState(TypedDict):
     dispatched_queries: Annotated[list, operator.add]
     # 记录 Web 侧个性化项目派发的游标位置，实现跨轮次增量派发。
     web_project_cursor: Annotated[int, operator.add]
+    # 元素可为 dict，含 type/text
     web_research_result: Annotated[list, operator.add]
     sources_gathered: Annotated[list, operator.add]
 
@@ -159,7 +160,7 @@ class WebSearchState(TypedDict):
     id: str
     web_project_cursor: Annotated[int, operator.add]
     former_ids: list[int]  # IDs of previous messages in the conversation
-    
+
 
 class ResearchPlanState(TypedDict):
     """State for research plan generation and HITL approval"""

@@ -126,7 +126,27 @@ def detect_follow_up(state: OverallState, config: RunnableConfig) -> OverallStat
     # 如果消息太少，直接判定为非追问
     if len(messages) <= 1:
         return {"is_follow_up": False}
-    
+
+    sources_reranked = state.get("sources_reranked", [])
+    # Mock sources for testing (when sources_reranked is empty)
+    mock_sources = [
+        { "type": "web", "text": "2024-2025年室内设计石材应用趋势多元化，注重质感与可持续性。天然石材在高端住宅和商业空间中仍是重点。趋势包括：回归自然（大地色系石材），大尺寸板材应用，纹理与饰面创新（皮革、锤纹），深色与对比色调（深灰、黑、深绿），可持续性考量，以及石材在家具、灯具等跨界应用。新古典主义风格偏爱天然大理石。个性化与定制化通过数字印刷技术实现。具体石材类型流行：大理石（奢华经典），石英岩（耐用美观），石灰石（温暖纹理），洞石（复古韵味），花岗岩（经典耐用，哑光饰面流行），缟玛瑙（透光性用于背光设计）。\n\n近期室内石材项目呈现多元化和高端化趋势。色彩上，金棕色系和摩卡慕斯色系大理石受欢迎，新古典风格偏爱卡拉拉白大理石。材质与工艺创新体现在瓷砖的45°柔抛工艺和岩板的薄型化。应用场景拓展至民宿、园林、商业空间及高端住宅。抿石子用于墙面装饰，营造复古或日式氛围。行业发展方向为绿色化、智能化、高端化，企业向卖解决方案转型。中国石材进出口贸易呈下降趋势，但市场规模庞大。未来石材行业将更注重环保、智能化和个性化设计。" },
+        { "type": "mem", "text": "用户关注室内设计项目，特别是招投标和供应商信息。这表明用户对项目落地、实际应用和商业合作方面的信息有较高兴趣。" },
+        { "type": "rag", "text": "15926. 北京科技大学雄安校区第一组团项目—1-2#、1-3#、1-4#、1-5#宿舍，钢铁书院及综合楼-外立面花岗岩石材及蜂窝石材采购招标公告 | 2025-11-06 09:00:00 |\u00a0http://www.ggzy.gov.cn/information/html/a/130000/0101/202510/15/0013eb09b076c67c467aaea384370ca678bd.shtml\u00a0| 项目概要：1.项目名称北京科技大学雄安校区第一组团项目—12、13、14、15宿舍，钢铁书院及综合楼外立面花岗岩石材及蜂窝石材采购2.招标截止时间2025110609:00:003.地址北京科技大学雄安校区项目位于起步区第五组团，东至城市道路NB9，南至城市道路EA2，西至规划绿地和道路NB8，北至规划绿地。本次招标项目建设地点位于北京科技大学雄安校区西南角，南侧紧邻城市主干道EA2，西临城市绿带和排洪通道。4.项目概况核定该项目总建筑面积按83072平方米控制，主要建设内容为12、13、14、15宿舍，钢铁书院，综合楼等6栋单体建筑。招标范围包括外立面花岗岩石材及蜂窝石材材料供应，各材料的具体数量和技术规格详见招标文件。交货地点设在北京科技大学雄安校区第一组团项目现场，质保期限为工程竣工后五年。项目合同估算价约240万元人民币。；甲方：中建三局集团有限公司" }
+    ]
+    # 优先使用 sources_reranked,如果为空则使用 mock 数据
+    sources_to_use = sources_reranked
+    # sources_to_use = sources_reranked if sources_reranked else mock_sources
+    # 格式化 sources 为字符串
+    sources_text = ""
+    if sources_to_use:
+        sources_parts = []
+        for idx, source in enumerate(sources_to_use, 1):
+            source_type = source.get("type", "unknown")
+            source_text = source.get("text", "")
+            sources_parts.append(f"[来源 - {source_type}]\n{source_text}")
+        sources_text = "\n\n".join(sources_parts)
+
     # 使用LLM进行智能追问检测
     configurable = Configuration.from_runnable_config(config)
     # user_info = configurable.user_info or {}
@@ -160,7 +180,8 @@ def detect_follow_up(state: OverallState, config: RunnableConfig) -> OverallStat
     
     formatted_prompt = follow_up_detection_instructions.format(
         conversation_history=conversation_history,
-        current_message=current_message
+        current_message=current_message,
+        sources_text=sources_text
     )
     
     try:
@@ -181,9 +202,7 @@ def detect_follow_up(state: OverallState, config: RunnableConfig) -> OverallStat
         
         # 处理 former_ids：LLM 可能输出浮点数，需转为整数
         former_ids_raw = detection_result.get("former_ids", [])
-        ask_project_ids_raw = detection_result.get("ask_project_ids", [])
         former_ids = []
-        ask_project_ids = []
         if former_ids_raw:
             for item in former_ids_raw:
                 try:
@@ -192,24 +211,15 @@ def detect_follow_up(state: OverallState, config: RunnableConfig) -> OverallStat
                 except (ValueError, TypeError) as e:
                     logger.warning(f"[NEO_LOG][follow_up_detection] 无效的 former_id: {item}, 错误: {e}")
                     continue
-        if ask_project_ids_raw:
-            for item in ask_project_ids_raw:
-                try:
-                    # 转为整数（处理浮点数如 12345.0 -> 12345）
-                    ask_project_ids.append(int(float(item)))
-                except (ValueError, TypeError) as e:
-                    logger.warning(f"[NEO_LOG][follow_up_detection] 无效的 ask_project_id: {item}, 错误: {e}")
-                    continue
         project_names = detection_result.get("project_names", [])
-        logger.info("[NEO_LOG][follow_up_detection] threshold=%s, confidence=%s, is_follow_up=%s, former_ids=%s, ask_project_ids=%s, project_names=%s", 
-                    threshold, confidence, is_follow_up, former_ids, ask_project_ids, project_names)
+        logger.info("[NEO_LOG][follow_up_detection] threshold=%s, confidence=%s, is_follow_up=%s, former_ids=%s, project_names=%s", 
+                    threshold, confidence, is_follow_up, former_ids, project_names)
         
         # 保留现有状态，只更新追问相关字段
         return {
             "is_follow_up": is_follow_up,
             "follow_up_detection": detection_result,
             "former_ids": former_ids,
-            "ask_project_ids": ask_project_ids,
         }
         
     except Exception as e:
@@ -317,8 +327,33 @@ def classify_intent(state: OverallState, config: RunnableConfig) -> OverallState
         follow_up_overrides = "- This is a follow-up question based on previous research context. Consider both the follow-up question and the previous research context.\n"
         if previous_report:
             previous_context_block = f"\nPrevious Research Context:\n{truncate_content(previous_report)}\n"
+    
+    # 历史资料
+    # mock_sources = [
+    #     { "type": "web", "text": "2024-2025年室内设计石材应用趋势多元化，注重质感与可持续性。天然石材在高端住宅和商业空间中仍是重点。趋势包括：回归自然（大地色系石材），大尺寸板材应用，纹理与饰面创新（皮革、锤纹），深色与对比色调（深灰、黑、深绿），可持续性考量，以及石材在家具、灯具等跨界应用。新古典主义风格偏爱天然大理石。个性化与定制化通过数字印刷技术实现。具体石材类型流行：大理石（奢华经典），石英岩（耐用美观），石灰石（温暖纹理），洞石（复古韵味），花岗岩（经典耐用，哑光饰面流行），缟玛瑙（透光性用于背光设计）。\n\n近期室内石材项目呈现多元化和高端化趋势。色彩上，金棕色系和摩卡慕斯色系大理石受欢迎，新古典风格偏爱卡拉拉白大理石。材质与工艺创新体现在瓷砖的45°柔抛工艺和岩板的薄型化。应用场景拓展至民宿、园林、商业空间及高端住宅。抿石子用于墙面装饰，营造复古或日式氛围。行业发展方向为绿色化、智能化、高端化，企业向卖解决方案转型。中国石材进出口贸易呈下降趋势，但市场规模庞大。未来石材行业将更注重环保、智能化和个性化设计。" },
+    #     { "type": "mem", "text": "用户关注室内设计项目，特别是招投标和供应商信息。这表明用户对项目落地、实际应用和商业合作方面的信息有较高兴趣。" },
+    #     { "type": "rag", "text": "15926. 北京科技大学雄安校区第一组团项目—1-2#、1-3#、1-4#、1-5#宿舍，钢铁书院及综合楼-外立面花岗岩石材及蜂窝石材采购招标公告 | 2025-11-06 09:00:00 |\u00a0http://www.ggzy.gov.cn/information/html/a/130000/0101/202510/15/0013eb09b076c67c467aaea384370ca678bd.shtml\u00a0| 项目概要：1.项目名称北京科技大学雄安校区第一组团项目—12、13、14、15宿舍，钢铁书院及综合楼外立面花岗岩石材及蜂窝石材采购2.招标截止时间2025110609:00:003.地址北京科技大学雄安校区项目位于起步区第五组团，东至城市道路NB9，南至城市道路EA2，西至规划绿地和道路NB8，北至规划绿地。本次招标项目建设地点位于北京科技大学雄安校区西南角，南侧紧邻城市主干道EA2，西临城市绿带和排洪通道。4.项目概况核定该项目总建筑面积按83072平方米控制，主要建设内容为12、13、14、15宿舍，钢铁书院，综合楼等6栋单体建筑。招标范围包括外立面花岗岩石材及蜂窝石材材料供应，各材料的具体数量和技术规格详见招标文件。交货地点设在北京科技大学雄安校区第一组团项目现场，质保期限为工程竣工后五年。项目合同估算价约240万元人民币。；甲方：中建三局集团有限公司" }
+    # ]
+    sources_reranked = state.get("sources_reranked", [])
+    # if not sources_reranked:
+    #     sources_reranked = mock_sources
+    is_follow_up = state.get("is_follow_up", False)
+    # 格式化 sources_reranked 为字符串
+    sources_text = ""
+    if sources_reranked:
+        sources_parts = []
+        for idx, source in enumerate(sources_reranked, 1):
+            source_type = source.get("type", "unknown")
+            source_text = source.get("text", "")
+            sources_parts.append(f"[来源 - {source_type}]\n{source_text}")
+        sources_text = "\n\n".join(sources_parts)
+    research_topic = topic
+    if is_follow_up:
+        research_topic = topic + ("\n\n---\n\n**历史数据**\n\n" + sources_text if sources_text else "")
+    # logger.info("[NEO_LOG] [classify_intent] is_follow_up: %s, research_topic: %s", is_follow_up, research_topic)
+    
     prompt = intent_classifier_instructions.format(
-        research_topic=topic,
+        research_topic=research_topic,
         follow_up_overrides=follow_up_overrides,
         previous_context_block=previous_context_block,
     )
@@ -722,12 +757,35 @@ def answer_simple_fact(state: OverallState, config: RunnableConfig) -> OverallSt
     # Check if this is a fallback from unclear research intent
     is_fallback = state.get("intent", {}).get("fallback_to_chat", False)
     
+    # mock_sources = [
+    #     { "type": "web", "text": "2024-2025年室内设计石材应用趋势多元化，注重质感与可持续性。天然石材在高端住宅和商业空间中仍是重点。趋势包括：回归自然（大地色系石材），大尺寸板材应用，纹理与饰面创新（皮革、锤纹），深色与对比色调（深灰、黑、深绿），可持续性考量，以及石材在家具、灯具等跨界应用。新古典主义风格偏爱天然大理石。个性化与定制化通过数字印刷技术实现。具体石材类型流行：大理石（奢华经典），石英岩（耐用美观），石灰石（温暖纹理），洞石（复古韵味），花岗岩（经典耐用，哑光饰面流行），缟玛瑙（透光性用于背光设计）。\n\n近期室内石材项目呈现多元化和高端化趋势。色彩上，金棕色系和摩卡慕斯色系大理石受欢迎，新古典风格偏爱卡拉拉白大理石。材质与工艺创新体现在瓷砖的45°柔抛工艺和岩板的薄型化。应用场景拓展至民宿、园林、商业空间及高端住宅。抿石子用于墙面装饰，营造复古或日式氛围。行业发展方向为绿色化、智能化、高端化，企业向卖解决方案转型。中国石材进出口贸易呈下降趋势，但市场规模庞大。未来石材行业将更注重环保、智能化和个性化设计。" },
+    #     { "type": "mem", "text": "用户关注室内设计项目，特别是招投标和供应商信息。这表明用户对项目落地、实际应用和商业合作方面的信息有较高兴趣。" },
+    #     { "type": "rag", "text": "15926. 北京科技大学雄安校区第一组团项目—1-2#、1-3#、1-4#、1-5#宿舍，钢铁书院及综合楼-外立面花岗岩石材及蜂窝石材采购招标公告 | 2025-11-06 09:00:00 |\u00a0http://www.ggzy.gov.cn/information/html/a/130000/0101/202510/15/0013eb09b076c67c467aaea384370ca678bd.shtml\u00a0| 项目概要：1.项目名称北京科技大学雄安校区第一组团项目—12、13、14、15宿舍，钢铁书院及综合楼外立面花岗岩石材及蜂窝石材采购2.招标截止时间2025110609:00:003.地址北京科技大学雄安校区项目位于起步区第五组团，东至城市道路NB9，南至城市道路EA2，西至规划绿地和道路NB8，北至规划绿地。本次招标项目建设地点位于北京科技大学雄安校区西南角，南侧紧邻城市主干道EA2，西临城市绿带和排洪通道。4.项目概况核定该项目总建筑面积按83072平方米控制，主要建设内容为12、13、14、15宿舍，钢铁书院，综合楼等6栋单体建筑。招标范围包括外立面花岗岩石材及蜂窝石材材料供应，各材料的具体数量和技术规格详见招标文件。交货地点设在北京科技大学雄安校区第一组团项目现场，质保期限为工程竣工后五年。项目合同估算价约240万元人民币。；甲方：中建三局集团有限公司" }
+    # ]
+    # Prepare historical data from sources_reranked
+    sources_reranked = state.get("sources_reranked", [])
+    # if not sources_reranked:
+    #     sources_reranked = mock_sources
+    historical_data_section = ""
+    if sources_reranked:
+        sources_parts = []
+        for idx, source in enumerate(sources_reranked, 1):
+            source_type = source.get("type", "unknown")
+            source_text = source.get("text", "")
+            sources_parts.append(f"[来源 - {source_type}]\n{source_text}")
+        historical_data = "\n\n".join(sources_parts)
+        historical_data_section = f"**历史数据**：\n{historical_data}"
+    
     if is_fallback:
         # For fallback cases, provide more conversational response
         prompt = fallback_chat_mode_instructions.format(research_topic=topic)
     else:
-        prompt = simple_fact_answer_instructions.format(research_topic=topic)
+        prompt = simple_fact_answer_instructions.format(
+            research_topic=topic,
+            historical_data_section=historical_data_section
+        )
     try:
+        logger.info("[simple_fact] prompt: %s", prompt)
         response = llm.invoke(prompt)
         answer_text = response.content if hasattr(response, 'content') else str(response)
         
@@ -738,7 +796,8 @@ def answer_simple_fact(state: OverallState, config: RunnableConfig) -> OverallSt
         # 获取现有消息并追加新的AI回复
         existing_messages = state.get("messages", [])
         new_messages = existing_messages + [AIMessage(content=answer_text)]
-        
+        logger.info("[simple_fact] answer generation success: %s", answer_text)
+        # logger.info("[simple_fact] new_messages: %s", new_messages)
         return {
             "messages": new_messages,
             "chat_mode": is_fallback,  # Flag to indicate chat mode
@@ -879,9 +938,9 @@ def direct_lookup(state: OverallState, config: RunnableConfig) -> OverallState:
     all_sources = []
     all_texts = []
     
-    logger.info("[NEO_LOG] [direct_lookup] Executing %d queries", len(selected_queries))
+    # logger.info("[NEO_LOG] [direct_lookup] Executing %d queries", len(selected_queries))
     for i, query in enumerate(selected_queries):
-        logger.debug("[NEO_LOG] [direct_lookup] [query %d/%d] executing: '%s'", i+1, len(selected_queries), query[:50] + "..." if len(query) > 50 else query)
+        # logger.info("[NEO_LOG] [direct_lookup] [query %d/%d] executing: '%s'", i+1, len(selected_queries), query[:50] + "..." if len(query) > 50 else query)
         
         try:
             # Use the shared function for executing single direct lookup
@@ -1067,7 +1126,7 @@ def finalize_answer(state: OverallState, config: RunnableConfig):
         Dictionary with state update, including running_summary key containing the formatted final summary with sources
     """
     configurable = Configuration.from_runnable_config(config)
-    reasoning_model = configurable.thinking_model
+    reasoning_model = configurable.query_generator_model
 
     # Format the prompt
     current_date = get_current_date()
@@ -1077,7 +1136,7 @@ def finalize_answer(state: OverallState, config: RunnableConfig):
         research_topic=get_research_topic(state.get("messages", [])),
         summaries=_prepare_summaries(safe_results),
     )
-    logger.info("[NEO_LOG] [finalize_answer] research_topic: '%s', summaries: %s, prompt: %s", get_research_topic(state.get("messages", [])), _prepare_summaries(safe_results), formatted_prompt)
+    # logger.info("[NEO_LOG] [finalize_answer] prompt: %s", formatted_prompt)
     # init Reasoning Model, default to Gemini 2.5 Flash
     llm = ChatGoogleGenerativeAI(
         model=reasoning_model,
@@ -1086,7 +1145,7 @@ def finalize_answer(state: OverallState, config: RunnableConfig):
         api_key=os.getenv("GEMINI_API_KEY"),
     )
     result = llm.invoke(formatted_prompt)
-    logger.info("[NEO_LOG] [finalize_answer] [response] content: %s", result.content)
+    logger.info("[NEO_LOG] [finalize_answer] response content: %s", result.content)
     # Replace the short urls with the original urls and add all used urls to the sources_gathered
     unique_sources = []
     for source in state.get("sources_gathered", []):
@@ -1122,10 +1181,34 @@ def generate_research_plan(state: OverallState, config: RunnableConfig) -> Overa
     
     current_date = get_current_date()
     request = get_research_topic(state.get("messages", []))
+    
+    sources_reranked = state.get("sources_reranked", [])
+    is_follow_up = state.get("is_follow_up", False)
+    # 格式化 sources_reranked 为字符串
+    # mock_sources = [
+    #     { "type": "web", "text": "2024-2025年室内设计石材应用趋势多元化，注重质感与可持续性。天然石材在高端住宅和商业空间中仍是重点。趋势包括：回归自然（大地色系石材），大尺寸板材应用，纹理与饰面创新（皮革、锤纹），深色与对比色调（深灰、黑、深绿），可持续性考量，以及石材在家具、灯具等跨界应用。新古典主义风格偏爱天然大理石。个性化与定制化通过数字印刷技术实现。具体石材类型流行：大理石（奢华经典），石英岩（耐用美观），石灰石（温暖纹理），洞石（复古韵味），花岗岩（经典耐用，哑光饰面流行），缟玛瑙（透光性用于背光设计）。\n\n近期室内石材项目呈现多元化和高端化趋势。色彩上，金棕色系和摩卡慕斯色系大理石受欢迎，新古典风格偏爱卡拉拉白大理石。材质与工艺创新体现在瓷砖的45°柔抛工艺和岩板的薄型化。应用场景拓展至民宿、园林、商业空间及高端住宅。抿石子用于墙面装饰，营造复古或日式氛围。行业发展方向为绿色化、智能化、高端化，企业向卖解决方案转型。中国石材进出口贸易呈下降趋势，但市场规模庞大。未来石材行业将更注重环保、智能化和个性化设计。" },
+    #     { "type": "mem", "text": "用户关注室内设计项目，特别是招投标和供应商信息。这表明用户对项目落地、实际应用和商业合作方面的信息有较高兴趣。" },
+    #     { "type": "rag", "text": "15926. 北京科技大学雄安校区第一组团项目—1-2#、1-3#、1-4#、1-5#宿舍，钢铁书院及综合楼-外立面花岗岩石材及蜂窝石材采购招标公告 | 2025-11-06 09:00:00 |\u00a0http://www.ggzy.gov.cn/information/html/a/130000/0101/202510/15/0013eb09b076c67c467aaea384370ca678bd.shtml\u00a0| 项目概要：1.项目名称北京科技大学雄安校区第一组团项目—12、13、14、15宿舍，钢铁书院及综合楼外立面花岗岩石材及蜂窝石材采购2.招标截止时间2025110609:00:003.地址北京科技大学雄安校区项目位于起步区第五组团，东至城市道路NB9，南至城市道路EA2，西至规划绿地和道路NB8，北至规划绿地。本次招标项目建设地点位于北京科技大学雄安校区西南角，南侧紧邻城市主干道EA2，西临城市绿带和排洪通道。4.项目概况核定该项目总建筑面积按83072平方米控制，主要建设内容为12、13、14、15宿舍，钢铁书院，综合楼等6栋单体建筑。招标范围包括外立面花岗岩石材及蜂窝石材材料供应，各材料的具体数量和技术规格详见招标文件。交货地点设在北京科技大学雄安校区第一组团项目现场，质保期限为工程竣工后五年。项目合同估算价约240万元人民币。；甲方：中建三局集团有限公司" }
+    # ]
+    # if not sources_reranked:
+    #     sources_reranked = mock_sources
+    sources_text = ""
+    if sources_reranked:
+        sources_parts = []
+        for idx, source in enumerate(sources_reranked, 1):
+            source_type = source.get("type", "unknown")
+            source_text = source.get("text", "")
+            sources_parts.append(f"[来源 - {source_type}]\n{source_text}")
+        sources_text = "\n\n".join(sources_parts)
+    
+    research_topic = request
+    if is_follow_up:
+        research_topic = request + ("\n\n---\n\n**历史数据**\n\n" + sources_text if sources_text else "")
     formatted_prompt = research_plan_instructions.format(
         current_date=current_date,
-        research_topic=request,
+        research_topic=research_topic,
     )
+    logger.info("[NEO_LOG] [generate_research_plan] is_follow_up: %s, prompt: %d", is_follow_up, len(formatted_prompt))
     
     # logger.info("[NEO_LOG] [generate_research_plan] prompt: %s", formatted_prompt)
     # 优先使用结构化输出；失败则回退到非结构化并解析；最终提供安全默认
@@ -1169,8 +1252,8 @@ def generate_research_plan(state: OverallState, config: RunnableConfig) -> Overa
     # 最终兜底：提供结构正确但内容为空的计划，避免打断流程
     if plan_dict is None:
         plan_dict = {
-            "research_objectives": [],
-            "planned_queries": [],
+            "research_objectives": [request],
+            "planned_queries": [request],
             "research_methodology": "",
         }
     # plan_dict.add(request)
@@ -1386,7 +1469,6 @@ def generate_query(state: OverallState, config: RunnableConfig) -> OverallState:
         "research_plan",
         "messages",  # QueryGenerationState
         "former_ids",
-        "ask_project_ids",
     ]
     for key in critical_keys:
         if state.get(key) is not None:
@@ -2073,7 +2155,7 @@ def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
         # 从状态中读取地区和项目类型过滤条件
         query_region = state.get("query_region")
         query_project_type = state.get("query_project_type")
-        logger.info("[NEO_LOG] [rag_search] RAG附加查询条件调试 - pids: %s", state.get("ask_project_ids", []))
+        logger.info("[NEO_LOG] [rag_search] RAG附加查询条件调试 - pids: %s", state.get("former_ids", []))
         hits_raw = query_rag_rest(
             endpoint=getattr(configurable, "rag_search_endpoint"),
             api_key=getattr(configurable, "rag_rest_api_key"),
@@ -2894,7 +2976,7 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
         # 只调用一次LLM，获取原始输出并手动解析
         raw_result = llm.invoke(formatted_prompt)
         raw_content = raw_result.content if hasattr(raw_result, 'content') else str(raw_result)
-        logger.info("[NEO_LOG] [reflection] LLM原始文本返回: %s", raw_content)
+        # logger.info("[NEO_LOG] [reflection] LLM原始文本返回: %s", raw_content)
         
         # 手动解析JSON并创建Reflection对象
         import json

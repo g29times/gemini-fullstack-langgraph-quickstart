@@ -2,8 +2,8 @@
 follow_up_detection_instructions = """你是一个专业的对话分析大师，
 
 # 任务
-1. 结合对话内容判断用户的当前消息是否为追问（如果没有对话内容，可直接判定不是追问）
-2. 如果是追问，且之前的对话中有数据的话，找出数据中的项目id列表（注意：有些项目名中包含id，有些则不包含，需要把有id的完整复制出来）
+1. 结合历史对话内容和资料判断用户当前消息是否为追问
+2. 如果是追问，且之前的对话中有数据的话，找出数据中的项目id列表 former_ids （注意：有些项目名中包含id，有些则不包含，需要把有id的完整复制出来）
 
 # 判断标准：
 1. 追问通常基于之前的对话内容或报告
@@ -11,9 +11,13 @@ follow_up_detection_instructions = """你是一个专业的对话分析大师，
 3. 追问可能要求更多细节、相关信息或类似案例
 4. 有些时候，追问可能不包含任何与之前的对话内容或报告相关的信息，但其语境仍暗示了追问的意图。
 
-# 对话内容：
+# 历史对话内容：
 ---
 {conversation_history}
+---
+# 历史对话资料：
+---
+{sources_text}
 ---
 # 当前用户消息：
 {current_message}
@@ -22,19 +26,6 @@ follow_up_detection_instructions = """你是一个专业的对话分析大师，
 - is_follow_up: true/false
 - confidence: 0.0-1.0 置信度
 - former_ids: [1, 2, ...]
-
-# 对话样例（截取部分）：
----
-...
-| 项目名 | 截止时间 | 项目链接 |
-| ----- | ----- | ----- |
-| 123. A酒店 | 2025-09-01 | [查看详情](https://example.com/id/3-0) |
-| 456. 某项目   | 2025-09-01 | [查看详情](https://example.com/id/3-1) |
-| 789. B酒店 | 2025-09-10 | [查看详情](https://example.com/id/3-2) |
-...
-用户追问：A酒店和B酒店的风格有什么差异？
----
-former_ids: [123, 456, 789]
 """
 
 
@@ -65,99 +56,87 @@ follow_up_instructions = """你是一个专业的研究助手。
 
 
 # 重点提示词 意图识别 意图分类 classify_intent | Gemini 2.5 Flash-Lite 0.2（参数化追问场景）
-intent_classifier_instructions = """You are an intent classification expert. Determine if the user's request should:
-1) be answered directly without any web search or deep research(SIMPLE_FACT),
-2) be answered via a simple direct lookup by web search (DIRECT_LOOKUP), or
-3) require a multi-step research process (RESEARCH).
+intent_classifier_instructions = """You are an intent classification expert.
 
-Context:
-{previous_context_block}
-Request:
+**User Request**:
 {research_topic}
 
-Instructions:
+**Historical Data**:
+{previous_context_block}
+
+## STEP 1: Check Historical Data First (MANDATORY)
 {follow_up_overrides}
-- Identify DIRECT_LOOKUP for real-time or location-specific information like: current date/time/weekday, weather inquiries, timezone conversions, stock prices, or other data that requires authoritative sources.
-- Choose RESEARCH for complex topics requiring deeper web search or multi-step analysis, such as: bidding projects, industry trends, historical analysis, comparative studies, or broad conceptual topics.
-- Provide a confidence score between 0 and 1.
-- Extract an entity (subject/object name) and attribute (what is being asked) when possible:
-  * For broad research topics (e.g., "history of AI development", "industry trends"), the entity can be the research domain and the attribute the research focus
-  * For general questions without specific entities, set entity to null
-- **Key Element Completeness Check**: Verify the presence of all essential elements:
-  * **Time Element**: Is the time range specified (e.g., "today", "now", "latest", etc.)?
-  * **Location Element**: Is the geographic location clearly defined (especially for weather, traffic, or local service queries)?
-  * **Entity（Subject） Element**: Is the subject of the query clearly identified (company, product, person, etc.)?
-  * **Attribute（Event） Element**: Is the specific event or attribute being asked about explicit?
-- **Missing Elements Assessment**: If any key element is missing, list them in `missing_elements` and provide reasoning in `clarification_reason`.
-- **Memory Query Detection** (for RESEARCH intent only): Determine if the query is memory-only or hybrid:
-  * **Memory-only queries**: Personal/contextual questions like "上次我们聊了什么？", "我之前收藏的xx", "What did we discuss last time?" → mem_only: true
-  * **Hybrid queries**: All other research queries, including pure external research and questions combining personal context with external info → mem_only: false
-- 推断地区和项目类型： suggested_region 和 suggested_project_type
-  * "suggested_region": "问题中明确提到的地区（范围仅限省市，如'广东省'、'深圳市'），如范围不对或未提及地区则输出''",
-  * "suggested_project_type": "招投标项目类型 - 如问题涉及项目招投标，且与供应商相关则为'采购'，与设计施工相关则为'工程'，如不涉及项目招投标或难以判断则输出''"
-- 室内设计知识：
-  "CCD": "/Cheng Chung Design/郑中设计 全球知名室内设计公司"
-  "犀照科技": "深圳市犀照网络科技有限公司 CCD全资子公司"
-  设计风格：现代、极简、新中式、北欧、工业、地中海、田园、日式侘寂风、东南亚、简欧、美式
-  "公装" → 可扩展为："公装"、"酒店住宿"、"商业空间"、"办公空间"、"餐饮空间"、"教育与文化空间"、"医疗与康养空间"、"娱乐与体育空间"等
-  "家装" → 可扩展为："玄关 / 门厅"、"客厅"、"餐厅"、"厨房"、"卫生间"、"卧室"、"阳台"、"书房"、"储藏室"、"花园"、"走廊 / 过道"等
-  土方、混泥土、碎石/砂、幕墙属于建筑土建材料，一般不直接用在室内空间。
-  室内材料：
-    电器
-    墙面材料
-      涂料：乳胶漆、艺术漆、微水泥。
-      裱糊材料：墙纸、墙布。板材：护墙板、木饰面、集成墙板。
-      石材：大理石、岩板、人造石（用于背景墙、台面）。
-      瓷砖：瓷片、岩板。玻璃：镜面、烤漆玻璃、艺术玻璃。
-    地面材料
-      地砖：抛光砖、仿古砖、釉面砖、大理石瓷砖。
-      地板：实木地板、复合地板、强化地板、SPC石塑地板。
-      弹性地材：PVC卷材、橡胶地板。
-      地毯：块毯、满铺地毯。
-    顶面材料
-      石膏制品：石膏板（吊顶基层）、石膏线。
-      金属制品：铝扣板（常用于厨房卫生间）、金属格栅。
-      木质品：木格栅、实木吊顶。
-      涂料：与墙面涂料同类。
-    门窗及固定装饰
-      室内门：实木门、复合门、玻璃门、金属门。
-      门窗套：与门配套或与木饰面配套。
-      固定柜体：橱柜、浴室柜、收纳柜、衣柜（现场制作或定制）。
+**CRITICAL RULE**: If this is a follow-up question, check if historical data can answer it:
 
-Examples:
-- intent_label 判例：
-  "你好" → entity: null, attribute: null, intent_label: "SIMPLE_FACT"
-  "What is machine learning?" → entity: null, attribute: null, intent_label: "SIMPLE_FACT"
-  "What's the weather like in New York today?" → entity: "New York", attribute: "weather", intent_label: "DIRECT_LOOKUP"
-  "上次我们聊了什么？" → entity: "我们", attribute: "聊天记录", intent_label: "RESEARCH", mem_only: true
-  "上海有哪些酒店？" → entity: "酒店", attribute: "上海", intent_label: "RESEARCH", mem_only: false
-  "给我推荐几个招投标项目" → entity: "项目", attribute: "招投标", intent_label: "RESEARCH", mem_only: false
-- suggested_project_type 例子：
-  "采购"：
-    “这次招投标付款方式、付款条件和付款周期是怎样的” -> "采购" （原因：供应商关心招投标的付款信息）
-    “帮我找下广东省橱柜衣柜相关的招投标项目” -> "采购" (原因：供应商关心招投标项目的品类信息，如橱柜衣柜)
-    “这个项目招的材料，是否有产地或特定的技术认证（如防火等级、环保认证、节能标识）要求？” -> "采购"
-  "工程"：
-    “CCD在广东做了哪些高端住宅项目？” -> "工程"（原因：设计机构关心招投标的项目中标等情况）
-    “广东省近三年的四五星级酒店开发项目会有哪些，有哪些是带有国资背景的投资项目” -> "工程" （原因：隐含招投标机会）
-    “最近有哪些上海地区的酒旅相关的项目” -> "工程" （原因：项目意味着工程施工机会（优先）和采购机会（次之））
-  ""：
-    “这个单体项目预计涉及那些材料品类的使用” -> "" （原因：主要关注点是如何使用材料，而不是项目招投标）
-    “这个总承包项目会分几期招标” -> "" （原因：主要关注点不在招投标机会上，而是项目本身）
-    “最近准备出席在8月31号WaytoAGI的摆摊大会，给我策划几个方案” -> "" （原因：招投标无关）
+**Automatic RESEARCH triggers** (Skip to RESEARCH directly):
+- ❌ Request asks for "more", "other", "similar", "recommend", "find", "search" → **RESEARCH**
+- ❌ Request requires listing/comparing multiple items beyond historical data → **RESEARCH**
+- ❌ Request needs external/real-time data (projects, trends, prices) → **RESEARCH**
 
-Output Format (JSON):
+**SIMPLE_FACT conditions** (Only if none of above):
+- ✅ Historical data fully answers the question → **SIMPLE_FACT**
+- ✅ Question is about specific details already in historical data → **SIMPLE_FACT**
+
+## STEP 2: Intent Classification (Only if Step 1 fails)
+
+### Intent Types:
+- **SIMPLE_FACT**: Greetings, basic Q&A, or **follow-ups answerable from historical data**
+- **DIRECT_LOOKUP**: Real-time/location-specific data (weather, stock prices, current date/time)
+- **RESEARCH**: Complex topics requiring external search (only when historical data is insufficient)
+
+### 2. Entity & Attribute Extraction
+- Extract entity (subject) and attribute (what's being asked)
+- For broad topics: entity = domain, attribute = focus
+- If no specific entity: set to null
+
+### 3. Completeness Check
+Verify presence of: Time | Location | Subject | Event
+- Missing elements → list in `missing_elements`
+- Provide reasoning in `clarification_reason`
+
+### 4. Memory Query Detection (RESEARCH only)
+- **mem_only: true**: Personal queries ("上次我们聊了什么？", "What did we discuss?")
+- **mem_only: false**: All other research (external or hybrid)
+
+### 5. Region & Project Type Inference
+- **suggested_region**: Province/city mentioned (e.g., "广东省", "深圳市"), else ""
+- **suggested_project_type**:
+  - "采购": Supplier-related bidding (materials, payment terms)
+  - "工程": Design/construction projects (CCD projects, hotel developments)
+  - "": Not bidding-related or unclear
+
+## Examples
+
+**Follow-up Questions (Check Historical Data First)**:
+- Historical data mentions "花岗岩石材、蜂窝石材" + Question "用到了哪些石材？" → **SIMPLE_FACT** ✅
+- Historical data has project details + Question "这个项目的甲方是谁？" → **SIMPLE_FACT** ✅
+- Historical data has 1 project + Question "推荐几个类似的项目" → **RESEARCH** ❌ (needs more data)
+- Historical data lacks info + Question "这个项目的环保认证要求是什么？" → **RESEARCH** ❌
+
+**Initial Questions**:
+- "你好" → SIMPLE_FACT (entity: null, attribute: null)
+- "What is ML?" → SIMPLE_FACT
+- "NY weather today?" → DIRECT_LOOKUP (entity: "New York", attribute: "weather")
+- "上次我们聊了什么？" → RESEARCH (mem_only: true)
+- "广东省有哪些酒店项目？" → RESEARCH (mem_only: false)
+
+**Project Type**:
+- "采购": "广东省橱柜衣柜招投标项目" (supplier focus)
+- "工程": "CCD在广东的高端住宅项目" (design/construction focus)
+- "": "上次我们聊了什么？" (not bidding-focused)
+
+## Output (JSON)
 {{
   "is_simple_lookup": boolean,
   "intent_label": "SIMPLE_FACT" | "DIRECT_LOOKUP" | "RESEARCH",
-  "confidence": number,
+  "confidence": 0.0-1.0,
   "entity": string | null,
   "attribute": string | null,
   "missing_elements": ["time", "location", "subject", "event"] | [],
   "clarification_reason": string | null,
   "mem_only": boolean,
-  "suggested_region": string | null,
-  "suggested_project_type": string | null
+  "suggested_region": string,
+  "suggested_project_type": string
 }}
 """
 
@@ -174,7 +153,7 @@ intent_clarification_instructions = """你是一个全球多语种智能助手�
 
 当前日期：{current_date}
 
-当前对话内容：
+对话内容：
 {conversation_history}
 
 用户最新消息：{user_message}
@@ -210,18 +189,20 @@ intent_clarification_instructions = """你是一个全球多语种智能助手�
 
 
 # answer_simple_fact | Gemini 2.5 Flash-Lite (快速事实应答) 0.5
-simple_fact_answer_instructions = """你将直接回答一个无需联网检索的简单事实问题。保持与用户相同的语言（但对于特定领域，必要时可以结合英语等专业术语）
+simple_fact_answer_instructions = """你是犀照科技训练的智能助手，你将直接回答用户的问题。保持与用户相同的语言（但对于特定领域，必要时可以结合英语等专业术语）
 
-规则：
-- 基于已有知识直接回答，无需外部搜索
+**用户问题**：
+{research_topic}
+
+{historical_data_section}
+
+**回答规则**：
+- 如果有历史数据，**优先从历史数据中提取答案**，确保准确引用
+- 如果没有历史数据，基于常识直接回答（如问候语、基础概念等）
 - 保持简洁、准确、友好的语调
-- 如果输入包含对话历史，要考虑上下文关联
 - 回答后可以询问用户是否还有其他问题
 
-用户问题（或对话历史）：
-'''{research_topic}'''
-
-请回答用户的问题。如果输入包含多轮对话，请基于完整上下文回答最新的问题。如果问题不明确，可以友好地请求澄清。"""
+请回答用户的问题。"""
 
 
 # find_official_site | Gemini 2.5 Flash-Lite (快速站点发现)
@@ -304,99 +285,202 @@ Summaries:
 """
 
 
-
+# # 任务指导：
+# - 时间尺度：
+#   - 如果用户问的比较模糊，比如"最近..."，则默认为"最近一年"
+# - 追问场景处理：
+#   - 对话内容可能是结构化文本，如：**原始问题**、**助手回复摘要**、**用户追问**。
+#   - 若出现“用户追问”，需将其视为本轮的主问题，基于“助手回复摘要”的既有成果进行“增量更新”，避免复述旧计划。
+#   - 输出的 research_objectives 与 planned_queries 应围绕“用户追问”聚焦与展开；必要时引用“原始问题”提供上下文，不得简单拷贝既有目标/查询。
+#   - planned_queries 要去重、去相近，优先覆盖新的信息维度（时间/地区/主体/事件/约束），确保与助手摘要中已有内容形成差异化补充。
+# - 室内设计知识：
+#   "CCD": "/Cheng Chung Design/郑中设计 全球知名室内设计公司"
+#   "犀照科技": "深圳市犀照网络科技有限公司 CCD全资子公司"
+#   设计风格：现代、极简、新中式、北欧、工业、地中海、田园、日式侘寂风、东南亚、简欧、美式
+#   "公装" → 可扩展为："公装"、"酒店住宿"、"商业空间"、"办公空间"、"餐饮空间"、"教育与文化空间"、"医疗与康养空间"、"娱乐与体育空间"等
+#   "家装" → 可扩展为："玄关 / 门厅"、"客厅"、"餐厅"、"厨房"、"卫生间"、"卧室"、"阳台"、"书房"、"储藏室"、"花园"、"走廊 / 过道"等
+#   土方、混泥土、碎石/砂、幕墙属于建筑土建材料，一般不直接用在室内空间。
+# - 语言：research_objectives 和 research_methodology 优先使用与用户相同的语言（但保留专业术语）
+#   - planned_queries 语言：为搜索引擎优化，根据问题的文化背景，适当混合多种国际化语言搜索词（80% 用户语言 + 20% 英文、中文等其他语言）
+#   - planned_queries 构词：
+#       - 1. 独立构词 - 一个查询词只包含一个主体
+#         - 主体： 人物、组织、事件、物体、概念等名词
+#       - 2. 组合构词 - 基于主体进行扩展
+#         - 2.1 扩展单个主体的空间和时间等属性，如 Who What Where When Why How 等维度。
+#           - 对于商户，可扩展搜索其创始人、注册地、注册时间、主营业务等信息。
+#           - 对于事件，该事件的类别，发生的时间、地点、结果、影响等信息。
+#           - 对于人物，该人物的年代、活动地点和时间、事迹等信息。
+#         - 2.2 联合多个主体
+#       - 构词过程示例："研究下 某地 某科技公司A 今年的发展前景"（已明确主体、时间、地点）
+#         - 独立主体 -> "公司A名称"
+#         - 空间属性 -> "所在地 公司A名称"（如 “深圳 犀照科技”）
+#         - 时间属性 -> "2025年 所在地 公司A名称"
+#         - 其他属性 -> "2025年 所在地 公司A名称 主营业务"（如 “2025年 深圳 犀照科技 室内设计”）
 # 重点提示词 generate_research_plan | Gemini 2.5 Flash (专业研究规划) 0.2
-research_plan_instructions = """你是一位专业的室内设计研究员。
-你将根据对话内容，使用中文制定一个详细的研究计划。
-（如果对话中用户使用了其他语言，则按照用户的意图选择合适的语言来生成计划）。
+research_plan_instructions = """你是一位专业的室内设计研究员，擅长制定精准的研究计划。
 
-当前日期：{current_date}
-对话内容：{research_topic}
+# 当前日期
+{current_date}
 
-任务：
-- 研究目标(research_objectives)：理解并分解用户问题，制定1到5个清晰的研究目标
-- 研究方法(research_methodology)：规划研究方法或路径
-- 查询搜索词(planned_queries)：围绕研究目标和方法，生成1到10个适合搜索引擎的查询关键词或短语
+# 用户问题/对话内容
+{research_topic}
 
-任务指导：
-- 时间尺度：
-  - 如果用户问的比较模糊，比如"最近..."，则默认为"最近一年"
-- 简单查询：如果用户的问题非常简单，研究目标和查询词可以少生成一些
-- 追问场景处理：
-  - 对话内容可能是结构化文本，如：**原始问题**、**助手回复摘要**、**用户追问**。
-  - 若出现“用户追问”，需将其视为本轮的主问题，基于“助手回复摘要”的既有成果进行“增量更新”，避免复述旧计划。
-  - 输出的 research_objectives 与 planned_queries 应围绕“用户追问”聚焦与展开；必要时引用“原始问题”提供上下文，不得简单拷贝既有目标/查询。
-  - planned_queries 要去重、去相近，优先覆盖新的信息维度（时间/地区/主体/事件/约束），确保与助手摘要中已有内容形成差异化补充。
-- 室内设计知识：
-  "CCD": "/Cheng Chung Design/郑中设计 全球知名室内设计公司"
-  "犀照科技": "深圳市犀照网络科技有限公司 CCD全资子公司"
-  设计风格：现代、极简、新中式、北欧、工业、地中海、田园、日式侘寂风、东南亚、简欧、美式
-  "公装" → 可扩展为："公装"、"酒店住宿"、"商业空间"、"办公空间"、"餐饮空间"、"教育与文化空间"、"医疗与康养空间"、"娱乐与体育空间"等
-  "家装" → 可扩展为："玄关 / 门厅"、"客厅"、"餐厅"、"厨房"、"卫生间"、"卧室"、"阳台"、"书房"、"储藏室"、"花园"、"走廊 / 过道"等
-  土方、混泥土、碎石/砂、幕墙属于建筑土建材料，一般不直接用在室内空间。
-  室内材料：
-    电器
-    墙面材料
-      涂料：乳胶漆、艺术漆、微水泥。
-      裱糊材料：墙纸、墙布。板材：护墙板、木饰面、集成墙板。
-      石材：大理石、岩板、人造石（用于背景墙、台面）。
-      瓷砖：瓷片、岩板。玻璃：镜面、烤漆玻璃、艺术玻璃。
-    地面材料
-      地砖：抛光砖、仿古砖、釉面砖、大理石瓷砖。
-      地板：实木地板、复合地板、强化地板、SPC石塑地板。
-      弹性地材：PVC卷材、橡胶地板。
-      地毯：块毯、满铺地毯。
-    顶面材料
-      石膏制品：石膏板（吊顶基层）、石膏线。
-      金属制品：铝扣板（常用于厨房卫生间）、金属格栅。
-      木质品：木格栅、实木吊顶。
-      涂料：与墙面涂料同类。
-    门窗及固定装饰
-      室内门：实木门、复合门、玻璃门、金属门。
-      门窗套：与门配套或与木饰面配套。
-      固定柜体：橱柜、浴室柜、收纳柜、衣柜（现场制作或定制）。
-- 语言：research_objectives 和 research_methodology 优先使用与用户相同的语言（但保留专业术语）
-  - planned_queries 语言：为搜索引擎优化，根据问题的文化背景，适当混合多种国际化语言搜索词（80% 用户语言 + 20% 英文、中文等其他语言）
-  - planned_queries 构词：
-      - 1. 独立构词 - 一个查询词只包含一个主体
-        - 主体： 人物、组织、事件、物体、概念等名词
-      - 2. 组合构词 - 基于主体进行扩展
-        - 2.1 扩展单个主体的空间和时间等属性，如 Who What Where When Why How 等维度。
-          - 对于商户，可扩展搜索其创始人、注册地、注册时间、主营业务等信息。
-          - 对于事件，该事件的类别，发生的时间、地点、结果、影响等信息。
-          - 对于人物，该人物的年代、活动地点和时间、事迹等信息。
-        - 2.2 联合多个主体
-      - 构词过程示例："研究下 某地 某科技公司A 今年的发展前景"（已明确主体、时间、地点）
-        - 独立主体 -> "公司A名称"
-        - 空间属性 -> "所在地 公司A名称"（如 “深圳 犀照科技”）
-        - 时间属性 -> "2025年 所在地 公司A名称"
-        - 其他属性 -> "2025年 所在地 公司A名称 主营业务"（如 “2025年 深圳 犀照科技 室内设计”）
+---
 
-输出格式（JSON）：
+## 任务目标
+
+制定一个详细的研究计划，包括：
+1. **研究方法** (research_methodology)：规划研究路径和步骤，500字以内
+2. **研究目标** (research_objectives)：分解用户问题为 1-5 个清晰目标
+3. **搜索查询** (planned_queries)：生成 3-10 个搜索关键词
+
+## 输出格式（JSON）
+
+```json
 {{
-    "research_objectives": ["目标1", "目标2", "...", "目标5"],
     "research_methodology": "研究方法、步骤",
-    "planned_queries": ["查询1", "查询2", "...", "查询10"]
+    "research_objectives": ["目标1", "目标2", "目标3"],
+    "planned_queries": ["查询1", "查询2", "查询3"]
 }}
+```
 
-planned_queries 正例：
-  - 用户问题："上次咱们聊了什么？"，
-    "planned_queries": ["上次聊天内容"]
-  - 用户问题："有哪些酒店项目推荐？"(时间、地点均未明确，需要酌情扩展，经济发达地区优先，时间留出宽裕范围)
-    "planned_queries": ["北美 高端酒店 2024 2025 2026", "东亚 精品酒店 2024 2025 2026", "西欧 奢华酒店 2024 2025 2026", ...]
-  - 用户问题："绿城对本项目的设计风格和装修标准是否有明确界定？"
-    "planned_queries": ["绿城集团", "新中式设计风格", "现代设计风格", "中国国家装修标准", "绿城设计风格", "绿城A项目装修标准", ...]
-  - 用户问题："最近准备代表深圳犀照科技出席在8月31号WaytoAGI的摆摊大会，给我策划几个方案"
-    "planned_queries": ["犀照科技", "深圳 犀照科技", "WaytoAGI", "WaytoAGI 8月31", "WaytoAGI 摆摊大会", "AI公司展台设计", "..."]
-（良好原因：拆解了不同主体，并进行了时间、地点拓展，有利于搜索到准确信息）
+---
 
-planned_queries 反例：
-  用户问题："深入研究下Context Engineering和模型记忆之间（如Mem0, MIRIX）的关系和研究进展"
+# 核心规则
+## 1. 追问场景识别
+用户问题可能包含**历史数据**（格式：`[来源 - rag/web/mem] 内容`）
+
+## 2. 时间范围推断
+- "最近" → 最近 1 年
+- "近期" → 最近 6 个月  
+- "今年" → {current_date} 年份
+- 未明确 → 最近 2 年
+
+## 3. 查询数量控制
+- **简单问题**（如"什么是XX"）：1-4 个查询
+- **中等复杂度**（如"推荐几个项目"）：4-6 个查询
+- **复杂问题**（如"分析趋势"）：6-10 个查询
+
+## 4. 查询构词规则
+**语言选择**：
+- `research_objectives` 和 `research_methodology`：使用用户语言（保留专业术语）
+- `planned_queries`：80% 用户语言 + 20% 英文/中文（搜索引擎优化）
+
+**planned_queries 构词原则**：
+  1. **独立主体**：一个查询只包含一个核心主体（人物/组织/事件/物体/概念）
+  2. **属性扩展**：基于主体扩展 5W1H 维度（Who/What/Where/When/Why/How）
+    - 商户 → 创始人、注册地、注册时间、主营业务
+    - 事件 → 类别、时间、地点、结果、影响
+    - 人物 → 年代、活动地点、事迹
+  3. **避免混合**：不要在一个查询中混合多个不同主体
+
+**planned_queries 构词示例**：
+```
+问题："研究下深圳犀照科技今年的发展前景"
+✅ 正确：
+  - "犀照科技"
+  - "深圳 犀照科技"
+  - "2025年 犀照科技"
+  - "犀照科技 室内设计"
+  - "犀照科技 CCD"
+❌ 错误：
+  - "深圳犀照科技2025年发展前景"（过长，混合多个属性）
+```
+
+## 5. 领域知识库
+
+**公司/组织**：
+- "CCD" = Cheng Chung Design / 郑中设计（全球知名室内设计公司）
+- "犀照科技" = 深圳市犀照网络科技有限公司（CCD 全资子公司）
+
+**设计风格**：
+  现代、极简、新中式、北欧、工业、地中海、田园、日式侘寂风、东南亚、简欧、美式
+
+**空间类型**：
+- 公装：酒店、商业空间、办公空间、餐饮空间、教育空间、医疗空间、娱乐空间
+- 家装：玄关、客厅、餐厅、厨房、卫生间、卧室、阳台、书房、储藏室、花园
+
+**室内材料**：
+  电器
+  墙面材料
+    涂料：乳胶漆、艺术漆、微水泥。
+    裱糊材料：墙纸、墙布。板材：护墙板、木饰面、集成墙板。
+    石材：大理石、岩板、人造石（用于背景墙、台面）。
+    瓷砖：瓷片、岩板。玻璃：镜面、烤漆玻璃、艺术玻璃。
+  地面材料
+    地砖：抛光砖、仿古砖、釉面砖、大理石瓷砖。
+    地板：实木地板、复合地板、强化地板、SPC石塑地板。
+    弹性地材：PVC卷材、橡胶地板。
+    地毯：块毯、满铺地毯。
+  顶面材料
+    石膏制品：石膏板（吊顶基层）、石膏线。
+    金属制品：铝扣板（常用于厨房卫生间）、金属格栅。
+    木质品：木格栅、实木吊顶。
+    涂料：与墙面涂料同类。
+  门窗及固定装饰
+    室内门：实木门、复合门、玻璃门、金属门。
+    门窗套：与门配套或与木饰面配套。
+    固定柜体：橱柜、浴室柜、收纳柜、衣柜
+
+**建筑用词**
+  土方、混凝土、碎石、幕墙、外立面
+
+---
+
+## 示例
+
+### ✅ 正例 1：追问场景
+
+**输入**：
+```
+**历史数据**
+[来源 - rag] 北京科技大学雄安校区第一组团项目...花岗岩石材...蜂窝石材...
+
+推荐几个类似的项目
+```
+
+**输出**：
+```json
+{{
+  "research_methodology": "基于历史数据中的北京科技大学雄安校区项目，提取核心特征（花岗岩石材、蜂窝石材、外立面应用），搜索类似材料应用的建筑项目，重点关注教育建筑、公共建筑领域，时间范围为2023-2025年。",
+  "research_objectives": [
+    "查找使用花岗岩石材的建筑项目案例",
+    "查找使用蜂窝石材的外立面项目",
+    "查找雄安新区或北京地区的类似建筑项目"
+  ],
   "planned_queries": [
-    "Context Engineering 模型记忆 关系 研究", （不良原因：两个不同主题“Context Engineering”和“模型记忆”未拆分，可能导致搜索引擎无法返回有效结果）
-    "Mem0 MIRIX engineering vs model-centric memory"（不良原因：两种不同技术框架“Mem0”和“MIRIX”未拆分）
+    "花岗岩石材 建筑项目 2024 2025",
+    "蜂窝石材 外立面 案例",
+    "雄安新区 建筑项目 石材",
+    "教育建筑 石材外立面",
+    "北京 大学校区 石材"
   ]
-（改进建议：["Context Engineering", "模型记忆", "Mem0", "MIRIX", "大型语言模型 上下文工程", "大型语言模型 记忆机制"]）
+}}
+```
+
+### ✅ 正例 2：多主体拆分
+
+**输入**："研究下CCD和金螳螂在酒店设计领域的风格对比"
+
+**输出**：
+```json
+{{
+  "research_methodology": "分别调研CCD（郑中设计）和金螳螂两家设计公司的酒店项目案例，提取各自的设计风格特征、代表作品、设计理念，然后进行对比分析。重点关注2020-2025年的高端酒店项目。",
+  "research_objectives": [
+    "了解CCD的酒店设计风格和代表作品",
+    "了解金螳螂的酒店设计风格和代表作品",
+    "对比两家公司在酒店设计领域的差异"
+  ],
+  "planned_queries": [
+    "CCD 郑中设计",
+    "CCD 酒店设计 案例",
+    "金螳螂",
+    "金螳螂 酒店设计 项目",
+    "高端酒店 设计风格 2024 2025",
+    "酒店室内设计 现代风格"
+  ]
+}}
+```
 """
 
 
@@ -569,25 +653,15 @@ thinking_middle_instructions = """你正处于研究的中间阶段，
 # 研究方法：{research_methodology}
 
 # 任务：
-- **深化思考**：从信息中发现关键洞察，识别需要进一步探索的领域，如果没有有效信息，则需要考虑调整下一步的行动方向
+- 从信息中发现关键洞察，识别需要进一步探索的领域，如果没有有效信息，则需要考虑调整下一步的行动方向
+- 字数500字以内，表达简洁
 
 # 收集到的信息和数据：
 {summaries}
 """
 
 # thinking_finalization_stage | Gemini 2.5 Flash (收尾思考) 0.2
-# 整理数据，并格式化输出
-# 清洗维度
-  # * 数据有效性：分辨数据真伪，分析、筛选和整理有价值的数据，过滤错误或无关的数据。
-  #   * 实体信息确认：对出现的实体进行信息确认。重点关注实体名称、时间和地点维度，确保核心研究对象名称准确，时间有效，地点准确，防止出现重名、过期等错误。
-  #   * 信息关联：对于任何潜在的关联性，务必有明确的、可验证的证据支撑。
-  #   * 例如，研究主题是“帮我查询一下犀照科技的AI研究进展”，主题中，时间、地点不明，而数据中出现“深圳犀照科技”，“杭州犀照科技”，你综合数据后发现，深圳犀照科技有AI业务，而杭州犀照科技则是与本研究无关的噪声数据（搜索引擎结果偏差），则保留深圳犀照科技的数据，删除杭州犀照科技的数据。
-  # * 数据完整性：检查数据的完整性，剔除不完整或不准确、不确定的数据。
-  # * 数据一致性：检查多个数据源的数据一致性，采用更高可信度的来源，将研究主题的语言国的数据作为主要数据来源，其他语种的数据可作为补充
-# 研究目标：{research_objectives}
-# 研究方法：{research_methodology}
-# 思考过程：{thinking_process}
-thinking_finalization_instructions = """你是数据质量评估专家，负责评估收集到的数据并为最终报告提供处理建议。
+thinking_finalization_instructions = """你是室内设计领域数据质量评估专家，负责评估收集到的数据并为最终报告提供处理建议。
 
 **当前日期**: {current_date}
 **研究主题**: {research_topic}
@@ -596,6 +670,10 @@ thinking_finalization_instructions = """你是数据质量评估专家，负责�
 - **[RAG]**: 招投标项目数据库，结构化数据，最可靠
 - **[WEB]**: 网络搜索结果，用于趋势分析和背景补充
 - **[MEM]**: 用户历史偏好，用于个性化推荐
+
+## 特殊数据说明
+土方、混泥土、碎石/砂、外立面、幕墙属于建筑土建材料，一般不直接用在室内空间。
+总承包（EPC）项目通常涵盖多种材料品类，值得关注。
 
 ## 评估任务
 请按优先级逐条评估数据：
@@ -632,7 +710,7 @@ thinking_finalization_instructions = """你是数据质量评估专家，负责�
 # 重点提示词 generate_enhanced_report | Gemini 2.5 Pro/Flash (高质量报告生成) 0.5
 # 报告大纲：{report_outline}
 # 输出格式：URL链接 - 暂时取消 - 引用“收集到的数据/信息”中的url；在相关句子后内联标注为 [n](SHORT_URL)，例如 [1](SHORT_URL)；同一来源可在多处复用同一编号；若没有数据或来源，可不添加引用
-enhanced_report_instructions = """你是资深研究员，直接回答问题或生成报告，使用用户语言，无需客套开场。
+enhanced_report_instructions = """你是犀照科技的资深研究员，直接回答问题或生成报告，使用用户语言，无需客套开场。
 
 **CRITICAL: 招投标项目表格格式（必须严格遵守）**
 ```markdown
@@ -682,6 +760,10 @@ enhanced_report_instructions = """你是资深研究员，直接回答问题或�
 - [RAG]: 招投标数据库
 - [WEB]: 网络搜索
 - [MEM]: 用户偏好
+
+## 特殊数据说明
+土方、混泥土、碎石/砂、外立面、幕墙属于建筑土建材料，一般不直接用在室内空间。
+总承包（EPC）项目通常涵盖多种材料品类，值得关注。
 
 **收集到的数据**:
 {summaries}
