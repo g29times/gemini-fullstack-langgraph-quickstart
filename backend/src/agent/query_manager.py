@@ -269,16 +269,23 @@ class QueryManager:
                 timeout=timeout,
                 top_k=top_k,
             )
+            # if not projects:
+            #     logger.warning("[NEO_LOG] [QueryManager] 用户推荐接口返回空列表，使用兜底数据")
+            #     projects = [
+            #         {'id': '1', 'title': '公装设计项目', 'customer': '招商局集团'},
+            #         {'id': '2', 'title': '过滤测试', 'customer': '自定'},
+            #         {'id': '3', 'title': '过滤归口', 'customer': 'ALLin'},
+            #     ]
             logger.info("[NEO_LOG] [QueryManager] 调用用户推荐接口返回: %d", len(projects))
             # TODO 1 项目清洗 2 WEB查询是基于原始10个推荐项目，而不是LLM拼组后的，需要改逻辑
             
             # 过滤掉包含测试字眼的项目
             if projects:
                 original_count = len(projects)
-                filter_keywords = ["test", "测试", "归口", "新建项目", "犀照"]
+                filter_keywords = ["新建", "new", "test", "123", "测", "模板", "自定", "归口", "犀照", "sas", "sfa", "abc", "Lin", "消息", "零零", "十十", "一七", "旺仔", "阿斯顿", "阿萨德", "一五"]
                 projects = [
                     project for project in projects
-                    if not any(keyword in str(project.get("title", "")).lower() or keyword in str(project.get("title", "")) 
+                    if not any(keyword in str(project.get("customer", "")) or keyword in str(project.get("title", "")) 
                               for keyword in filter_keywords)
                 ]
                 if len(projects) < original_count:
@@ -288,7 +295,7 @@ class QueryManager:
             # 如果过滤后没有项目了，使用兜底数据
             if not projects or len(projects) == 0:
                 projects = [
-                    {'id': '1', 'title': '金融中心办公楼设计项目', 'customer': '招商局集团'},
+                    {'id': '1', 'title': '室内设计项目', 'customer': '招商局集团'},
                 ]
                 logger.warning("[NEO_LOG] [QueryManager] 兜底返回 - 用户项目: %s", projects)
             

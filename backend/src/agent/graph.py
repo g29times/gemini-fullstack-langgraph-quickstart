@@ -302,7 +302,7 @@ def classify_intent(state: OverallState, config: RunnableConfig) -> OverallState
     is_follow_up = state.get("is_follow_up", False)
     previous_report = state.get("previous_report", "")
     
-    logger.debug("[NEO_LOG] [classify_intent] topic = %s, is_follow_up = %s", topic, is_follow_up)
+    # logger.debug("[NEO_LOG] [classify_intent] topic = %s, is_follow_up = %s", topic, is_follow_up)
     
     # Rule-based memory-first detection with hybrid query support
     topic_lower = topic.lower()
@@ -796,7 +796,7 @@ def answer_simple_fact(state: OverallState, config: RunnableConfig) -> OverallSt
         # 获取现有消息并追加新的AI回复
         existing_messages = state.get("messages", [])
         new_messages = existing_messages + [AIMessage(content=answer_text)]
-        logger.info("[simple_fact] answer generation success: %s", answer_text)
+        # logger.info("[simple_fact] answer generation success: %s", answer_text)
         # logger.info("[simple_fact] new_messages: %s", new_messages)
         return {
             "messages": new_messages,
@@ -2092,7 +2092,7 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
     _elapsed = time.time() - _node_start
     logger.info("[NEO_LOG] [web_search] Web查询 END, id=%s: '%s', 耗时=%.2fs, 结果数: %d sources, %d chars | Preview: %s",
                 state.get("id", "N/A"), original_query, _elapsed, len(sources_gathered), len(modified_text),
-                modified_text[:100] + "..." if len(modified_text) > 100 else modified_text
+                modified_text[:50] + "..." if len(modified_text) > 50 else modified_text
                 )
     return {
         "sources_gathered": sources_gathered,
@@ -2120,21 +2120,27 @@ def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
     # print(f"[DEBUG] rag_search - 获取到用户消息: {len(user_messages) if user_messages else 0} 条")
     
     # 提取所有消息的 content 字段
-    messages_content = []
+    user_origin_question = []
     if user_messages:
         for msg in user_messages:
+            content = ""
             if isinstance(msg, dict):
                 content = msg.get('content', '')
+            elif hasattr(msg, 'content'):
+                # LangChain 消息对象，直接访问 content 属性
+                content = msg.content
             else:
+                # 其他情况转字符串
                 content = str(msg)
-            if content:
-                messages_content.append(content)
+            
+            if content and isinstance(content, str):
+                user_origin_question.append(content)
         
         # 打印消息内容用于调试
-        # if messages_content:
-            # print(f"[DEBUG] rag_search - 消息内容数量: {len(messages_content)}")
-            # print(f"[DEBUG] rag_search - 最后一条消息: {messages_content[-1][:100]}...")
-        # logger.info("[NEO_LOG] [rag_search] 用户消息获取成功: %d 条消息", len(messages_content))
+        # if user_origin_question:
+        #     print(f"[DEBUG] rag_search - 消息内容数量: {len(user_origin_question)}")
+        #     print(f"[DEBUG] rag_search - 最后一条消息: {user_origin_question[-1][:100] if len(user_origin_question[-1]) > 100 else user_origin_question[-1]}")
+        # logger.info("[NEO_LOG] [rag_search] 用户消息获取成功: %d 条消息", len(user_origin_question))
     
     _node_start = time.time()
     # logger.info("[NEO_LOG] [rag_search] RAG查询 START, id=%s: '%s'", state.get("id", "N/A"), original_query)
@@ -2155,7 +2161,7 @@ def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
         # 从状态中读取地区和项目类型过滤条件
         query_region = state.get("query_region")
         query_project_type = state.get("query_project_type")
-        logger.info("[NEO_LOG] [rag_search] RAG附加查询条件调试 - pids: %s", state.get("former_ids", []))
+        logger.info("[NEO_LOG] [rag_search] RAG附加查询条件调试 - question: %s", user_origin_question)
         hits_raw = query_rag_rest(
             endpoint=getattr(configurable, "rag_search_endpoint"),
             api_key=getattr(configurable, "rag_rest_api_key"),
@@ -2166,7 +2172,7 @@ def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
             timeout=int(getattr(configurable, "rag_rest_timeout", 5) or 5),
             local_json=getattr(configurable, "rag_rest_local_json", "backend/examples/vendor_projects.json"),
             top_k=top_k,
-            messages=messages_content
+            messages=user_origin_question
         )
     except Exception as e:
         try:
@@ -2348,8 +2354,7 @@ def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
     
     logger.info("[NEO_LOG] [rag_search] RAG查询 END, id=%s: '%s', region: %s, project_type: %s, 耗时=%.2fs, 结果数: %d sources, %d chars, IDs: %s | Preview: %s",
                 state.get("id", "N/A"), original_query, query_region, query_project_type, _elapsed, len(segments), len(modified_text),
-                project_ids,
-                modified_text[:100] + "..." if len(modified_text) > 100 else modified_text
+                project_ids, modified_text[:100] + "..." if len(modified_text) > 100 else modified_text
                 )
     return {
         "sources_gathered": segments,
@@ -2508,7 +2513,7 @@ def thinking_startup_stage(state: OverallState, config: RunnableConfig) -> Overa
         followup_tasks = "\n3. **追问分析**：分析用户的追问意图，识别需要深入研究的特定方面\n4. **差异化策略**：基于已有研究成果，制定针对性的研究策略"
         # 应用智能截断策略，避免prompt过长
         previous_context = f"\n\n**之前的研究报告摘要**：\n{truncate_content(previous_report)}"
-        logger.info("[NEO_LOG] [thinking_startup_stage] Follow-up scenario detected, enabling LLM thinking")
+        # logger.info("[NEO_LOG] [thinking_startup_stage] Follow-up scenario detected, enabling LLM thinking")
         use_llm_follow_up = True
     else:
         context_info = "这是一个新的研究任务。"
@@ -2525,16 +2530,17 @@ def thinking_startup_stage(state: OverallState, config: RunnableConfig) -> Overa
             followup_tasks=followup_tasks,
             previous_context=previous_context,
         )
-        logger.info("[NEO_LOG] [thinking_startup_stage] Follow-up startup_thinking prompt: %s", formatted_prompt[:200] + "...")
+        logger.info("[NEO_LOG] [thinking_startup_stage] Follow-up scenario prompt: %s", formatted_prompt[:200] + "...")
         
         try:
             result = structured_llm.invoke(formatted_prompt)
             startup_thinking_content = result.startup_thinking if hasattr(result, 'startup_thinking') else str(result)
-            logger.info("[NEO_LOG] [thinking_startup_stage] generated follow-up startup_thinking: %s", startup_thinking_content[:100])
+            # logger.info("[NEO_LOG] [thinking_startup_stage] response: %s", startup_thinking_content[:100])
         except Exception as e:
-            logger.warning("[NEO_LOG] [thinking_startup_stage] generated follow-up startup_thinking failed: %s, using fallback", e)
+            logger.warning("[NEO_LOG] [thinking_startup_stage] response failed: %s, using fallback", e)
             startup_thinking_content = f"追问分析：{get_research_topic(state.get('messages', []))}"
     else:
+        logger.info("[NEO_LOG] [thinking_startup_stage] New research task detected, using simplified logic")
         # 新研究任务：使用简化逻辑（保持原有查询）
         startup_thinking_content = methodology_text
     
@@ -2733,7 +2739,8 @@ def thinking_finalization_stage(state: OverallState, config: RunnableConfig) -> 
         "reasoning_model": configurable.query_generator_model,
     }
     final_thinking_value = thinking_record_updated.get("final_thinking", "")
-    logger.info("[NEO_LOG] [thinking_finalization_stage] FINISHED: %d, %s", len(final_thinking_value), final_thinking_value)
+    logger.info("[NEO_LOG] [thinking_finalization_stage] FINISHED, LENGTH: %d, %s", 
+        len(final_thinking_value), final_thinking_value[:1500])
     
     # Preserve core state fields (保留report生成必需的字段)
     for key in ["objectives_progress", "overall_completion", "sources_reranked",
@@ -2874,7 +2881,7 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
                     query = " ".join(queries)
                     query = research_topic + " " + query
                     # Call VoyageAI final rerank
-                    logger.info("[NEO_LOG] [reflection] VoyageAI 重排前(已去重) origin=%d, query=%s", len(documents), research_topic)
+                    logger.info("[NEO_LOG] [reflection] VoyageAI 重排前(已去重) origin=%d", len(documents))
                     voyage_result = voyage_reranker.rerank_documents(
                         query=query,
                         documents=documents,
@@ -2904,9 +2911,9 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
                     }
                     # logger.info("[NEO_LOG] [reflection] VoyageAI 重排后 query=%s, origin=%d -> final=%d, rerank=%s", 
                     #     research_topic, len(documents), len(sources_reranked), sources_reranked)
-                    logger.info("[NEO_LOG] [reflection] VoyageAI 重排后 origin=%d -> final=%d (avg_score=%.3f, tokens=%d) query=%s", 
+                    logger.info("[NEO_LOG] [reflection] VoyageAI 重排后 origin=%d -> final=%d (avg_score=%.3f, tokens=%d)", 
                                len(documents), len(sources_reranked),
-                               reflection_rerank_meta['avg_score'], reflection_rerank_meta['tokens'], research_topic)
+                               reflection_rerank_meta['avg_score'], reflection_rerank_meta['tokens'])
                     # RERANK 没有匹配的情况（考虑阈值0.5）使用3个原始文档
                     if len(reranked_sources) == 0:
                         sources_reranked = combined_sources[:3]
@@ -3269,7 +3276,7 @@ def generate_enhanced_report(state: OverallState, config: RunnableConfig) -> Ove
         safe_results = [s for s in state.get("web_research_result", [])]
     
     # Build comprehensive research process context
-    process_context = "\n\n"
+    process_context = ""
     
     # Extract thinking process information for richer report generation
     thinking_process = state.get("thinking_process", {})
@@ -3288,10 +3295,10 @@ def generate_enhanced_report(state: OverallState, config: RunnableConfig) -> Ove
             process_context += f"**中间阶段思考**: {middle_thinking}\n\n"
         
         if final_thinking:
-            process_context += f"**最终阶段思考**: {final_thinking}\n\n"
+            process_context += f"**数据处理建议（可能不准，仅供参考，以实际数据为准）**: {final_thinking}\n\n"
     
-        logger.info("[NEO_LOG] [generate_enhanced_report] Processed thinking record: startup=%s, middle=%s, final=%s, context_length=%d chars", 
-                   bool(startup_thinking), bool(middle_thinking), bool(final_thinking), len(process_context))
+        # logger.info("[NEO_LOG] [generate_enhanced_report] Processed thinking record: startup=%s, middle=%s, final=%s, context_length=%d chars", 
+        #            bool(startup_thinking), bool(middle_thinking), bool(final_thinking), len(process_context))
     else:
         logger.info("[NEO_LOG] [generate_enhanced_report] No thinking process records found, context_length=%d chars", len(process_context))
     
@@ -3325,8 +3332,9 @@ def generate_enhanced_report(state: OverallState, config: RunnableConfig) -> Ove
         user_personalization_context=user_personalization_context,
         # report_outline=state.get("report_outline", {}),
     )
-    logger.info("[NEO_LOG] [generate_enhanced_report] START, PROMPT LENGTH: %d", len(formatted_prompt))
-    # logger.info("[NEO_LOG] [generate_enhanced_report] START, PROMPT LENGTH: %d, FULL TEXT: %s", len(formatted_prompt), formatted_prompt)
+    logger.info("[NEO_LOG] [generate_enhanced_report] START, startup=%s, middle=%s, final=%s, context_length=%d, PROMPT LENGTH: %d", 
+        bool(startup_thinking), bool(middle_thinking), bool(final_thinking), len(process_context), len(formatted_prompt))
+    # logger.info("[NEO_LOG] [generate_enhanced_report] START, PROMPT LENGTH: %d, %s", len(formatted_prompt), formatted_prompt)
     result = llm.invoke(formatted_prompt)
     
     # Post-process: collapse overly long separators to max length 100
@@ -3340,7 +3348,7 @@ def generate_enhanced_report(state: OverallState, config: RunnableConfig) -> Ove
         # Be resilient: if anything goes wrong, skip sanitization without failing the flow
         pass
     
-    logger.info("[NEO_LOG] [generate_enhanced_report] END, RESULT PREVIEW:%d %s", len(result.content), result.content[:2000])
+    logger.info("[NEO_LOG] [generate_enhanced_report] FINISHED, LENGTH: %d, %s", len(result.content), result.content[:5000])
     
     # 获取现有消息并追加新的AI回复
     existing_messages = state.get("messages", [])
