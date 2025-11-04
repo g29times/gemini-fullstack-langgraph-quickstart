@@ -237,10 +237,12 @@ class QueryManager:
         # 获取实时用户信息
         user_info = self.state.get("user_info")
         user_token = None
+        user_institution = "1"
         
         # 优先使用实时 user_info 中的 token
         if user_info:
             user_token = user_info.get("token") or ""
+            user_institution = user_info.get("institution") or "1"
             if user_token:
                 logger.info("[NEO_LOG] [QueryManager] 成功从实时 user_info 获取 token")
             else:
@@ -256,8 +258,6 @@ class QueryManager:
             else:
                 logger.debug("[NEO_LOG] [QueryManager] 无可用 token，跳过个性化")
                 return [], ""
-
-        user_institution = user_info.get("institution") or "1"
 
         # 调用用户推荐接口
         try:

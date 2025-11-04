@@ -16,6 +16,8 @@ from typing import Optional
 # Import authentication routes
 from src.auth.routes import auth_router
 from src.auth.token_validator import TokenValidator
+import requests
+from bs4 import BeautifulSoup
 
 # Define the FastAPI app
 app = FastAPI()
@@ -112,7 +114,7 @@ async def auth_and_user_info_middleware(request: Request, call_next):
     # 获取用户信息（对所有请求）
     user_id = None
     user_name = None
-    
+    user_institution = None
     # 检查Authorization头
     auth_header = request.headers.get("authorization")
     # 当前机构id存储到request.state中
@@ -126,7 +128,8 @@ async def auth_and_user_info_middleware(request: Request, call_next):
             if user_info:
                 user_id = user_info.id
                 user_name = user_info.name
-                logging.info(f"获取到用户信息: token={token}, 用户ID={user_id}, 用户名={user_name}, 机构={request.state.user_institution}")
+                user_institution = request.state.user_institution
+                logging.info(f"获取到用户信息: token={token}, 用户ID={user_id}, 用户名={user_name}, 机构={user_institution}")
                 # 将用户信息存储到request.state中
                 request.state.user_id = user_id
                 request.state.user_name = user_name
@@ -148,8 +151,6 @@ async def auth_and_user_info_middleware(request: Request, call_next):
     
     # 检查是否是LangGraph API请求，如果是则注入用户信息
     if (
-        request.url.path.startswith("/runs") or 
-        request.url.path.startswith("/threads") or
         "stream" in request.url.path.lower()
     ):
         if user_id or user_name:
@@ -184,7 +185,7 @@ async def auth_and_user_info_middleware(request: Request, call_next):
                     modified_body = json.dumps(data).encode('utf-8')
                     request._body = modified_body
                     
-                    logging.info(f"注入用户信息到LangGraph请求: user_id={user_id}, user_name={user_name}")
+                    logging.info(f"注入用户信息到LangGraph请求: token={token}, user_id={user_id}, user_name={user_name}")
                     
                 except json.JSONDecodeError:
                     logging.warning("无法解析LangGraph请求体JSON")
@@ -371,91 +372,70 @@ app.mount(
 #     }
 
 
-# 推荐API代理端点
-@app.post("/recommendations")
-async def get_recommendations(request: Request):
-    """透明代理转发推荐API请求到目标环境"""
+class CheckURL:
+    def get_context(self,url):
+        headers = {
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Cache-Control": "max-age=0",
+            "Connection": "keep-alive",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-User": "?1",
+            "Upgrade-Insecure-Requests": "1",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36",
+            "sec-ch-ua": '"Google Chrome";v="141", "Not?A_Brand";v="8", "Chromium";v="141"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"'
+        }
+
+        cookies = {
+            "JIDENTITY": "71101c5d-89b9-484c-a727-1fbfcd66c43a",
+            "_site_id_cookie": "1",
+            "Hm_lvt_ddd51655888df4f02c24c55810416e80": "1760333757,1760348386",
+            "HMACCOUNT": "2C207121D0F343AB",
+            "Hm_lpvt_ddd51655888df4f02c24c55810416e80": "1760421929",
+            "JSESSIONID": "50B6A9C45B284BE76E8CA02CAAD31865"
+        }
+
+        response = requests.get(url, headers=headers, cookies=cookies)
+
+        res = response.text
+
+        soup = BeautifulSoup(res, 'html.parser')
+
+        content_div = soup.select_one("div.content")
+
+        if content_div:
+            # 获取纯文本，strip=True 去掉多余空格和换行
+            text = content_div.get_text(separator="\n", strip=True).replace("\n", "    ")
+            return text
+
+
+    def main(self,url):
+        if "https://www.shggzy.com" in url:
+            context = self.get_context(url)
+            if context==None:
+                return "https://www.shggzy.com/jyxxgc"
+            else:
+                return url
+        else:
+            return url
+
+
+
+@app.post("/checkurl")
+async def checkurl(req: dict):
     try:
-        # 目标环境API地址
-        target_url = "http://113.98.240.54:8903/intelligence-platform/bidProject/searchRecommedV1"
-
-        # 获取请求体
-        request_body = await request.body()
-
-        # 获取所有请求头
-        headers = dict(request.headers)
-
-        # 移除会冲突的header
-        headers.pop('host', None)
-        headers.pop('content-length', None)
-
-        # 设置目标主机
-        headers['Host'] = '113.98.240.54:8903'
-
-        # 获取API密钥：优先从请求头获取，其次从环境变量，最后使用默认值
-        api_key = None
-
-        # 1. 从请求头获取 Authorization
-        auth_header = request.headers.get("Authorization")
-        if auth_header:
-            # 移除 Bearer 前缀
-            api_key = auth_header.replace("Bearer ", "").strip()
-
-        # 2. 从请求头获取 X-Designer-Authorization
-        # if not api_key:
-        #     designer_auth_header = request.headers.get("X-Designer-Authorization")
-        #     if designer_auth_header:
-        #         api_key = designer_auth_header.replace("Bearer ", "").strip()
-
-        # 4. 使用默认值
-        if not api_key:
-            api_key = "eyJhbGciOiJIUzUxMiJ9.eyJjcmVhdGVfdGltZSI6IjIwMjUtMTAtMDkgMTQ6NTQ6MjMiLCJ1c2VyX2lkIjoxNTk2MDQxNzE0NDQ0MTg1NjAxLCJ1c2VyX25hbWUiOiLpgpPlrrbmmI4gIDEzNzEzNTUxMzQ0IiwidXNlcl9rZXkiOiI1OWE1OGVjNS04MTgyLTRlNWEtYTg4Zi1hZjRjYmJiZDA3YjkiLCJuZXdfZmxhZyI6Im5ld19mbGFnIn0.puE07vMVstoN0RmBivXg9jFuJ-tY-UJ_waJasaUuZP1qVYX3r_Z9Qa7Aqi2w1m3jnZyEjUxGhUFxBMxq9-xLEg"
-            
-        # 3. 从环境变量获取
-        if not api_key:
-            api_key = os.environ.get("RAG_REST_API_KEY")
-
-
-        print(f"DEBUG: Using API key from: {'request header' if auth_header else 'environment/default'}")
-        print(f"DEBUG: Using API key from: {api_key}")
-
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
-
-        # 使用httpx发送请求到目标环境
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                target_url,
-                content=request_body,
-                headers=headers
-            )
-
-            # 过滤响应头，避免Content-Length和Transfer-Encoding冲突
-            filtered_headers = {}            
-            for key, value in response.headers.items():
-                key_lower = key.lower()
-                # 完全移除可能冲突的头部，让FastAPI自动处理
-                if key_lower in ['content-length', 'transfer-encoding', 'connection']:
-                    continue
-                else:
-                    filtered_headers[key] = value
-
-            # 返回目标环境的响应，让FastAPI自动设置正确的头部
-            return Response(
-                content=response.content,
-                status_code=response.status_code,
-                headers=filtered_headers,
-                media_type="application/json"
-            )
-
-    except httpx.TimeoutException:
-        print("DEBUG: 请求超时")
-        raise HTTPException(status_code=504, detail="请求超时")
-    except httpx.RequestError as e:
-        print(f"DEBUG: 请求错误: {e}")
-        raise HTTPException(status_code=502, detail="代理请求失败")
+        res=CheckURL().main(req['url'])
+        return {
+            "status_code": 0,
+            "data":res
+        }
     except Exception as e:
-        print(f"DEBUG: 其他错误: {e}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail="服务器内部错误")
+        print(e)
+        return {
+            "status_code": 1,
+            "error": e,
+        }
