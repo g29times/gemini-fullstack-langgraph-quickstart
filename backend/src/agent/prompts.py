@@ -137,7 +137,7 @@ Verify presence of: Time | Location | Subject | Event
   "clarification_reason": string | null,
   "mem_only": boolean,
   "suggested_region": string,
-  "suggested_project_type": string
+  "suggested_project_type": "采购" | "工程" | ""
 }}
 """
 

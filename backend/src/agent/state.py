@@ -42,6 +42,9 @@ class OverallState(TypedDict):
     report_sections: dict | None  # Structured report with chapters and sections
     thinking_process: dict | None  # Detailed thinking steps (single accumulated record)
     
+    # Sensitive word detection
+    sensitive_word_triggered: bool | None  # Whether sensitive words were detected
+    
     # Follow-up conversation support
     is_follow_up: bool  # Whether this is a follow-up question
     previous_report: str | None  # Previous research report for context

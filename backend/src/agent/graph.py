@@ -92,6 +92,83 @@ if os.getenv("GEMINI_API_KEY") is None:
 genai_client = Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 
+# 敏感词检测
+def sensitive_word_checker(state: OverallState, config: RunnableConfig) -> OverallState:
+    """Check user input for sensitive words using external API."""
+    import requests
+    
+    messages = state.get("messages", [])
+    if not messages:
+        return {"sensitive_word_triggered": False}
+    
+    # 获取最新的用户输入
+    last_message = messages[-1]
+    user_input = ""
+    if hasattr(last_message, 'content'):
+        user_input = last_message.content
+    elif hasattr(last_message, 'text'):
+        user_input = last_message.text
+    else:
+        user_input = str(last_message)
+    
+    if not user_input or not user_input.strip():
+        return {"sensitive_word_triggered": False}
+    
+    # 调用敏感词检测接口
+    try:
+        configurable = Configuration.from_runnable_config(config)
+        api_url = os.getenv("SENSITIVE_WORD_CHECKER_URL")
+        if not api_url:
+            logger.warning(
+                "[NEO_LOG][sensitive_word_checker] SENSITIVE_WORD_CHECKER_URL not set, using default endpoint"
+            )
+            return {"sensitive_word_triggered": False}
+        
+        response = requests.get(
+            api_url,
+            params={"text": user_input},
+            headers={
+                "Authorization": f"Bearer {configurable.rag_rest_token}",
+                "institution-identification": "1"
+            },
+            timeout=5
+        )
+        
+        if response.status_code == 200:
+            result = response.json()
+            # data 为 true 表示触发敏感词，false 表示未触发
+            triggered = result.get("data", False)
+            logger.info(f"[NEO_LOG][sensitive_word_checker] user_input='{user_input[:50]}...', triggered={triggered}")
+            return {"sensitive_word_triggered": triggered}
+        else:
+            logger.warning(f"[NEO_LOG][sensitive_word_checker] API returned status {response.status_code}, allowing request")
+            return {"sensitive_word_triggered": False}
+            
+    except Exception as e:
+        logger.error(f"[NEO_LOG][sensitive_word_checker] API call failed: {e}, allowing request")
+        # 接口异常时，允许请求继续（不拦截）
+        return {"sensitive_word_triggered": False}
+
+
+def route_after_sensitive_check(state: OverallState) -> str:
+    """Route based on sensitive word detection result."""
+    if state.get("sensitive_word_triggered", False):
+        return "polite_refusal"
+    return "detect_follow_up"
+
+
+# 礼貌拒绝
+def polite_refusal(state: OverallState, config: RunnableConfig) -> OverallState:
+    """Return a polite refusal message when sensitive words are detected."""
+    refusal_message = "抱歉，您输入的内容似乎不太合适，我无法处理。我们可以聊点别的吗？"
+    
+    logger.info("[NEO_LOG][polite_refusal] Returning polite refusal message")
+    
+    return {
+        "answer": refusal_message,
+        "messages": [AIMessage(content=refusal_message)]
+    }
+
 
 # 检测追问
 def detect_follow_up(state: OverallState, config: RunnableConfig) -> OverallState:
@@ -2117,7 +2194,7 @@ def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
     
     # 从 state 中获取用户消息
     user_messages = state.get("messages", [])
-    # print(f"[DEBUG] rag_search - 获取到用户消息: {len(user_messages) if user_messages else 0} 条")
+    # print(f"[DEBUG] rag_search - 获取到用户消息: {user_messages}")
     
     # 提取所有消息的 content 字段
     user_origin_question = []
@@ -2740,7 +2817,7 @@ def thinking_finalization_stage(state: OverallState, config: RunnableConfig) -> 
     }
     final_thinking_value = thinking_record_updated.get("final_thinking", "")
     logger.info("[NEO_LOG] [thinking_finalization_stage] FINISHED, LENGTH: %d, %s", 
-        len(final_thinking_value), final_thinking_value[:1500])
+        len(final_thinking_value), final_thinking_value[:100])
     
     # Preserve core state fields (保留report生成必需的字段)
     for key in ["objectives_progress", "overall_completion", "sources_reranked",
@@ -3348,7 +3425,7 @@ def generate_enhanced_report(state: OverallState, config: RunnableConfig) -> Ove
         # Be resilient: if anything goes wrong, skip sanitization without failing the flow
         pass
     
-    logger.info("[NEO_LOG] [generate_enhanced_report] FINISHED, LENGTH: %d, %s", len(result.content), result.content[:5000])
+    logger.info("[NEO_LOG] [generate_enhanced_report] FINISHED, LENGTH: %d, %s", len(result.content), result.content[:500])
     
     # 获取现有消息并追加新的AI回复
     existing_messages = state.get("messages", [])
@@ -3417,6 +3494,8 @@ def evaluate_research(
 builder = StateGraph(OverallState, config_schema=Configuration)
 
 # Define all nodes
+builder.add_node("sensitive_word_checker", sensitive_word_checker)
+builder.add_node("polite_refusal", polite_refusal)
 builder.add_node("detect_follow_up", detect_follow_up)
 # builder.add_node("handle_follow_up", handle_follow_up)
 # | Gemini 2.5 Flash-Lite (识别用户意图)
@@ -3442,7 +3521,12 @@ builder.add_node("generate_enhanced_report", generate_enhanced_report)
 builder.add_node("finalize_answer", finalize_answer)
 
 # Enhanced routing with HITL and structured thinking
-builder.add_edge(START, "detect_follow_up")
+# Start with sensitive word check
+builder.add_edge(START, "sensitive_word_checker")
+builder.add_conditional_edges(
+    "sensitive_word_checker", route_after_sensitive_check, ["polite_refusal", "detect_follow_up"]
+)
+builder.add_edge("polite_refusal", END)
 builder.add_conditional_edges(
     "detect_follow_up", route_follow_up_detection, ["classify_intent"]
 )
