@@ -80,7 +80,6 @@ class OverallState(TypedDict):
     user_info: NotRequired[dict | None]  # User information from authentication
     user_projects: NotRequired[list]  # User's project list for personalization
     user_projects_text: NotRequired[str]  # Formatted user projects context for prompts
-    messages: NotRequired[list]  # 用户消息历史，用于在查询管理器中获取研究主题
 
     # Search query management
     # 累积所有生成过的查询，供任何节点回退使用

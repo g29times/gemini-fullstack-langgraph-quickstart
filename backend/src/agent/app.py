@@ -22,7 +22,7 @@ app = FastAPI()
 
 # Hardcoded authentication configuration
 ENABLE_DEFAULT_USER = False
-DEFAULT_INSTITUTION_ID = 0
+DEFAULT_INSTITUTION_ID = 1
 
 # Initialize security and token validator
 security = HTTPBearer(auto_error=False)  # 设置auto_error=False以便在认证禁用时处理
@@ -115,7 +115,7 @@ async def auth_and_user_info_middleware(request: Request, call_next):
     
     # 检查Authorization头
     auth_header = request.headers.get("authorization")
-    # 当前机构id
+    # 当前机构id存储到request.state中
     request.state.user_institution = request.headers.get("institution-identification", DEFAULT_INSTITUTION_ID)
 
     if auth_header and auth_header.startswith("Bearer "):
@@ -126,7 +126,7 @@ async def auth_and_user_info_middleware(request: Request, call_next):
             if user_info:
                 user_id = user_info.id
                 user_name = user_info.name
-                logging.info(f"获取到用户信息: token={token}, 用户ID={user_id}, 用户名={user_name}")
+                logging.info(f"获取到用户信息: token={token}, 用户ID={user_id}, 用户名={user_name}, 机构={request.state.user_institution}")
                 # 将用户信息存储到request.state中
                 request.state.user_id = user_id
                 request.state.user_name = user_name
@@ -175,6 +175,8 @@ async def auth_and_user_info_middleware(request: Request, call_next):
                         user_info_dict['id'] = user_id
                     if user_name:
                         user_info_dict['name'] = user_name
+                    if user_institution:
+                        user_info_dict['institution'] = user_institution
                     
                     data['config']['configurable']['user_info'] = user_info_dict
                     
@@ -182,7 +184,7 @@ async def auth_and_user_info_middleware(request: Request, call_next):
                     modified_body = json.dumps(data).encode('utf-8')
                     request._body = modified_body
                     
-                    logging.info(f"注入用户信息到LangGraph请求: token={token}, user_id={user_id}, user_name={user_name}")
+                    logging.info(f"注入用户信息到LangGraph请求: user_id={user_id}, user_name={user_name}")
                     
                 except json.JSONDecodeError:
                     logging.warning("无法解析LangGraph请求体JSON")

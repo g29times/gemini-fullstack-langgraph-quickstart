@@ -256,7 +256,9 @@ class QueryManager:
             else:
                 logger.debug("[NEO_LOG] [QueryManager] 无可用 token，跳过个性化")
                 return [], ""
-        
+
+        user_institution = user_info.get("institution") or "1"
+
         # 调用用户推荐接口
         try:
             endpoint = self.config.rag_recommend_endpoint
@@ -268,6 +270,7 @@ class QueryManager:
                 endpoint=endpoint,
                 timeout=timeout,
                 top_k=top_k,
+                institution_ids=user_institution
             )
             # if not projects:
             #     logger.warning("[NEO_LOG] [QueryManager] 用户推荐接口返回空列表，使用兜底数据")
@@ -1160,7 +1163,7 @@ class QueryManager:
                     # user_messages = self.state.get("messages", [])
                     if user_messages:
                         payload["messages"] = user_messages
-
+                # print(f"[NEO_LOG] [QueryManager] 派发 {channel} 查询: {payload}")
                 sends.append(Send(channel, payload))
 
                 # 更新派发痕迹

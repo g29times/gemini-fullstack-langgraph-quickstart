@@ -116,21 +116,16 @@ def sensitive_word_checker(state: OverallState, config: RunnableConfig) -> Overa
     
     # 调用敏感词检测接口
     try:
-        configurable = Configuration.from_runnable_config(config)
         api_url = os.getenv("SENSITIVE_WORD_CHECKER_URL")
         if not api_url:
             logger.warning(
                 "[NEO_LOG][sensitive_word_checker] SENSITIVE_WORD_CHECKER_URL not set, using default endpoint"
             )
-            return {"sensitive_word_triggered": False}
+            api_url = "http://113.98.240.54:8903/intelligence-platform/sensitiveWord/checkText"
         
         response = requests.get(
             api_url,
             params={"text": user_input},
-            headers={
-                "Authorization": f"Bearer {configurable.rag_rest_token}",
-                "institution-identification": "1"
-            },
             timeout=5
         )
         
@@ -160,9 +155,9 @@ def route_after_sensitive_check(state: OverallState) -> str:
 # 礼貌拒绝
 def polite_refusal(state: OverallState, config: RunnableConfig) -> OverallState:
     """Return a polite refusal message when sensitive words are detected."""
-    refusal_message = "抱歉，您输入的内容似乎不太合适，我无法处理。我们可以聊点别的吗？"
+    refusal_message = "抱歉，输入的内容似乎不太合适，我们可以聊点别的吗？"
     
-    logger.info("[NEO_LOG][polite_refusal] Returning polite refusal message")
+    logger.info("[NEO_LOG][polite_refusal] Returning polite refusal message %s", refusal_message)
     
     return {
         "answer": refusal_message,
@@ -2993,18 +2988,18 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
                                reflection_rerank_meta['avg_score'], reflection_rerank_meta['tokens'])
                     # RERANK 没有匹配的情况（考虑阈值0.5）使用3个原始文档
                     if len(reranked_sources) == 0:
-                        sources_reranked = combined_sources[:3]
+                        sources_reranked = combined_sources[:16]
                 else:
                     logger.info("[NEO_LOG] [reflection] VoyageAI reranker not available for final rerank")
-                    sources_reranked = combined_sources[:3]
+                    sources_reranked = combined_sources[:16]
             else:
                 logger.info("[NEO_LOG] [reflection] Not enough sources for final merge rerank")
-                sources_reranked = combined_sources[:3]
+                sources_reranked = combined_sources[:16]
                 
         except Exception as e:
             logger.warning("[NEO_LOG] [reflection] Final merge reranking failed: %s", e)
             # Fallback: use original sources
-            sources_reranked = combined_sources[:3]
+            sources_reranked = combined_sources[:16]
             reflection_rerank_meta = {'error': str(e)}
     
     # 3. 按来源类型构造分段 summaries（Web/Mem 合并 + RAG 原文）
@@ -3425,7 +3420,7 @@ def generate_enhanced_report(state: OverallState, config: RunnableConfig) -> Ove
         # Be resilient: if anything goes wrong, skip sanitization without failing the flow
         pass
     
-    logger.info("[NEO_LOG] [generate_enhanced_report] FINISHED, LENGTH: %d, %s", len(result.content), result.content[:500])
+    logger.info("[NEO_LOG] [generate_enhanced_report] FINISHED, LENGTH: %d, %s", len(result.content), result.content[:5000])
     
     # 获取现有消息并追加新的AI回复
     existing_messages = state.get("messages", [])

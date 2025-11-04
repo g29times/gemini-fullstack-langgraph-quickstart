@@ -235,7 +235,7 @@ def query_rag_rest(
             headers["Authorization"] = f"Bearer {api_key}"
         
         # New API format: send query as array of strings 
-        payload = { "labels": [query], "area": "", "myClassify": type, "pids": pids, "top_k": top_k, "question": messages[-1] or "" } 
+        payload = { "labels": [query], "area": area, "myClassify": type, "pids": pids, "top_k": top_k, "question": messages[-1] or "" } 
         
         # Debug: 打印 payload 内容
         # print("[NEO_LOG] [query_rag_rest] payload: ", payload)
@@ -348,7 +348,7 @@ def query_user_recommend(
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {api_key}",
-        # "institution-identification": institution_ids
+        "institution-identification": institution_ids
     }
     
     payload = {}
