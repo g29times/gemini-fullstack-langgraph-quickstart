@@ -201,6 +201,7 @@ cython_debug/
 
 frontend0/
 frontend1/
+backend/.langgraph_api
 backend/langgraph_api
 .clinerules/byterover-rules.md
 .kilocode/rules/byterover-rules.md

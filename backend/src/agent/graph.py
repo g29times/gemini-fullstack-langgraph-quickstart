@@ -116,12 +116,12 @@ def sensitive_word_checker(state: OverallState, config: RunnableConfig) -> Overa
     
     # 调用敏感词检测接口
     try:
-        api_url = os.getenv("SENSITIVE_WORD_CHECKER_URL")
+        api_url = "https://www.idea-fusion.com/intelligence-platform/sensitiveWord/checkText"
         if not api_url:
             logger.warning(
-                "[NEO_LOG][sensitive_word_checker] SENSITIVE_WORD_CHECKER_URL not set, using default endpoint"
+                "[NEO_LOG] [sensitive_word_checker 敏感词] SENSITIVE_WORD_CHECKER_URL not set, using default endpoint"
             )
-            api_url = "http://113.98.240.54:8903/intelligence-platform/sensitiveWord/checkText"
+            api_url = "https://www.idea-fusion.com/intelligence-platform/sensitiveWord/checkText"
         
         response = requests.get(
             api_url,
@@ -133,14 +133,14 @@ def sensitive_word_checker(state: OverallState, config: RunnableConfig) -> Overa
             result = response.json()
             # data 为 true 表示触发敏感词，false 表示未触发
             triggered = result.get("data", False)
-            logger.info(f"[NEO_LOG][sensitive_word_checker] user_input='{user_input[:50]}...', triggered={triggered}")
+            logger.info(f"[NEO_LOG] [sensitive_word_checker 敏感词] user_input='{user_input[:50]}...', triggered={triggered}")
             return {"sensitive_word_triggered": triggered}
         else:
-            logger.warning(f"[NEO_LOG][sensitive_word_checker] API returned status {response.status_code}, allowing request")
+            logger.warning(f"[NEO_LOG] [sensitive_word_checker 敏感词] API returned status {response.status_code}, allowing request")
             return {"sensitive_word_triggered": False}
             
     except Exception as e:
-        logger.error(f"[NEO_LOG][sensitive_word_checker] API call failed: {e}, allowing request")
+        logger.error(f"[NEO_LOG] [sensitive_word_checker 敏感词] API call failed: {e}, allowing request")
         # 接口异常时，允许请求继续（不拦截）
         return {"sensitive_word_triggered": False}
 
@@ -169,7 +169,7 @@ def polite_refusal(state: OverallState, config: RunnableConfig) -> OverallState:
 def detect_follow_up(state: OverallState, config: RunnableConfig) -> OverallState:
     """Intelligently detect if this is a follow-up question using LLM analysis."""
     messages = state.get("messages", [])
-    # logger.info("[NEO_LOG][follow_up_detection] messages=%s", messages)
+    # logger.info("[NEO_LOG] [follow_up_detection 追问] messages=%s", messages)
     
     # 关键修复：检查消息历史中是否有批准消息
     # 如果有，说明这是HITL流程的继续，应该跳过追问检测
@@ -257,7 +257,7 @@ def detect_follow_up(state: OverallState, config: RunnableConfig) -> OverallStat
     )
     
     try:
-        # logger.info("[NEO_LOG][follow_up_detection] formatted_prompt=%s", formatted_prompt)
+        # logger.info("[NEO_LOG] [follow_up_detection 追问] formatted_prompt=%s", formatted_prompt)
         result = structured_llm.invoke(formatted_prompt)
         
         # 转换为字典格式
@@ -281,10 +281,10 @@ def detect_follow_up(state: OverallState, config: RunnableConfig) -> OverallStat
                     # 转为整数（处理浮点数如 12345.0 -> 12345）
                     former_ids.append(int(float(item)))
                 except (ValueError, TypeError) as e:
-                    logger.warning(f"[NEO_LOG][follow_up_detection] 无效的 former_id: {item}, 错误: {e}")
+                    logger.warning(f"[NEO_LOG] [follow_up_detection 追问] 无效的 former_id: {item}, 错误: {e}")
                     continue
         project_names = detection_result.get("project_names", [])
-        logger.info("[NEO_LOG][follow_up_detection] threshold=%s, confidence=%s, is_follow_up=%s, former_ids=%s, project_names=%s", 
+        logger.info("[NEO_LOG] [follow_up_detection 追问] threshold=%s, confidence=%s, is_follow_up=%s, former_ids=%s, project_names=%s", 
                     threshold, confidence, is_follow_up, former_ids, project_names)
         
         # 保留现有状态，只更新追问相关字段
@@ -339,7 +339,7 @@ def route_follow_up_detection(state: OverallState, config: RunnableConfig) -> st
 
 
 
-# 重点方法 分类意图 意图识别
+# 重点方法 意图识别
 def classify_intent(state: OverallState, config: RunnableConfig) -> OverallState:
     """Classify whether the user's request is a simple direct lookup or requires research.
     Enhanced to support follow-up context for unified intent classification.
@@ -374,7 +374,7 @@ def classify_intent(state: OverallState, config: RunnableConfig) -> OverallState
     is_follow_up = state.get("is_follow_up", False)
     previous_report = state.get("previous_report", "")
     
-    # logger.debug("[NEO_LOG] [classify_intent] topic = %s, is_follow_up = %s", topic, is_follow_up)
+    # logger.debug("[NEO_LOG] [classify_intent 意图识别] topic = %s, is_follow_up = %s", topic, is_follow_up)
     
     # Rule-based memory-first detection with hybrid query support
     topic_lower = topic.lower()
@@ -422,14 +422,14 @@ def classify_intent(state: OverallState, config: RunnableConfig) -> OverallState
     research_topic = topic
     if is_follow_up:
         research_topic = topic + ("\n\n---\n\n**历史数据**\n\n" + sources_text if sources_text else "")
-    # logger.info("[NEO_LOG] [classify_intent] is_follow_up: %s, research_topic: %s", is_follow_up, research_topic)
+    # logger.info("[NEO_LOG] [classify_intent 意图识别] is_follow_up: %s, research_topic: %s", is_follow_up, research_topic)
     
     prompt = intent_classifier_instructions.format(
         research_topic=research_topic,
         follow_up_overrides=follow_up_overrides,
         previous_context_block=previous_context_block,
     )
-    # logger.info("[NEO_LOG] [classify_intent] prompt: %s", prompt)
+    # logger.info("[NEO_LOG] [classify_intent 意图识别] prompt: %s", prompt)
 
     try:
         result = structured_llm.invoke(prompt)
@@ -448,29 +448,33 @@ def classify_intent(state: OverallState, config: RunnableConfig) -> OverallState
         payload.setdefault("suggested_region", "")
         payload.setdefault("suggested_project_type", "")
         
+        # 转换 suggested_project_type: type1 -> "采购", type2 -> "工程"
+        project_type = payload.get("suggested_project_type", "")
+        if project_type == "type1":
+            payload["suggested_project_type"] = "采购"
+        elif project_type == "type2":
+            payload["suggested_project_type"] = "工程"
+        
         # Rule-based memory-first override for RESEARCH intent
         if payload.get("intent_label") == "RESEARCH":
             if is_memory_only:
                 payload["mem_only"] = True
-                logger.info("[NEO_LOG] [classify_intent] Memory-only rule triggered: mem_only=True, keywords=%s", memory_matches)
             elif is_hybrid_query:
                 payload["mem_only"] = False
-                logger.info("[NEO_LOG] [classify_intent] Hybrid rule triggered: mem_only=False, memory_keywords=%s + external_indicators", memory_matches)
             else:
                 # Pure external query or LLM fallback
                 payload["mem_only"] = False
-                logger.info("[NEO_LOG] [classify_intent] External/fallback query: mem_only=False")
         
         # 基于confidence阈值判断needs_clarification，而不是依赖LLM输出
         confidence = payload.get("confidence", 0.0)
         needs_clarification = confidence < configurable.intent_confidence_threshold
         payload["needs_clarification"] = needs_clarification
         
-        logger.info("[NEO_LOG] [classify_intent] 置信度低于这个阈值触发意图澄清=%.3f, needs_clarification=%s, intent=%s", 
+        logger.info("[NEO_LOG] [classify_intent 意图识别] 置信度低于这个阈值触发意图澄清=%.3f, needs_clarification=%s, intent=%s", 
                    configurable.intent_confidence_threshold, needs_clarification, payload)
         return {"intent": payload}
     except Exception as e:
-        logger.error("[NEO_LOG] [classify_intent] classification failed reason: %s", e)
+        logger.error("[NEO_LOG] [classify_intent 意图识别] classification failed reason: %s", e)
         return {
             "intent": {
                 "is_simple_lookup": False,
@@ -615,7 +619,7 @@ def clarify_intent(state: OverallState, config: RunnableConfig) -> OverallState:
     3. Maximum clarification rounds reached
     4. User explicitly opts out
     """
-    # logger.debug("[NEO_LOG] [意图澄清] ===== CLARIFY_INTENT NODE CALLED =====")
+    # logger.debug("[NEO_LOG] [clarify_intent 意图澄清] ===== CLARIFY_INTENT NODE CALLED =====")
     configurable = Configuration.from_runnable_config(config)
     
     # Initialize clarification state if not present
@@ -681,7 +685,7 @@ def clarify_intent(state: OverallState, config: RunnableConfig) -> OverallState:
         needs_clarification = confidence_score < configurable.intent_confidence_threshold
         clarification_result["needs_clarification"] = needs_clarification
         
-        logger.info("[NEO_LOG] [意图澄清] confidence=%.3f, threshold=%.3f, needs_clarification=%s, missing_info=%s", 
+        logger.info("[NEO_LOG] [clarify_intent 意图澄清] confidence=%.3f, threshold=%.3f, needs_clarification=%s, missing_info=%s", 
                    confidence_score, configurable.intent_confidence_threshold, needs_clarification,
                    clarification_result.get("missing_info", []))
         
@@ -694,7 +698,7 @@ def clarify_intent(state: OverallState, config: RunnableConfig) -> OverallState:
         # 1 需要澄清时的处理 If clarification is needed, prepare questions for user
         if clarification_result.get("needs_clarification", True) and clarification_count < max_rounds:
             questions = clarification_result.get("clarification_questions", [])
-            logger.info("[NEO_LOG] [意图澄清] questions generated: %s", questions)
+            logger.info("[NEO_LOG] [clarify_intent 意图澄清] questions generated: %s", questions)
             if questions:
                 # Format questions as a user-friendly message
                 question_text = "为了更好地帮助您，我需要了解一些额外信息：\n\n"
@@ -713,7 +717,7 @@ def clarify_intent(state: OverallState, config: RunnableConfig) -> OverallState:
                 clarification_msg = AIMessage(content=question_text)
                 updated_state["messages"] = [clarification_msg]
                 
-                logger.info("[NEO_LOG] [意图澄清] Added clarification message to state.messages: %s", question_text[:100])
+                logger.info("[NEO_LOG] [clarify_intent 意图澄清] Added clarification message to state.messages: %s", question_text[:100])
                 
                 # Store the clarification question in state for later use
                 updated_state["pending_clarification"] = question_text
@@ -722,7 +726,7 @@ def clarify_intent(state: OverallState, config: RunnableConfig) -> OverallState:
                 # Raise NodeInterrupt - the updated_state should be applied before the interrupt
                 raise NodeInterrupt(question_text)
             else:
-                logger.info("[NEO_LOG] [意图澄清] no questions generated, skipping clarification")
+                logger.info("[NEO_LOG] [clarify_intent 意图澄清] no questions generated, skipping clarification")
                 return {
                     "clarification_count": clarification_count + 1,
                     "intent_clarified": True
@@ -755,7 +759,7 @@ def clarify_intent(state: OverallState, config: RunnableConfig) -> OverallState:
         # 检查是否启用HITL bypass
         configurable = Configuration.from_runnable_config(config)
         if configurable.enable_clarification_bypass:
-            logger.info("[NEO_LOG] [意图澄清] bypass enabled, skipping clarification")
+            logger.info("[NEO_LOG] [clarify_intent 意图澄清] bypass enabled, skipping clarification")
             return {
                 "clarification_count": clarification_count + 1,
                 "intent_clarified": True
@@ -764,7 +768,7 @@ def clarify_intent(state: OverallState, config: RunnableConfig) -> OverallState:
             # 正常情况下让NodeInterrupt抛出
             raise
     except Exception as e:
-        logger.error("[NEO_LOG] [意图澄清] clarification failed: %s", e)
+        logger.error("[NEO_LOG] [clarify_intent 意图澄清] clarification failed: %s", e)
         # Fallback: mark as clarified to continue with research
         return {
             "clarification_count": clarification_count + 1,
@@ -1280,16 +1284,16 @@ def generate_research_plan(state: OverallState, config: RunnableConfig) -> Overa
         current_date=current_date,
         research_topic=research_topic,
     )
-    logger.info("[NEO_LOG] [generate_research_plan] is_follow_up: %s, prompt: %d", is_follow_up, len(formatted_prompt))
+    logger.info("[NEO_LOG] [generate_research_plan 生成计划] is_follow_up: %s, prompt: %d", is_follow_up, len(formatted_prompt))
     
-    # logger.info("[NEO_LOG] [generate_research_plan] prompt: %s", formatted_prompt)
+    # logger.info("[NEO_LOG] [generate_research_plan 生成计划] prompt: %s", formatted_prompt)
     # 优先使用结构化输出；失败则回退到非结构化并解析；最终提供安全默认
     plan_dict = None
     try:
         result = structured_llm.invoke(formatted_prompt)
     except Exception as e:
         try:
-            logger.warning("[NEO_LOG] [generate_research_plan] structured invoke failed reason: %s", str(e))
+            logger.warning("[NEO_LOG] [generate_research_plan 生成计划] failed reason: %s", str(e))
         except Exception:
             pass
         result = None
@@ -1329,7 +1333,7 @@ def generate_research_plan(state: OverallState, config: RunnableConfig) -> Overa
             "research_methodology": "",
         }
     # plan_dict.add(request)
-    logger.info("[NEO_LOG] [generate_research_plan] RESEARCH PLAN: %s", plan_dict)
+    logger.info("[NEO_LOG] [generate_research_plan 生成计划] RESEARCH PLAN: %s", plan_dict)
     
     # 保留intent信息，确保research_channels正确传递
     result = {
@@ -1488,7 +1492,7 @@ def generate_query(state: OverallState, config: RunnableConfig) -> OverallState:
     if user_info:
         state["user_info"] = user_info
 
-    # logger.info("[NEO_LOG][generate_query] former_ids: %s", state.get("former_ids", []))
+    # logger.info("[NEO_LOG] [generate_query 生成问题] former_ids: %s", state.get("former_ids", []))
     
     # 初始化查询数量配置
     if state.get("initial_search_query_count") is None:
@@ -1524,7 +1528,7 @@ def generate_query(state: OverallState, config: RunnableConfig) -> OverallState:
     if result.backlog:
         response["planned_backlog"] = result.backlog
 
-    # logger.info("[NEO_LOG] [generate_query] DEBUG: planned_cursor = %s (from QueryResult: %s)", 
+    # logger.info("[NEO_LOG] [generate_query 生成问题] DEBUG: planned_cursor = %s (from QueryResult: %s)", 
     #             cursor_value, result.planned_cursor)
 
     # 保留关键状态字段，防止丢失 intent: 意图， user_projects_text: 用户项目上下文
@@ -2789,12 +2793,21 @@ def thinking_finalization_stage(state: OverallState, config: RunnableConfig) -> 
     logger.info("[NEO_LOG] [thinking_finalization_stage] START, PROMPT LENGTH: %d", len(formatted_prompt))
     # logger.info("[NEO_LOG] [thinking_finalization_stage] START, PROMPT：%s", formatted_prompt)
     
-    result = structured_llm.invoke(formatted_prompt)
-    thinking_record = {
-        "stage": "finalization",
-        "timestamp": current_date,
-        "content": result.model_dump(),
-    }
+    try:
+        result = structured_llm.invoke(formatted_prompt)
+        thinking_record = {
+            "stage": "finalization",
+            "timestamp": current_date,
+            "content": result.model_dump(),
+        }
+    except Exception as e:
+        logger.error("[NEO_LOG] [thinking_finalization_stage] failed reason: %s", str(e))
+        result = None
+        thinking_record = {
+            "stage": "finalization",
+            "timestamp": current_date,
+            "content": {},
+        }
     
     # Update the single thinking record with final content
     thinking_record_updated = {
@@ -2812,7 +2825,7 @@ def thinking_finalization_stage(state: OverallState, config: RunnableConfig) -> 
     }
     final_thinking_value = thinking_record_updated.get("final_thinking", "")
     logger.info("[NEO_LOG] [thinking_finalization_stage] FINISHED, LENGTH: %d, %s", 
-        len(final_thinking_value), final_thinking_value[:100])
+        len(final_thinking_value), final_thinking_value[:1000])
     
     # Preserve core state fields (保留report生成必需的字段)
     for key in ["objectives_progress", "overall_completion", "sources_reranked",
@@ -2845,7 +2858,7 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
     # Format the prompt
     current_date = get_current_date()
     safe_results = [s for s in state.get("web_research_result", [])]
-    # logger.info("[NEO_LOG] [reflection] web_research_results: %s", safe_results)
+    # logger.info("[NEO_LOG] [reflection 反思] web_research_results: %s", safe_results)
     # Get research objectives from research plan if available
     research_plan = state.get("research_plan", {})
     research_objectives = research_plan.get("research_objectives", [])
@@ -2880,7 +2893,7 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
     # 【一般】可观测性日志 - 记录调度策略和目标选择情况
     try:
         logger.debug(
-            "[NEO_LOG] [reflection] scheduling strategy=%s, target_objective='%s', prev_overall=%.2f, objectives=%d",
+            "[NEO_LOG] [reflection 反思] scheduling strategy=%s, target_objective='%s', prev_overall=%.2f, objectives=%d",
             strategy,
             (target_objective or ""),
             float(state.get("overall_completion") or 0.0),
@@ -2915,7 +2928,7 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
             # Combine and deduplicate by URL
             combined_sources = state.get("web_research_result", []) or []
             # 去重：基于 text 字段（dict）或字符串本身（str）
-            logger.info("[NEO_LOG] [reflection] documents before deduplication: %d", len(combined_sources))
+            logger.info("[NEO_LOG] [reflection 反思] documents before deduplication: %d", len(combined_sources))
             seen_texts = set()
             deduped_sources = []
             for item in combined_sources:
@@ -2924,7 +2937,7 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
                     seen_texts.add(text)
                     deduped_sources.append(item)
             combined_sources = deduped_sources
-            logger.info("[NEO_LOG] [reflection] documents after deduplication: %d", len(combined_sources))
+            logger.info("[NEO_LOG] [reflection 反思] documents after deduplication: %d", len(combined_sources))
 
             # Apply final reranking if we have enough sources
             min_sources_for_rerank = getattr(configurable, 'final_rerank_min_count')
@@ -2953,7 +2966,7 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
                     query = " ".join(queries)
                     query = research_topic + " " + query
                     # Call VoyageAI final rerank
-                    logger.info("[NEO_LOG] [reflection] VoyageAI 重排前(已去重) origin=%d", len(documents))
+                    logger.info("[NEO_LOG] [reflection 反思] VoyageAI 重排前(已去重) origin=%d", len(documents))
                     voyage_result = voyage_reranker.rerank_documents(
                         query=query,
                         documents=documents,
@@ -2981,23 +2994,23 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
                         'avg_score': sum(voyage_result.relevance_scores) / len(voyage_result.relevance_scores) if voyage_result.relevance_scores else 0.0,
                         'tokens': voyage_result.api_usage.get('total_tokens', 0)
                     }
-                    # logger.info("[NEO_LOG] [reflection] VoyageAI 重排后 query=%s, origin=%d -> final=%d, rerank=%s", 
+                    # logger.info("[NEO_LOG] [reflection 反思] VoyageAI 重排后 query=%s, origin=%d -> final=%d, rerank=%s", 
                     #     research_topic, len(documents), len(sources_reranked), sources_reranked)
-                    logger.info("[NEO_LOG] [reflection] VoyageAI 重排后 origin=%d -> final=%d (avg_score=%.3f, tokens=%d)", 
+                    logger.info("[NEO_LOG] [reflection 反思] VoyageAI 重排后 origin=%d -> final=%d (avg_score=%.3f, tokens=%d)", 
                                len(documents), len(sources_reranked),
                                reflection_rerank_meta['avg_score'], reflection_rerank_meta['tokens'])
                     # RERANK 没有匹配的情况（考虑阈值0.5）使用3个原始文档
                     if len(reranked_sources) == 0:
                         sources_reranked = combined_sources[:16]
                 else:
-                    logger.info("[NEO_LOG] [reflection] VoyageAI reranker not available for final rerank")
+                    logger.info("[NEO_LOG] [reflection 反思] VoyageAI reranker not available for final rerank")
                     sources_reranked = combined_sources[:16]
             else:
-                logger.info("[NEO_LOG] [reflection] Not enough sources for final merge rerank")
+                logger.info("[NEO_LOG] [reflection 反思] Not enough sources for final merge rerank")
                 sources_reranked = combined_sources[:16]
                 
         except Exception as e:
-            logger.warning("[NEO_LOG] [reflection] Final merge reranking failed: %s", e)
+            logger.warning("[NEO_LOG] [reflection 反思] Final merge reranking failed: %s", e)
             # Fallback: use original sources
             sources_reranked = combined_sources[:16]
             reflection_rerank_meta = {'error': str(e)}
@@ -3020,13 +3033,13 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
             max_items=16,
             max_chars=40000
         )
-        logger.info("[NEO_LOG] [reflection] sources_reranked type distribution: rag=%d, web=%d, mem=%d",
+        logger.info("[NEO_LOG] [reflection 反思] sources_reranked type distribution: rag=%d, web=%d, mem=%d",
                    type_counts.get("rag", 0), type_counts.get("web", 0), type_counts.get("mem", 0))
-        # logger.info("[NEO_LOG] [reflection] summaries_text preview: %s", summaries_text[:500] + "..." if len(summaries_text) > 500 else summaries_text)
+        # logger.info("[NEO_LOG] [reflection 反思] summaries_text preview: %s", summaries_text[:500] + "..." if len(summaries_text) > 500 else summaries_text)
     else:
         # Fallback: 使用原始 safe_results（已提取文本）
         summaries_text = _prepare_summaries(safe_results)
-        logger.info("[NEO_LOG] [reflection] Using fallback summaries (no reranked sources)")
+        logger.info("[NEO_LOG] [reflection 反思] Using fallback summaries (no reranked sources)")
         
     # 组装LLM提示词并调用结构化输出
     formatted_prompt = reflection_instructions.format(
@@ -3040,8 +3053,8 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
         summaries=summaries_text,
     )
     # 添加详细日志跟踪LLM调用和followups生成
-    # logger.info("[NEO_LOG] [reflection] PROMPT: %s", formatted_prompt)
-    logger.info("[NEO_LOG] [reflection] PROMPT LENGTH: %d", len(formatted_prompt))
+    # logger.info("[NEO_LOG] [reflection 反思] PROMPT: %s", formatted_prompt)
+    logger.info("[NEO_LOG] [reflection 反思] PROMPT LENGTH: %d", len(formatted_prompt))
     # init Reasoning Model
     llm = ChatGoogleGenerativeAI(
         model=reasoning_model,
@@ -3055,7 +3068,7 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
         # 只调用一次LLM，获取原始输出并手动解析
         raw_result = llm.invoke(formatted_prompt)
         raw_content = raw_result.content if hasattr(raw_result, 'content') else str(raw_result)
-        # logger.info("[NEO_LOG] [reflection] LLM原始文本返回: %s", raw_content)
+        # logger.info("[NEO_LOG] [reflection 反思] LLM原始文本返回: %s", raw_content)
         
         # 手动解析JSON并创建Reflection对象
         import json
@@ -3072,12 +3085,12 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
             
             parsed_json = json.loads(json_content)
             result = Reflection(**parsed_json)
-            # logger.info("[NEO_LOG] [reflection] 反思结果手动解析成功: %s", result)
+            # logger.info("[NEO_LOG] [reflection 反思] 反思结果手动解析成功: %s", result)
         except Exception as parse_e:
-            logger.error("[NEO_LOG] [reflection] 反思结果手动解析失败: %s", str(parse_e))
+            logger.error("[NEO_LOG] [reflection 反思] 反思结果手动解析失败: %s", str(parse_e))
             # 回退到结构化输出
             # result = llm.with_structured_output(Reflection).invoke(formatted_prompt)
-            # logger.info("[NEO_LOG] [reflection] 回退到结构化输出: %s", result)
+            # logger.info("[NEO_LOG] [reflection 反思] 回退到结构化输出: %s", result)
 
         # 验证必需字段
         missing_fields = []
@@ -3110,7 +3123,7 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
             fallback_query = f"What are the most recent developments and emerging trends in {topic}?"
 
         preserved_objectives_progress = prev_obj_prog.copy() if prev_obj_prog else {}
-        logger.warning("[NEO_LOG] [reflection] Using local fallback Reflection due to error: %s", str(e))
+        logger.warning("[NEO_LOG] [reflection 反思] Using local fallback Reflection due to error: %s", str(e))
         result = Reflection(
             is_sufficient=False,
             knowledge_gap="Structured output parsing failed; using local fallback analysis",
@@ -3158,7 +3171,7 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
             else:
                 overall_completion = max(prev_overall, 0.2)
     except Exception as e:
-        logger.error("[NEO_LOG] [reflection] Error in objectives_progress merge: %s", str(e))
+        logger.error("[NEO_LOG] [reflection 反思] Error in objectives_progress merge: %s", str(e))
         # Fallback: preserve previous progress if available, or initialize if we have objectives
         if prev_obj_prog:
             merged_prog = prev_obj_prog.copy()
@@ -3195,7 +3208,7 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
     
     if compressed_web or compressed_mem:
         # 用压缩后的 WEB/MEM 替换原始数据
-        # logger.info("[NEO_LOG] [reflection] Using compressed WEB (%d chars) and MEM (%d chars) to replace original sources", 
+        # logger.info("[NEO_LOG] [reflection 反思] Using compressed WEB (%d chars) and MEM (%d chars) to replace original sources", 
         #            len(compressed_web), len(compressed_mem))
         
         # 添加压缩后的 WEB（如果有）
@@ -3218,19 +3231,19 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
                 updated_web_research_result.append(item)
     else:
         # Fallback: 如果 LLM 没有输出压缩版本，保留原始数据
-        logger.warning("[NEO_LOG] [reflection] No compressed_web/mem from LLM, keeping original sources")
+        logger.warning("[NEO_LOG] [reflection 反思] No compressed_web/mem from LLM, keeping original sources")
         updated_web_research_result = sources_reranked
     
     # 8 返回值调试日志 - 记录最终返回给下游节点的数据
     effort = _infer_effort(state, configurable)
     completion_threshold = _effort_completion_threshold(configurable, effort)
-    logger.info("[NEO_LOG] [reflection] 反思结束：result=%s", result)
-    # logger.info("[NEO_LOG] [reflection] 反思结束：compressed_web=%d chars, compressed_mem=%d chars, updated_results=%d items (web=%d, mem=%d, rag=%d)", 
+    logger.info("[NEO_LOG] [reflection 反思] 反思结束：result=%s", result)
+    # logger.info("[NEO_LOG] [reflection 反思] 反思结束：compressed_web=%d chars, compressed_mem=%d chars, updated_results=%d items (web=%d, mem=%d, rag=%d)", 
     #             len(compressed_web), len(compressed_mem), len(updated_web_research_result),
     #             sum(1 for x in updated_web_research_result if isinstance(x, dict) and x.get("type") == "web"),
     #             sum(1 for x in updated_web_research_result if isinstance(x, dict) and x.get("type") == "mem"),
     #             sum(1 for x in updated_web_research_result if isinstance(x, dict) and x.get("type") == "rag"))
-    # logger.info("[NEO_LOG] [reflection] updated_web_research_result: %s", updated_web_research_result)
+    # logger.info("[NEO_LOG] [reflection 反思] updated_web_research_result: %s", updated_web_research_result)
     
     return {
         # None-safe extraction to avoid AttributeError when result is None
@@ -3341,10 +3354,10 @@ def generate_enhanced_report(state: OverallState, config: RunnableConfig) -> Ove
     # 经过处理后的有效结果
     safe_results = []
     if sources_reranked:
-        # logger.info("[NEO_LOG] [generate_enhanced_report] 使用重排后的高质量数据: %d %s", len(sources_reranked), sources_reranked[:2])
+        # logger.info("[NEO_LOG] [generate_enhanced_report 输出报告] 使用重排后的高质量数据: %d %s", len(sources_reranked), sources_reranked[:2])
         safe_results = [s for s in sources_reranked]
     else:
-        # logger.info("[NEO_LOG] [generate_enhanced_report] 使用未重排的原始数据: %d", len(state.get("web_research_result", [])))
+        # logger.info("[NEO_LOG] [generate_enhanced_report 输出报告] 使用未重排的原始数据: %d", len(state.get("web_research_result", [])))
         safe_results = [s for s in state.get("web_research_result", [])]
     
     # Build comprehensive research process context
@@ -3369,15 +3382,15 @@ def generate_enhanced_report(state: OverallState, config: RunnableConfig) -> Ove
         if final_thinking:
             process_context += f"**数据处理建议（可能不准，仅供参考，以实际数据为准）**: {final_thinking}\n\n"
     
-        # logger.info("[NEO_LOG] [generate_enhanced_report] Processed thinking record: startup=%s, middle=%s, final=%s, context_length=%d chars", 
+        # logger.info("[NEO_LOG] [generate_enhanced_report 输出报告] Processed thinking record: startup=%s, middle=%s, final=%s, context_length=%d chars", 
         #            bool(startup_thinking), bool(middle_thinking), bool(final_thinking), len(process_context))
     else:
-        logger.info("[NEO_LOG] [generate_enhanced_report] No thinking process records found, context_length=%d chars", len(process_context))
+        logger.info("[NEO_LOG] [generate_enhanced_report 输出报告] No thinking process records found, context_length=%d chars", len(process_context))
     
     # Combine research results with comprehensive process context
-    # logger.info("[NEO_LOG] [generate_enhanced_report] 组合研究结果与综合思考过程: %s", (safe_results))
+    # logger.info("[NEO_LOG] [generate_enhanced_report 输出报告] 组合研究结果与综合思考过程: %s", (safe_results))
     safe_results_filtered = _prepare_summaries(safe_results, configurable.voyage_rerank_top_k)
-    # logger.info("[NEO_LOG] [generate_enhanced_report] 处理后研究结果: %s", safe_results_filtered[:100])
+    # logger.info("[NEO_LOG] [generate_enhanced_report 输出报告] 处理后研究结果: %s", safe_results_filtered[:100])
     enhanced_summaries = "\n\n---\n\n" + safe_results_filtered + "\n\n---\n\n" + process_context
     # enhanced_summaries = process_context
     
@@ -3404,10 +3417,14 @@ def generate_enhanced_report(state: OverallState, config: RunnableConfig) -> Ove
         user_personalization_context=user_personalization_context,
         # report_outline=state.get("report_outline", {}),
     )
-    logger.info("[NEO_LOG] [generate_enhanced_report] START, startup=%s, middle=%s, final=%s, context_length=%d, PROMPT LENGTH: %d", 
+    logger.info("[NEO_LOG] [generate_enhanced_report 输出报告] START, startup=%s, middle=%s, final=%s, context_length=%d, PROMPT LENGTH: %d", 
         bool(startup_thinking), bool(middle_thinking), bool(final_thinking), len(process_context), len(formatted_prompt))
-    # logger.info("[NEO_LOG] [generate_enhanced_report] START, PROMPT LENGTH: %d, %s", len(formatted_prompt), formatted_prompt)
-    result = llm.invoke(formatted_prompt)
+    # logger.info("[NEO_LOG] [generate_enhanced_report 输出报告] START, PROMPT LENGTH: %d, %s", len(formatted_prompt), formatted_prompt)
+    try:
+        result = llm.invoke(formatted_prompt)
+    except Exception as e:
+        logger.error("[NEO_LOG] [generate_enhanced_report 输出报告] failed reason: %s", str(e))
+        result = AIMessage(content="你好")
     
     # Post-process: collapse overly long separators to max length 100
     try:
@@ -3420,7 +3437,7 @@ def generate_enhanced_report(state: OverallState, config: RunnableConfig) -> Ove
         # Be resilient: if anything goes wrong, skip sanitization without failing the flow
         pass
     
-    logger.info("[NEO_LOG] [generate_enhanced_report] FINISHED, LENGTH: %d, %s", len(result.content), result.content[:5000])
+    logger.info("[NEO_LOG] [generate_enhanced_report 输出报告] FINISHED, LENGTH: %d, %s", len(result.content), result.content[:5000])
     
     # 获取现有消息并追加新的AI回复
     existing_messages = state.get("messages", [])

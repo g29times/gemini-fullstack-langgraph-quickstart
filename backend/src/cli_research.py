@@ -61,26 +61,24 @@ def build_conversation_history(args) -> List[Any]:
 
 # 可能失败原因：VPN，APIKEY
 # 酒旅 餐饮 潮玩 广东 长三角
-# 查三轮 python backend/src/cli_research.py --max-concurrency 4 --auto-approve "最近有哪些广东地区的酒旅相关的项目"
-# 查一轮（优先）python backend/src/cli_research.py --max-concurrency 4 --max-loops 1 --auto-approve "最近有哪些广东地区的酒旅相关的项目"
+
 # 1. 简单追问（命令行参数）
-# python backend/src/cli_research.py \
-#   --prev-question "CCD近三年在大湾区做了哪些高端酒店项目？" \
-#   --prev-answer "...报告内容..." \
-#   --auto-approve \
-#   "那CCD在广东做了哪些高端住宅项目？"
+# python backend/src/cli_research.py --max-concurrency 4 --max-loops 1 \
+#   --prev-question "最近有哪些项目？" --prev-answer "...报告内容..." \
+#   --auto-approve "那CCD在广东做了哪些高端住宅项目？"
 
 # # 2. 复杂追问（JSON 文件）
-# python backend/src/cli_research.py \
-#   --history-json conversation_history_example.json \
-#   --auto-approve \
-#   "那CCD在广东做了哪些高端住宅项目？"
+# python backend/src/cli_research.py --max-concurrency 4 --max-loops 1 \
+#   --history-json src/conversation_history_example.json \
+#   --auto-approve "那CCD在广东做了哪些高端住宅项目？"
 
 # # 3. 首轮对话（无历史）
 # python backend/src/cli_research.py \
 #   --max-concurrency 4 \
 #   --auto-approve \
 #   "最近有哪些广东地区的酒旅相关的项目"
+# 查三轮 python backend/src/cli_research.py --max-concurrency 4 --auto-approve "最近有哪些广东地区的酒旅相关的项目"
+# 查一轮（优先）python backend/src/cli_research.py --max-concurrency 4 --max-loops 1 --auto-approve "最近有哪些广东地区的酒旅相关的项目"
 def main() -> None:
     """Run the research agent from the command line."""
     parser = argparse.ArgumentParser(description="Run the LangGraph research agent")
@@ -106,7 +104,7 @@ def main() -> None:
     parser.add_argument(
         "--max-loops",
         type=int,
-        default=3,
+        default=2,
         help="Maximum number of research loops",
     )
     parser.add_argument(
