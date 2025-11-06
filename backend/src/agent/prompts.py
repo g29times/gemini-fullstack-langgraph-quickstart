@@ -581,8 +581,8 @@ Assess objective completion, identify knowledge gaps, and compress [WEB]/[MEM] s
     "is_sufficient": true/false,  // true if overall_completion >= 0.8
     "knowledge_gap": "what's missing",  // REQUIRED if any objective < 1.0
     "follow_up_queries": ["query1", "query2"],  // 1-3 queries, MANDATORY if overall_completion < 0.7
-                                                 // Must be DISTINCT from past queries, include ≥1 constraint (time/region/site:/etc)
-    "compressed_web": "key facts <800 words",  // REQUIRED: trends, insights, statistics only
+                                                // Must be DISTINCT from past queries, include ≥1 constraint (time/region/site:/etc)
+    "compressed_web": "key facts <1600 words",  // REQUIRED: trends, insights, statistics, links only
     "compressed_mem": "user patterns <200 words"  // REQUIRED: preferences and historical context
 }}
 
@@ -636,13 +636,13 @@ thinking_startup_instructions = """你正处于研究的起步阶段，
 # thinking_middle_stage | Gemini 2.5 Flash (流程驱动深化) 0.5
 # 整理数据，但不格式化输出
 thinking_middle_instructions = """你正处于研究的中间阶段，
-请围绕研究主题，参考研究目标和研究方法以及收集到的信息和数据，进行深入思考。
-输出高度概括，保持与研究主题相同的语言，字数500字以内。
+请围绕研究主题，参考研究目标和研究方法以及收集到的信息和数据，进行思考梳理。
+输出语言简洁，高度概括，保持与研究主题相同的语言，字数500字以内。
 
 # 输出格式（JSON）：
 {{
     "stage_name": "middle_thinking",
-    "middle_thinking": "中间阶段的思考，500字以内"
+    "middle_thinking": "中间阶段的简洁思考，500字以内"
 }}
 
 当前日期：{current_date}
@@ -779,8 +779,7 @@ enhanced_report_instructions = """你是犀照科技的资深研究员，直接�
   # 数据展示
   [按照上述 表格格式 展示有效数据]
   - 按照地区经济发展程度排序，北上广深等发达地区靠前
-  - 如果有效数据不足，可以补充一些附近地区（优先北上广深）的项目。（比如：“推荐五个广州的项目” ，但只有三个广州的数据，可以补充两个广东省内其他城市如深圳的，并在“数据解读”部分予以说明）
-  - 严禁捏造数据、重复数据
+  - 严禁捏造数据、出现重复数据，禁止出现“某高端酒店”等模拟数据。
   
   # 研究报告
   ## 个性化解读
@@ -817,6 +816,14 @@ enhanced_report_instructions = """你是犀照科技的资深研究员，直接�
 
 ---
 
+**当前日期**: {current_date}
+**研究主题**: {research_topic}
+**用户背景**: {user_personalization_context}
+**收集到的数据**:
+{summaries}
+
+---
+
 ## 数据来源标签
 - [RAG]: 招投标数据库（结合问题和场景筛选有效数据，忽略无关数据）
 - [WEB]: 网络搜索
@@ -824,20 +831,13 @@ enhanced_report_instructions = """你是犀照科技的资深研究员，直接�
 
 ## 数据处理规则
 1. **展示数据**: 只展示有用数据 (主题需要 OR 用户要求)，理解数据来源标签，但不要在正文中提及这些标签
-2. **不展示数据**: 禁止在全文任何区域出现无效数据，如地区不匹配的数据，禁止编造数据！
-3. **结尾补充**: 若数据不足，结尾说明并引导进一步交流，说明时，只需说明没有收集到所需的数据，不要展示无效数据！
+2. **不展示数据**: 禁止出现无效数据、地区不匹配的数据、编造的数据
+3. **结尾补充**: 若数据不足，结尾说明并引导进一步交流，只需说明没有收集到所需的数据，不要展示无效数据！
 
 ## 特殊数据说明
 总承包/​EPC（设计-采购-施工）项目通常涵盖多种材料品类，值得关注。
 土方、混泥土、碎石/砂、外立面、幕墙属于建筑土建材料，一般不直接用在室内空间。
 
----
-
-**当前日期**: {current_date}
-**研究主题**: {research_topic}
-**用户背景**: {user_personalization_context}
-**收集到的数据**:
-{summaries}
 """
 
 
@@ -939,3 +939,67 @@ fallback_chat_mode_instructions = """你是一个友好的AI助手。用户的�
 3. 询问用户是否有其他问题
 
 保持对话自然、有帮助。如果用户后续提供了更具体的信息，我们可以进行更深入的研究。"""
+
+
+# LLM重排 llm_rerank_instructions | Gemini 2.5 Flash (RAG数据相关性评估与精选)
+llm_rerank_instructions = """你是一个地理数据筛选员。
+
+## 任务
+识别数据中的地理信息，包括：
+- 国家（如：中国/美国）
+- 地区（如：华东地区/上海浦东区）
+- 省份（如：上海/广东）
+- 城市（如：上海/广州）
+- 区县（如：浦东新区/天河区）
+- 详细地址（如：浦东新区川沙镇）
+- 无（如：无/未提及）
+从候选数据中，挑选出与用户问题匹配的数据，排除不匹配的数据，返回匹配的ID。如果所有数据都不匹配，返回空列表。
+
+### 1. 地点匹配度 (Location Match)
+- ✅ **地区匹配**：数据中包含用户需求的地区（如用户问题要"华东地区/上海浦东区"，数据中提到"上海"）
+- ❌ **不匹配**：数据中不包含用户需求的地区（如用户问题要"上海"，数据中提到"重庆"）
+
+---
+
+## 用户问题
+{research_topic}
+
+## 候选数据
+{rag_candidates}
+
+---
+
+## 输出格式
+```json
+{{
+  "selected_ids": ["id1", "id2", ...]
+}}
+```
+
+**注意**：
+- ID格式必须与候选数据中的ID完全一致
+- 只返回匹配的ID
+
+---
+
+## 示例
+```
+## 用户问题
+推荐几个上海的玻璃项目
+
+## 候选数据
+========== ID: 19426 ==========
+19426. 浦东新区川沙“城中村”
+- **地点**：上海市
+
+========== ID: 19222 ==========
+19222. 平桂黄金珠宝文化产业园项目
+- **地点**：贺州市平桂区
+```
+返回：
+```json
+{{
+  "selected_ids": ["19426"]
+}}
+```
+"""

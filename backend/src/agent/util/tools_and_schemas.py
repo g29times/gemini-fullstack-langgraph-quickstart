@@ -199,3 +199,10 @@ class FollowUpResponse(BaseModel):
     research_focus: str = Field(
         default="", description="Focus area for additional research."
     )
+
+
+class LLMRerankResult(BaseModel):
+    """Structured output for LLM-based reranking of RAG documents."""
+    selected_ids: List[str] = Field(
+        description="List of selected RAG document IDs (e.g., ['RAG-0', 'RAG-2', 'RAG-5']). Maximum 8 IDs."
+    )

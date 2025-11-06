@@ -40,6 +40,7 @@ from agent.prompts import (
     intent_clarification_instructions,
     entity_specificity_check_instructions,
     fallback_chat_mode_instructions,
+    llm_rerank_instructions,
 )
 
 from agent.api.voyage_rerank import create_voyage_reranker
@@ -63,6 +64,7 @@ from agent.util.tools_and_schemas import (
     ResearchPlan,
     ThinkingStage,
     FollowUpResponse,
+    LLMRerankResult,
 )
 from agent.util.rag_rerank import create_reranker
 from agent.util.utils import (
@@ -2138,7 +2140,7 @@ def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
         elif "timeout" in error_msg.lower() or "connection" in error_msg.lower():
             logger.warning("[NEO_LOG] [web_search] Detected network issue: %s", error_msg)
         sources_gathered, modified_text, cits = [], "[web_search error suppressed] " + error_msg, []
-    # Retry with secondary (original) if no sources gathered
+    # 再次查询
     if not sources_gathered and secondary_query:
         retry_start = time.time()
         # logger.debug("[NEO_LOG] [web_search] Starting secondary query: '%s' at %s", secondary_query, time.strftime('%H:%M:%S'))
@@ -2245,7 +2247,7 @@ def rag_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
             area=query_region if query_region else "",
             type=query_project_type if query_project_type else "",
             pids=state.get("former_ids", []),
-            timeout=int(getattr(configurable, "rag_rest_timeout", 5) or 5),
+            timeout=int(getattr(configurable, "rag_rest_timeout", 10) or 10),
             local_json=getattr(configurable, "rag_rest_local_json", "backend/examples/vendor_projects.json"),
             top_k=top_k,
             messages=user_origin_question
@@ -2462,7 +2464,7 @@ def mem_search(state: WebSearchState, config: RunnableConfig) -> OverallState:
     # logger.info("[NEO_LOG] [mem_search] MEM查询 START, id=%s: '%s'", node_id, original_query)
 
     # Timeout and retry configuration
-    timeout_seconds = float(getattr(configurable, 'mem_timeout', 5.0))
+    timeout_seconds = float(getattr(configurable, 'mem_timeout', 10))
     max_retries = int(getattr(configurable, 'mem_max_retries', 2))
     
     mem_results = []
@@ -2966,7 +2968,9 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
                     query = " ".join(queries)
                     query = research_topic + " " + query
                     # Call VoyageAI final rerank
-                    logger.info("[NEO_LOG] [reflection 反思] VoyageAI 重排前(已去重) origin=%d", len(documents))
+                    logger.info("[NEO_LOG] [reflection 反思] VoyageAI 重排前(已去重)分布: documents=%s", documents)
+                    # logger.info("[NEO_LOG] [reflection 反思] VoyageAI 重排前(已去重)分布: rag=%d, web=%d, mem=%d", 
+                    #     documents.count("rag"), documents.count("web"), documents.count("mem"))
                     voyage_result = voyage_reranker.rerank_documents(
                         query=query,
                         documents=documents,
@@ -3008,13 +3012,139 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
             else:
                 logger.info("[NEO_LOG] [reflection 反思] Not enough sources for final merge rerank")
                 sources_reranked = combined_sources[:16]
-                
         except Exception as e:
             logger.warning("[NEO_LOG] [reflection 反思] Final merge reranking failed: %s", e)
             # Fallback: use original sources
             sources_reranked = combined_sources[:16]
             reflection_rerank_meta = {'error': str(e)}
-    
+    else: 
+        # 使用LLM进行重排
+        try:
+            import json
+            
+            # 获取所有候选数据
+            combined_sources = state.get("web_research_result", []) or []
+            
+            # 去重：基于 text 字段
+            logger.info("[NEO_LOG] [reflection 反思] 去重前: documents=%d", len(combined_sources))
+            seen_texts = set()
+            deduped_sources = []
+            for item in combined_sources:
+                text = item.get("text") if isinstance(item, dict) else item
+                if text and text not in seen_texts:
+                    seen_texts.add(text)
+                    deduped_sources.append(item)
+            combined_sources = deduped_sources
+            logger.info("[NEO_LOG] [reflection 反思] 去重后: documents=%d", len(combined_sources))
+            
+            # 步骤1: 按类型分离数据源
+            web_sources = [s for s in combined_sources if isinstance(s, dict) and s.get("type") == "web"]
+            mem_sources = [s for s in combined_sources if isinstance(s, dict) and s.get("type") == "mem"]
+            rag_sources = [s for s in combined_sources if isinstance(s, dict) and s.get("type") == "rag"]
+            
+            # logger.info("[NEO_LOG] [reflection 反思] LLM重排前数据分布: web=%d, mem=%d, rag=%d, test=%s", 
+            #            len(web_sources), len(mem_sources), len(rag_sources), rag_sources)
+            # 步骤2: Web/Mem 直接保留
+            web_kept = web_sources
+            mem_kept = mem_sources
+            
+            # 步骤3: RAG 候选集格式化（提取原始ID）
+            rag_candidates_text = []
+            rag_id_map = {}  # 映射：原始ID -> rag_item
+            
+            for idx, rag_item in enumerate(rag_sources):
+                text = rag_item.get("text", "")
+                
+                # 从 text 开头提取 ID（格式："19426. 项目名称..."）
+                import re
+                match = re.match(r'^(\d+)\.\s', text)
+                if match:
+                    original_id = match.group(1)
+                    rag_id_map[original_id] = rag_item
+                    # 格式：使用分隔符 + 原始文本（保持清晰）
+                    rag_candidates_text.append(f"========== ID: {original_id} ==========\n{text[:800]}")
+                else:
+                    # Fallback: 如果没有匹配到ID，使用索引
+                    fallback_id = f"RAG-{idx}"
+                    rag_id_map[fallback_id] = rag_item
+                    rag_candidates_text.append(f"========== ID: {fallback_id} ==========\n{text[:800]}")
+            
+            rag_candidates_str = "\n\n".join(rag_candidates_text)
+            
+            # 步骤4: 如果有RAG数据，调用LLM进行重排
+            rag_selected = []
+            if rag_sources:
+                # 获取研究主题和查询关键词
+                research_topic = get_research_topic(state.get("messages", []))
+                queries = state.get("current_queries") or state.get("search_query", [])
+                current_queries_str = ", ".join(queries) if queries else research_topic
+                
+                # 构建提示词
+                formatted_prompt = llm_rerank_instructions.format(
+                    research_topic=research_topic,
+                    current_queries=current_queries_str,
+                    rag_candidates=rag_candidates_str
+                )
+                
+                logger.info("[NEO_LOG] [reflection 反思] LLM重排开始: rag_candidates=%d, prompt_length=%d", 
+                           len(rag_sources), len(formatted_prompt))
+                
+                # 调用LLM（使用 query_generator_model: gemini-2.5-flash-lite）
+                try:
+                    # 创建 LLM 实例并使用结构化输出
+                    llm = ChatGoogleGenerativeAI(
+                        model=reasoning_model,
+                        temperature=0.2,
+                        max_retries=2,
+                        api_key=os.getenv("GEMINI_API_KEY"),
+                    )
+                    structured_llm = llm.with_structured_output(LLMRerankResult)
+                    
+                    # 调用结构化输出
+                    result = structured_llm.invoke(formatted_prompt)
+                    selected_ids = result.selected_ids if hasattr(result, 'selected_ids') else []
+                    
+                    logger.info("[NEO_LOG] [reflection 反思] LLM重排返回: selected_ids=%s", selected_ids)
+                    
+                    # 步骤5: 根据原始ID筛选RAG数据
+                    for rag_id in selected_ids:
+                        try:
+                            # 直接从映射表查找（支持原始ID如 "19426" 或 fallback ID如 "RAG-0"）
+                            if isinstance(rag_id, str) and rag_id in rag_id_map:
+                                rag_selected.append(rag_id_map[rag_id])
+                            else:
+                                logger.warning("[NEO_LOG] [reflection 反思] 未找到RAG ID: %s", rag_id)
+                        except Exception as e:
+                            logger.warning("[NEO_LOG] [reflection 反思] 解析RAG ID失败: %s, error=%s", rag_id, e)
+                            continue
+                    
+                except Exception as e:
+                    logger.warning("[NEO_LOG] [reflection 反思] LLM重排调用失败: %s, 使用全部RAG数据", e)
+                    # Fallback: 使用全部RAG数据
+                    rag_selected = rag_sources
+            
+            # 步骤6: 合并最终结果
+            sources_reranked = web_kept + mem_kept + rag_selected
+            
+            reflection_rerank_meta = {
+                'method': 'llm_rerank',
+                'web_count': len(web_kept),
+                'mem_count': len(mem_kept),
+                'rag_origin_count': len(rag_sources),
+                'rag_selected_count': len(rag_selected),
+                'final_count': len(sources_reranked)
+            }
+            
+            logger.info("[NEO_LOG] [reflection 反思] LLM重排完成: web=%d, mem=%d, rag=%d/%d, final=%d",
+                       len(web_kept), len(mem_kept), len(rag_selected), len(rag_sources), len(sources_reranked))
+            
+        except Exception as e:
+            logger.warning("[NEO_LOG] [reflection 反思] LLM重排失败: %s, 使用原始数据", e)
+            # Fallback: 使用原始数据
+            combined_sources = state.get("web_research_result", []) or []
+            sources_reranked = combined_sources
+            reflection_rerank_meta = {'method': 'llm_rerank', 'error': str(e)}
+
     # 3. 按来源类型构造分段 summaries（Web/Mem 合并 + RAG 原文）
     # 使用 sources_reranked（dict items）而非提取后的纯文本，以保留 type 信息
     type_counts = {"rag": 0, "web": 0, "mem": 0, "str": 0}
@@ -3033,13 +3163,14 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
             max_items=16,
             max_chars=40000
         )
-        logger.info("[NEO_LOG] [reflection 反思] sources_reranked type distribution: rag=%d, web=%d, mem=%d",
-                   type_counts.get("rag", 0), type_counts.get("web", 0), type_counts.get("mem", 0))
+        logger.info("[NEO_LOG] [reflection 反思] 重排后分布: rag=%d, web=%d, mem=%d",
+                type_counts.get("rag", 0), type_counts.get("web", 0), type_counts.get("mem", 0))
         # logger.info("[NEO_LOG] [reflection 反思] summaries_text preview: %s", summaries_text[:500] + "..." if len(summaries_text) > 500 else summaries_text)
     else:
         # Fallback: 使用原始 safe_results（已提取文本）
         summaries_text = _prepare_summaries(safe_results)
-        logger.info("[NEO_LOG] [reflection 反思] Using fallback summaries (no reranked sources)")
+        logger.info("[NEO_LOG] [reflection 反思] Using fallback summaries (no reranked sources) type distribution: rag=%d, web=%d, mem=%d", 
+                type_counts.get("rag", 0), type_counts.get("web", 0), type_counts.get("mem", 0))
         
     # 组装LLM提示词并调用结构化输出
     formatted_prompt = reflection_instructions.format(

@@ -44,13 +44,13 @@ class Configuration(BaseModel):
     #     },
     # )
     query_generator_model: str = Field(
-        default="gemini-2.5-flash-lite",
+        default="gemini-flash-lite-latest",
         metadata={
             "description": "Our smallest and most cost effective model, built for at scale usage."
         },
     )
     thinking_model: str = Field(
-        default="gemini-2.5-flash",
+        default="gemini-flash-latest",
         metadata={
             "description": "Our hybrid reasoning model, with a 1M token context window and thinking budgets."
         },
@@ -238,7 +238,7 @@ class Configuration(BaseModel):
         },
     )
     rag_rest_timeout: int = Field(
-        default=5,
+        default=10,
         metadata={
             "description": "HTTP timeout (seconds) for RAG REST calls.",
         },
@@ -292,7 +292,7 @@ class Configuration(BaseModel):
 
     # 3 Memory Search configuration
     mem_timeout: int = Field(
-        default=5,
+        default=10,
         metadata={
             "description": "Timeout in seconds for memory search API calls (mock delay)."
         },
@@ -382,7 +382,7 @@ class Configuration(BaseModel):
     )
     # 是否启用 VoyageAI 重排
     enable_voyage_rerank: bool = Field(
-        default=True,
+        default=False,
         metadata={
             "description": "Enable VoyageAI API for advanced document reranking (requires API key)."
         },
